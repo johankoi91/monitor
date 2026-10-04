@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>音视频运维监控管理系统</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">AV</span>
+          <div>
+            <strong>音视频运维中心</strong>
+            <small>RTC / RTM Operations</small>
+          </div>
+        </div>
+
+        <div class="site-switcher">
+          <span>当前站点</span>
+          <button type="button" id="site-menu">客户生产环境 <span>⌄</span></button>
+        </div>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="overview"><span class="nav-icon">▦</span>运行总览</button>
+          <button class="nav-item" data-view="services"><span class="nav-icon">≡</span>服务监控</button>
+          <button class="nav-item" data-view="incidents"><span class="nav-icon">!</span>异常事件<span class="nav-count">2</span></button>
+          <button class="nav-item" data-view="operations"><span class="nav-icon">↻</span>运维操作</button>
+          <button class="nav-item" data-view="baseline"><span class="nav-icon">⌘</span>服务基线</button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="api-indicator"><i></i><span>状态 API 正常</span></div>
+          <div class="sidebar-meta">演示环境 · 模拟数据</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="breadcrumb">客户生产环境 / <span id="breadcrumb-current">运行总览</span></p>
+            <h1 id="page-title">运行总览</h1>
+          </div>
+          <div class="topbar-actions">
+            <label class="auto-refresh"><input type="checkbox" checked /><span></span>自动刷新</label>
+            <span class="last-sync">最近采集 <strong id="last-sync">10:30:12</strong></span>
+            <button type="button" class="icon-btn" id="refresh-btn" title="刷新状态" aria-label="刷新状态">↻</button>
+          </div>
+        </header>
+
+        <section class="view active" id="view-overview">
+          <div class="incident-banner">
+            <div class="incident-severity">P0</div>
+            <div class="incident-copy">
+              <strong>RTM Core Forwarder 节点缺失</strong>
+              <span>rtm-zw · 10.244.17.218 / forwarder3 · 已持续 18 分钟</span>
+            </div>
+            <button type="button" class="text-btn" data-jump="incidents">查看事件</button>
+          </div>
+
+          <div class="summary-strip">
+            <div class="summary-primary">
+              <span class="summary-label">全局运行状态</span>
+              <div class="status-title"><i class="status-dot degraded"></i><strong>部分异常</strong></div>
+              <p>2 个节点需要处理，RTC 主链路可用，RTM 降级运行</p>
+            </div>
+            <div class="metric"><span>逻辑服务</span><strong id="summary-services">0</strong><small id="summary-products">-</small></div>
+            <div class="metric"><span>应有节点</span><strong id="summary-expected">0</strong><small id="summary-discovered">-</small></div>
+            <div class="metric success"><span>正常节点</span><strong id="summary-healthy">0</strong><small id="summary-health-rate">-</small></div>
+            <div class="metric danger"><span>异常 / 未知</span><strong id="summary-problem">0 / 0</strong><small>2 个未恢复</small></div>
+          </div>
+
+          <div class="product-band">
+            <button class="product-summary" type="button" data-product-filter="RTC">
+              <span class="product-code rtc">RTC</span>
+              <span><strong>实时音视频</strong><small id="rtc-summary-detail">-</small></span>
+              <span class="inline-status healthy"><i></i>运行正常</span>
+              <span class="product-count" id="rtc-summary-count">-</span>
+            </button>
+            <button class="product-summary" type="button" data-product-filter="RTM">
+              <span class="product-code rtm">RTM</span>
+              <span><strong>实时消息</strong><small id="rtm-summary-detail">-</small></span>
+              <span class="inline-status degraded"><i></i>部分异常</span>
+              <span class="product-count" id="rtm-summary-count">-</span>
+            </button>
+          </div>
+
+          <div class="content-grid">
+            <section class="surface span-2">
+              <div class="surface-head">
+                <div><h2>关键服务状态</h2><p>按应有节点基线聚合</p></div>
+                <button type="button" class="text-btn" data-jump="services">全部服务</button>
+              </div>
+              <div id="overview-service-table"></div>
+            </section>
+
+            <section class="surface">
+              <div class="surface-head">
+                <div><h2>当前异常</h2><p>2 个未恢复事件</p></div>
+                <button type="button" class="text-btn" data-jump="incidents">事件中心</button>
+              </div>
+              <div id="overview-incidents" class="incident-list"></div>
+            </section>
+
+            <section class="surface">
+              <div class="surface-head">
+                <div><h2>状态接口</h2><p>客户监控平台最近调用</p></div>
+                <span class="inline-status healthy"><i></i>正常</span>
+              </div>
+              <div class="api-panel">
+                <code>GET /api/v1/services/status</code>
+                <dl>
+                  <div><dt>最近请求</dt><dd>10:30:09</dd></div>
+                  <div><dt>P95 延迟</dt><dd>48 ms</dd></div>
+                  <div><dt>轮询来源</dt><dd>10.244.17.32</dd></div>
+                  <div><dt>返回状态</dt><dd class="warning-text">DEGRADED</dd></div>
+                </dl>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" id="view-services">
+          <div class="toolbar">
+            <div class="segmented" id="product-filter">
+              <button class="active" data-product="ALL">全部</button>
+              <button data-product="RTC">RTC</button>
+              <button data-product="RTM">RTM</button>
+            </div>
+            <label class="search-field"><span>⌕</span><input id="service-search" placeholder="搜索服务、主机或容器" /></label>
+            <select id="status-filter" aria-label="状态筛选">
+              <option value="ALL">全部状态</option>
+              <option value="HEALTHY">正常</option>
+              <option value="DEGRADED">部分异常</option>
+              <option value="UNHEALTHY">异常</option>
+              <option value="UNKNOWN">未知</option>
+            </select>
+          </div>
+
+          <section class="surface table-surface">
+            <div class="table-title-row">
+              <div><h2>服务与节点</h2><p id="service-result-count">18 个逻辑服务</p></div>
+              <div class="legend"><span><i class="status-dot healthy"></i>正常</span><span><i class="status-dot degraded"></i>部分异常</span><span><i class="status-dot unknown"></i>未知</span></div>
+            </div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>产品 / 集群</th><th>逻辑服务</th><th>状态</th><th>应有</th><th>发现</th><th>正常</th><th>异常</th><th>检查层级</th><th>最近采集</th></tr></thead><tbody id="service-table-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-incidents">
+          <div class="section-tabs">
+            <button class="active" data-incident-state="OPEN">未恢复 <span>2</span></button>
+            <button data-incident-state="RESOLVED">已恢复 <span>3</span></button>
+            <button data-incident-state="ALL">全部</button>
+          </div>
+          <section class="surface table-surface">
+            <div class="table-title-row"><div><h2>异常事件</h2><p>状态变化自动生成并持续追踪</p></div><button type="button" class="secondary-btn" id="export-incidents">导出记录</button></div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>级别</th><th>状态</th><th>产品 / 集群</th><th>服务与节点</th><th>原因</th><th>开始时间</th><th>持续时间</th></tr></thead><tbody id="incident-table-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-operations">
+          <div class="operation-summary">
+            <div><span>今日操作</span><strong id="operation-total">0</strong></div>
+            <div><span>执行成功</span><strong class="success-text" id="operation-success">0</strong></div>
+            <div><span>执行失败</span><strong id="operation-failed">0</strong></div>
+            <div><span>进行中</span><strong class="warning-text" id="operation-running">0</strong></div>
+          </div>
+          <section class="surface table-surface">
+            <div class="table-title-row"><div><h2>运维操作记录</h2><p>重启操作全过程留痕</p></div></div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>操作编号</th><th>状态</th><th>目标节点</th><th>操作人 / 原因</th><th>开始时间</th><th>耗时</th><th>操作后状态</th></tr></thead><tbody id="operation-table-body"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-baseline">
+          <div class="baseline-notice">
+            <div><strong>基线版本 production-2026.09.14</strong><span>最近校验：今天 10:22 · 配置有效</span></div>
+            <button type="button" class="secondary-btn" id="validate-baseline">重新校验</button>
+          </div>
+          <section class="surface table-surface">
+            <div class="table-title-row"><div><h2>应有节点基线</h2><p>容器缺失时仍保留节点并产生异常</p></div><button type="button" class="primary-btn" id="add-node">新增节点</button></div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>节点 ID</th><th>产品 / 集群</th><th>服务</th><th>宿主机</th><th>容器名</th><th>探测规则</th><th>允许重启</th></tr></thead><tbody id="baseline-table-body"></tbody></table></div>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+    <aside class="detail-drawer" id="detail-drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <div><span class="drawer-kicker" id="drawer-kicker">RTM · rtm-zw</span><h2 id="drawer-title">节点详情</h2></div>
+        <button type="button" class="icon-btn" id="drawer-close" aria-label="关闭详情">×</button>
+      </div>
+      <div id="drawer-content"></div>
+    </aside>
+
+    <div class="modal-backdrop" id="restart-modal" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restart-title">
+        <div class="modal-head"><div><span class="modal-kicker">高影响运维操作</span><h2 id="restart-title">重启容器</h2></div><button type="button" class="icon-btn" id="restart-close">×</button></div>
+        <div class="impact-box"><span>目标节点</span><strong id="restart-target">-</strong><small id="restart-impact">重启期间节点会短暂不可用</small></div>
+        <form id="restart-form">
+          <input type="hidden" id="restart-node-id" />
+          <label>操作人<input id="restart-operator" value="韩小青" required /></label>
+          <label>重启原因<textarea id="restart-reason" rows="3" placeholder="请填写故障现象和重启原因" required></textarea></label>
+          <label class="confirm-check"><input type="checkbox" id="restart-confirm" required /><span>已确认当前没有并行维护操作，并了解该节点会短暂不可用</span></label>
+          <div class="modal-actions"><button type="button" class="secondary-btn" id="restart-cancel">取消</button><button type="submit" class="danger-btn">提交重启</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

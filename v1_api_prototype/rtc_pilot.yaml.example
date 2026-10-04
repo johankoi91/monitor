@@ -1,0 +1,29 @@
+# RTC 首期服务目录模板。两机地址来自用户确认，具体节点必须按实际 Docker 清单补齐。
+# RTC/Agent: 111.230.192.59
+# 中心/API/UI/Demo: 111.230.108.76
+# nodes 为空表示尚未建立节点基线，应返回 UNKNOWN，不能作为已纳管或已验收配置。
+# 填入节点时使用精确容器名；核心单点 restart_enabled 默认 false，研发确认后开放。
+schema_version: 1
+site:
+  code: rtc-pilot
+  name: RTC 监控试点
+clusters:
+  - code: rtc-pilot
+    name: RTC 首期试点
+    product: RTC
+    services:
+      - code: rtc-ap
+        name: RTC AP
+        nodes: []
+      - code: rtc-balancer
+        name: RTC Balancer
+        nodes: []
+      - code: rtc-native-edge-udp
+        name: RTC Native Edge UDP
+        nodes: []
+      - code: rtc-native-edge-aut
+        name: RTC Native Edge AUT
+        nodes: []
+      - code: rtc-web-edge
+        name: RTC Web Edge
+        nodes: []

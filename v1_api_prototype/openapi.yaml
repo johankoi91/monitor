@@ -1,0 +1,512 @@
+openapi: 3.0.3
+info:
+  title: RTC 试点运维监控 API
+  version: 1.0.0
+  description: |
+    面向客户监控平台与可运行 Demo 的 RTC 首期目标接口契约，RTM 后续接入。
+    业务节点异常时状态查询仍返回 HTTP 200，由响应体中的状态字段表达异常。
+    PRD V0.6 已确认 HTTP Basic Auth、轮询及单 HTTP/HTTPS 通知地址、单中心与可运行 Demo。
+    鉴权格式为 Authorization: Basic Base64(接入ID:密钥)，使用本系统自有配置凭证。
+    本机 Mock 不提供正式鉴权和可靠持久化，不能作为生产或安全验收环境。
+servers:
+  - url: http://127.0.0.1:18083
+    description: 本地 Mock Server
+
+security:
+  - BasicAuth: []
+
+x-outbound-notification:
+  description: 中心向部署配置中唯一的 HTTP/HTTPS 接收地址发送状态变化 JSON；本字段不声明中心的入站 API。
+  method: POST
+  target: notifications.url
+  contentType: application/json
+  schema:
+    $ref: "#/components/schemas/NotificationPayload"
+  receiverSuccess: HTTP 2xx
+  retry: 同一事件重试保持 event_id，不转发中心 API 或 Agent 的鉴权凭证。
+
+tags:
+  - name: System
+    description: 中心服务自身状态
+  - name: Status
+    description: RTC/RTM 状态查询
+  - name: Operations
+    description: 受控运维操作
+
+paths:
+  /health/live:
+    get:
+      tags: [System]
+      summary: 进程存活检查
+      operationId: getLiveness
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: 中心服务进程正常
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemHealth"
+
+  /health/ready:
+    get:
+      tags: [System]
+      summary: 服务就绪检查
+      operationId: getReadiness
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: 配置已加载，服务可以接收请求
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemHealth"
+        "503":
+          description: 服务尚未就绪
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /version:
+    get:
+      tags: [System]
+      summary: 查询服务版本
+      operationId: getVersion
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: 版本信息
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, api_version]
+                properties:
+                  version:
+                    type: string
+                    example: 1.0.0
+                  api_version:
+                    type: string
+                    example: v1
+
+  /api/v1/services/status:
+    get:
+      tags: [Status]
+      summary: 查询 RTC/RTM 服务与节点状态
+      operationId: listServiceStatus
+      parameters:
+        - name: service_code
+          in: query
+          description: 逻辑服务编码筛选
+          schema:
+            type: string
+            example: rtm-core-forwarder
+        - name: status
+          in: query
+          description: 服务聚合状态筛选
+          schema:
+            $ref: "#/components/schemas/HealthStatus"
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: 最新缓存状态。节点异常仍返回 200。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+              examples:
+                degraded:
+                  value:
+                    code: 0
+                    message: OK
+                    request_id: c767e233c6534bd8
+                    generated_at: "2026-09-14T10:30:15+08:00"
+                    services:
+                      - service_code: rtm-core-forwarder
+                        service_name: RTM Core Forwarder
+                        status: DEGRADED
+                        expected_node_count: 2
+                        discovered_node_count: 1
+                        healthy_node_count: 1
+                        unhealthy_node_count: 1
+                        unknown_node_count: 0
+                        nodes:
+                          - node_id: rtm-zw-01/forwarder0
+                            host_name: rtm-zw-01
+                            host_address: 10.244.17.218
+                            container_name: forwarder0
+                            image: rtm/forwarder:2.2.4
+                            status: HEALTHY
+                            runtime_status: running
+                            check_level: READINESS
+                            reason_code: OK
+                            reason: 容器运行且端口检查通过
+                            restart_count: 0
+                            restart_enabled: true
+                            collected_at: "2026-09-14T10:30:12+08:00"
+                            stale: false
+        "400":
+          description: 查询参数不合法
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/operations/restart:
+    post:
+      tags: [Operations]
+      summary: 异步重启一个已纳管容器
+      description: |
+        仅允许重启 services.yaml 中 restart_enabled=true 的节点。
+        V1.0 不区分用户角色，operator 仅作为审计信息，不参与权限判断。
+      operationId: createRestartOperation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestartRequest"
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "202":
+          description: 重启任务已创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationAcceptedResponse"
+        "400":
+          description: 请求字段不完整
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: 节点不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: 节点不可重启、状态不允许或重复请求
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/operations/{operation_id}:
+    get:
+      tags: [Operations]
+      summary: 查询单次操作结果
+      operationId: getOperation
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: OP-20260914-001
+      responses:
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "200":
+          description: 操作详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        "404":
+          description: 操作不存在
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  securitySchemes:
+    BasicAuth:
+      type: http
+      scheme: basic
+      description: 本系统配置的接入 ID/密钥；管理 API 经 HTTPS 使用，不引入个人用户角色。
+  responses:
+    Unauthorized:
+      description: Basic Auth 缺失、格式错误或 ID/密钥不匹配。
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Basic realm="avops", charset="UTF-8"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    NotificationPayload:
+      type: object
+      required: [event_id, event_type, occurred_at, product, cluster, service_code, previous_status, current_status, reason_code, reason, collected_at, stale]
+      properties:
+        event_id:
+          type: string
+          description: 同一状态变化及其重试的唯一 ID，供接收方去重。
+        event_type:
+          type: string
+          enum: [STATUS_CHANGED]
+        occurred_at:
+          type: string
+          format: date-time
+        product:
+          type: string
+          enum: [RTC]
+        cluster:
+          type: string
+          example: rtc-pilot
+        service_code:
+          type: string
+          example: rtc-ap
+        node_id:
+          type: string
+          description: 节点事件提供节点 ID，服务聚合事件可以不提供。
+        previous_status:
+          $ref: "#/components/schemas/HealthStatus"
+        current_status:
+          $ref: "#/components/schemas/HealthStatus"
+        reason_code:
+          type: string
+        reason:
+          type: string
+        collected_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Agent 失联且从未获得有效采集时可以为空，不以响应时间冒充。
+        stale:
+          type: boolean
+    HealthStatus:
+      type: string
+      enum: [HEALTHY, DEGRADED, UNHEALTHY, UNKNOWN]
+
+    CheckLevel:
+      type: string
+      description: AGENT/CONTAINER/READINESS 为 V1.0 层级，BLACKBOX 由 V1.1 黑盒探针使用。
+      enum: [AGENT, CONTAINER, READINESS, BLACKBOX]
+
+    RuntimeStatus:
+      type: string
+      enum: [running, exited, restarting, paused, dead, missing, unknown]
+
+    SystemHealth:
+      type: object
+      required: [status, checked_at]
+      properties:
+        status:
+          type: string
+          enum: [UP, READY]
+        checked_at:
+          type: string
+          format: date-time
+
+    NodeStatus:
+      type: object
+      required:
+        - node_id
+        - host_name
+        - host_address
+        - container_name
+        - status
+        - runtime_status
+        - check_level
+        - reason_code
+        - reason
+        - restart_count
+        - restart_enabled
+        - collected_at
+        - stale
+      properties:
+        node_id:
+          type: string
+        host_name:
+          type: string
+        host_address:
+          type: string
+        container_name:
+          type: string
+        image:
+          type: string
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        runtime_status:
+          $ref: "#/components/schemas/RuntimeStatus"
+        check_level:
+          $ref: "#/components/schemas/CheckLevel"
+        reason_code:
+          type: string
+          enum:
+            - OK
+            - AGENT_OFFLINE
+            - STATUS_STALE
+            - CONTAINER_MISSING
+            - CONTAINER_EXITED
+            - CONTAINER_RESTARTING
+            - DOCKER_HEALTH_UNHEALTHY
+            - TCP_CHECK_FAILED
+        reason:
+          type: string
+        restart_count:
+          type: integer
+          minimum: 0
+        restart_enabled:
+          type: boolean
+        collected_at:
+          type: string
+          format: date-time
+        stale:
+          type: boolean
+
+    ServiceStatus:
+      type: object
+      required:
+        - service_code
+        - service_name
+        - status
+        - expected_node_count
+        - discovered_node_count
+        - healthy_node_count
+        - unhealthy_node_count
+        - unknown_node_count
+        - nodes
+      properties:
+        service_code:
+          type: string
+        service_name:
+          type: string
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        expected_node_count:
+          type: integer
+        discovered_node_count:
+          type: integer
+        healthy_node_count:
+          type: integer
+        unhealthy_node_count:
+          type: integer
+        unknown_node_count:
+          type: integer
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeStatus"
+
+    StatusResponse:
+      type: object
+      required: [code, message, request_id, generated_at, services]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: OK
+        request_id:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceStatus"
+
+    RestartRequest:
+      type: object
+      required: [node_id, operator, reason, request_key]
+      properties:
+        node_id:
+          type: string
+          example: rtm-zw-01/forwarder0
+        operator:
+          type: string
+          minLength: 1
+        reason:
+          type: string
+          minLength: 2
+          maxLength: 500
+        request_key:
+          type: string
+          minLength: 1
+          maxLength: 128
+
+    Operation:
+      type: object
+      required: [operation_id, request_key, type, status, node_id, operator, reason, requested_at]
+      properties:
+        operation_id:
+          type: string
+        request_key:
+          type: string
+        type:
+          type: string
+          enum: [RESTART_CONTAINER]
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, REJECTED]
+        node_id:
+          type: string
+        operator:
+          type: string
+        reason:
+          type: string
+        requested_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        duration_ms:
+          type: integer
+        before_status:
+          $ref: "#/components/schemas/HealthStatus"
+        after_status:
+          allOf:
+            - $ref: "#/components/schemas/HealthStatus"
+          nullable: true
+        message:
+          type: string
+
+    OperationAcceptedResponse:
+      type: object
+      required: [code, message, request_id, operation]
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        request_id:
+          type: string
+        operation:
+          $ref: "#/components/schemas/Operation"
+
+    OperationResponse:
+      allOf:
+        - $ref: "#/components/schemas/OperationAcceptedResponse"
+
+    ErrorResponse:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          example: NODE_NOT_RESTARTABLE
+        message:
+          type: string
+        request_id:
+          type: string

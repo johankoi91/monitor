@@ -1,0 +1,44 @@
+# OS/editor files
+.DS_Store
+._*
+.idea/
+.vscode/
+
+# Credentials, certificates and private keys are provisioned separately.
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+id_rsa*
+id_ed25519*
+*ed25519
+receiver-curl.conf
+
+# Runtime data and logs
+**/data/
+*.jsonl
+*.log
+*.pid
+
+# Build output and dependencies
+node_modules/
+dist/
+build/
+/notification_receiver/notification-receiver
+/notification_receiver/avops_notification_receiver
+/v1_api_prototype/mockserver
+
+# Offline delivery archives and original recordings
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.mp4
+*.mov
+*.m4a
+*.wav

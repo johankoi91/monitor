@@ -1,0 +1,26 @@
+[Unit]
+Description=RTC pilot HTTPS notification receiver
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=avops-notify
+Group=avops-notify
+WorkingDirectory=/opt/avops-notification-receiver
+EnvironmentFile=/etc/avops-notification-receiver/receiver.env
+ExecStart=/opt/avops-notification-receiver/notification-receiver
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/avops-notification-receiver
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

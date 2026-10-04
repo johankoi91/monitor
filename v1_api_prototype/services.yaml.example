@@ -1,0 +1,107 @@
+schema_version: 1
+site:
+  code: customer-production
+  name: 客户生产环境
+
+clusters:
+  - code: rtc-zw
+    name: RTC 政务集群
+    product: RTC
+    services:
+      - code: rtc-ap
+        name: RTC AP
+        nodes:
+          - id: rtc-zw-edge-01/agora_local_ap
+            agent_id: rtc-zw-edge-01
+            host_name: rtc-zw-edge-01
+            host_address: 10.244.17.180
+            container_name: agora_local_ap
+            restart_enabled: false
+            checks:
+              - type: tcp
+                host: 127.0.0.1
+                port: 443
+                timeout_ms: 2000
+      - code: rtc-native-edge-udp
+        name: RTC Native Edge UDP
+        nodes:
+          - id: rtc-zw-edge-01/agora_udp_media_edge_1
+            agent_id: rtc-zw-edge-01
+            host_name: rtc-zw-edge-01
+            host_address: 10.244.17.180
+            container_name: agora_udp_media_edge_1
+            restart_enabled: true
+            checks: []
+      - code: rtc-web-edge
+        name: RTC Web Edge
+        nodes:
+          - id: rtc-zw-edge-01/agora_web_media_edge_1
+            agent_id: rtc-zw-edge-01
+            host_name: rtc-zw-edge-01
+            host_address: 10.244.17.180
+            container_name: agora_web_media_edge_1
+            restart_enabled: true
+            checks:
+              - type: tcp
+                host: 127.0.0.1
+                port: 4501
+                timeout_ms: 2000
+
+  - code: rtm-zw
+    name: RTM 政务集群
+    product: RTM
+    services:
+      - code: rtm-core-forwarder
+        name: RTM Core Forwarder
+        nodes:
+          - id: rtm-zw-01/forwarder0
+            agent_id: rtm-zw-01
+            host_name: rtm-zw-01
+            host_address: 10.244.17.218
+            container_name: forwarder0
+            restart_enabled: true
+            checks:
+              - type: tcp
+                host: 127.0.0.1
+                port: 18011
+                timeout_ms: 2000
+          - id: rtm-zw-01/forwarder1
+            agent_id: rtm-zw-01
+            host_name: rtm-zw-01
+            host_address: 10.244.17.218
+            container_name: forwarder1
+            restart_enabled: true
+            checks:
+              - type: tcp
+                host: 127.0.0.1
+                port: 18012
+                timeout_ms: 2000
+      - code: rtm-edge-registrar
+        name: RTM Edge Registrar
+        nodes:
+          - id: rtm-zw-01/registrar0
+            agent_id: rtm-zw-01
+            host_name: rtm-zw-01
+            host_address: 10.244.17.218
+            container_name: registrar0
+            restart_enabled: true
+            checks: []
+
+  - code: rtm-sync
+    name: RTM Sync 集群
+    product: RTM
+    services:
+      - code: rtm-sync-promise
+        name: RTM Sync Promise
+        nodes:
+          - id: rtm-sync-01/crsync-sync-promise
+            agent_id: rtm-sync-01
+            host_name: rtm-sync-01
+            host_address: 172.31.11.128
+            container_name: crsync-sync-promise
+            restart_enabled: true
+            checks:
+              - type: tcp
+                host: 127.0.0.1
+                port: 8389
+                timeout_ms: 2000
