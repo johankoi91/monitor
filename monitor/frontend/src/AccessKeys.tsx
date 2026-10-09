@@ -164,7 +164,7 @@ export default function AccessKeys({
               onChange={(value) => setOwner(value || "")}
               options={owners.map((u) => ({
                 value: u.user_id,
-                label: `${u.display_name} / ${u.username}`,
+                label: u.username,
               }))}
             />
           </Form.Item>
