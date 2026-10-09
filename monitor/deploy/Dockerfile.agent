@@ -1,0 +1,4 @@
+FROM scratch
+COPY ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
+COPY agent /agent
+ENTRYPOINT ["/agent"]

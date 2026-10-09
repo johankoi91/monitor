@@ -1,0 +1,98 @@
+{
+  "engine_version": "28.5.2",
+  "configuration_preserved": true,
+  "network_alias_normalized": "default=bridge",
+  "containers": [
+    {
+      "name": "/agora_cadvisor",
+      "id": "e53b867d091b58ce3d6bcbf15e9a38b4d82e7c2b3b37510490c859b3e923e844",
+      "before_started_at": "2026-10-06T13:35:01.128062234Z",
+      "after_started_at": "2026-10-06T14:13:56.211355474Z",
+      "running": true
+    },
+    {
+      "name": "/avops-v1-canary",
+      "id": "c6bdefb92263630ec1df3271336e1001b8839aeb25f5b88ebbd009c04240803c",
+      "before_started_at": "2026-10-05T17:05:38.360710069Z",
+      "after_started_at": "2026-10-06T14:13:55.862524644Z",
+      "running": true
+    },
+    {
+      "name": "/agora_netdata",
+      "id": "611f881a4447611fc3454d467038e5a7edb0475845685c5985824302e6881cbe",
+      "before_started_at": "2026-10-04T14:13:28.262472017Z",
+      "after_started_at": "2026-10-06T14:13:55.531965343Z",
+      "running": true
+    },
+    {
+      "name": "/agora_monitor_grafana",
+      "id": "21188772de4671db6a525daf175d8f07288998c5320f4e15a54a6d4474f8e7b8",
+      "before_started_at": "2026-10-04T14:13:12.609977179Z",
+      "after_started_at": "2026-10-06T14:13:55.307118079Z",
+      "running": true
+    },
+    {
+      "name": "/agora_monitor_influxdb",
+      "id": "ca895431cf6045080ad3ab40ad036bfcc41b8d06ad529acf6f3c592b50fff80c",
+      "before_started_at": "2026-10-04T14:10:31.453411696Z",
+      "after_started_at": "2026-10-06T14:13:55.050361072Z",
+      "running": true
+    },
+    {
+      "name": "/agora_infra_helper",
+      "id": "2230bc2b0e4f9f2f230e584183d7bc6be2696f1efcf3a274e6e14796960d0566",
+      "before_started_at": "2025-12-11T13:43:37.424838841Z",
+      "after_started_at": "2026-10-06T14:13:54.939827847Z",
+      "running": true
+    },
+    {
+      "name": "/agora_event_collector",
+      "id": "5076790b10bd3e8f6632117d7c1fc8c0f19039f7763d7e276f677fad6a294abb",
+      "before_started_at": "2025-12-11T13:43:32.051688864Z",
+      "after_started_at": "2026-10-06T14:13:54.829421913Z",
+      "running": true
+    },
+    {
+      "name": "/agora_udp_media_edge_1",
+      "id": "61227e2fd402aadefb9e0b26642287a245533d3947c7be5a2ce5552b6f5653d3",
+      "before_started_at": "2025-12-11T13:43:24.248901339Z",
+      "after_started_at": "2026-10-06T14:13:54.715351406Z",
+      "running": true
+    },
+    {
+      "name": "/agora_web_media_edge_1",
+      "id": "44abe60e4bb640cceb967322cfd73f6233054e774cbc7686c90e777b71753cd3",
+      "before_started_at": "2025-12-11T13:43:19.645222109Z",
+      "after_started_at": "2026-10-06T14:13:54.610171942Z",
+      "running": true
+    },
+    {
+      "name": "/agora_vosync",
+      "id": "38ff65f2527cce02dd2a5812c960442a61cbf81d9b803c84dce67f27a26c12e7",
+      "before_started_at": "2025-12-11T13:43:14.582554458Z",
+      "after_started_at": "2026-10-06T14:13:54.504270734Z",
+      "running": true
+    },
+    {
+      "name": "/agora_cap_sync",
+      "id": "277ee7784fe96fd337035925bb609801947ab45a36049033d1a728f62e29a349",
+      "before_started_at": "2025-12-11T13:43:10.227965521Z",
+      "after_started_at": "2026-10-06T14:13:54.398460897Z",
+      "running": true
+    },
+    {
+      "name": "/agora_local_balancer",
+      "id": "0f42bdf55c2a96efd28ad085846d7e5811c0b524b37967c4d31d707a47fda865",
+      "before_started_at": "2025-12-11T13:43:03.444094059Z",
+      "after_started_at": "2026-10-06T14:13:54.290275375Z",
+      "running": true
+    },
+    {
+      "name": "/agora_local_ap",
+      "id": "ffc3bb256ab2abab02209aac181bf123b7e37ef503ecbd49225885b17598e6a9",
+      "before_started_at": "2025-12-11T13:42:56.780134988Z",
+      "after_started_at": "2026-10-06T14:13:54.182182855Z",
+      "running": true
+    }
+  ]
+}

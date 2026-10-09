@@ -1,0 +1,7 @@
+# Private configuration belongs outside this module; protect common local names.
+center.yaml
+center.env
+agent.env
+admin-curl.conf
+current-baseline.json
+writer.lock

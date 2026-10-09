@@ -1,0 +1,24 @@
+[Unit]
+Description=Independent cAdvisor container resource collector for avops Agent
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/avops-monitor/cadvisor --listen_ip=127.0.0.1 --port=18089 --docker_only=true --housekeeping_interval=5s --allow_dynamic_housekeeping=false --store_container_labels=false --enable_metrics=cpu,memory,network,disk,diskIO,oom_event
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+MemoryMax=256M
+CPUQuota=50%
+LimitNOFILE=4096
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=60
+
+[Install]
+WantedBy=multi-user.target

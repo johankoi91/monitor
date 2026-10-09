@@ -5,25 +5,28 @@ info:
   description: |
     面向客户监控平台与可运行 Demo 的 RTC 首期目标接口契约，RTM 后续接入。
     业务节点异常时状态查询仍返回 HTTP 200，由响应体中的状态字段表达异常。
-    PRD V0.6 已确认 HTTP Basic Auth、轮询及单 HTTP/HTTPS 通知地址、单中心与可运行 Demo。
+    PRD V0.15 包含 PostgreSQL、账号会话/RBAC、Agent/机器凭证、轮询/通知、Docker/React/YAML 基线及可靠受控重启。
     鉴权格式为 Authorization: Basic Base64(接入ID:密钥)，使用本系统自有配置凭证。
-    本机 Mock 不提供正式鉴权和可靠持久化，不能作为生产或安全验收环境。
+    本机 Mock 尚无容器发现、启动配置、基线保存接口，也不提供正式鉴权和可靠持久化。
+    monitor 为真实 V1.0 实现，Mock 保持独立；验收结论以实际记录为准。
 servers:
   - url: http://127.0.0.1:18083
     description: 本地 Mock Server
 
 security:
   - BasicAuth: []
+  - AccountSession: []
 
 x-outbound-notification:
-  description: 中心向部署配置中唯一的 HTTP/HTTPS 接收地址发送状态变化 JSON；本字段不声明中心的入站 API。
+  description: 中心按声网 Webhook 接收协议向唯一 HTTPS 接收地址发送运维状态 JSON；签名协议一致，事件内容为本系统定义。
   method: POST
   target: notifications.url
   contentType: application/json
   schema:
     $ref: "#/components/schemas/NotificationPayload"
-  receiverSuccess: HTTP 2xx
-  retry: 同一事件重试保持 event_id，不转发中心 API 或 Agent 的鉴权凭证。
+  receiverSuccess: 10 秒内 HTTP 200 且包体为 JSON
+  signatures: Agora-Signature=HMAC-SHA1(raw body), Agora-Signature-V2=HMAC-SHA256(raw body)，十六进制编码
+  retry: 首次失败立即重试，此后间隔递增；最多重试3次（共4次）；同一 event_id 和正文不变。
 
 tags:
   - name: System
@@ -32,8 +35,487 @@ tags:
     description: RTC/RTM 状态查询
   - name: Operations
     description: 受控运维操作
+  - name: Inventory
+    description: 容器发现、脱敏启动配置与持久基线
 
 paths:
+  /api/v1/storage/status:
+    get:
+      summary: 数据库容量、数据盘余量和会话维护状态
+      description: 需要 monitor.read；容量阈值用于提示，不是硬配额。返回 database_bytes、warning_bytes、tables、disk_capacity_bytes、disk_available_bytes、warnings、sessions 和 checked_at。
+      responses:
+        "200":
+          description: 容量状态，不包含凭证
+          content:
+            application/json:
+              schema: {type: object}
+        "503":
+          description: 容量读取失败
+  /api/v1/operations/mine:
+    get:
+      security:
+        - AccountSession: []
+      summary: 当前账号最近50条本人重启结果
+      description: 需要账号会话及 restart.result；客户不能借此查询其他人的结果或全局审计。
+      responses:
+        "200":
+          description: 本人操作列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  operations:
+                    type: array
+                    items: {$ref: '#/components/schemas/Operation'}
+        "403":
+          description: 权限不足或缺少账号会话
+  /api/v1/auth/register:
+    post:
+      tags: [System]
+      summary: 提交账号注册申请，Agora 人员开通前不可登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string, minLength: 3, maxLength: 64}
+                password: {type: string, minLength: 6, maxLength: 72, writeOnly: true}
+      responses:
+        '202': {description: 注册成功，状态 PENDING，不授予 API 访问}
+        '400': {description: 字段无效}
+        '409': {description: 账号名已使用}
+        '429': {description: 尝试次数过多}
+  /api/v1/auth/login:
+    post:
+      tags: [System]
+      summary: 账号密码登录，返回 8 小时可撤销会话
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string, writeOnly: true}
+      responses:
+        '200':
+          description: token 仅当前页面内存保存，数据库只存哈希
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: {type: string}
+                  expires_at: {type: string, format: date-time}
+                  user: {$ref: '#/components/schemas/AccountUser'}
+        '401': {description: 账号密码错误}
+        '403': {description: 待开通或停用}
+        '429': {description: 尝试次数过多}
+  /api/v1/auth/me:
+    get:
+      summary: 当前账号和后端权限
+      security: [{AccountSession: []}]
+      responses:
+        '200': {description: 当前 user}
+        '401': {description: 会话失效}
+  /api/v1/auth/logout:
+    post:
+      summary: 撤销当前会话
+      security: [{AccountSession: []}]
+      responses:
+        '200': {description: 后续请求拒绝旧 token}
+  /api/v1/auth/password:
+    post:
+      summary: 原密码验证后修改密码并撤销所有旧会话
+      security: [{AccountSession: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: {type: string, writeOnly: true}
+                new_password: {type: string, minLength: 6, maxLength: 72, writeOnly: true}
+      responses:
+        '200': {description: 修改成功，须重新登录}
+        '400': {description: 原密码或新密码无效}
+  /api/v1/users:
+    get:
+      summary: 按状态和名称分页查询账号，需要 users.manage
+      parameters:
+        - {in: query, name: status, schema: {type: string, enum: [PENDING, ACTIVE, DISABLED]}}
+        - {in: query, name: search, schema: {type: string}}
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses:
+        '200': {description: users 和 total，不返回密码哈希}
+        '403': {description: 权限不足}
+  /api/v1/users/{user_id}:
+    post:
+      summary: 开通/停用或分配角色，校验版本及最后 Agora 账号
+      parameters: [{in: path, name: user_id, required: true, schema: {type: string}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, role_ids, expected_version, reason]
+              properties:
+                status: {type: string, enum: [PENDING, ACTIVE, DISABLED]}
+                role_ids: {type: array, items: {type: string, enum: [agora, customer_ops]}, minItems: 1, maxItems: 1}
+                expected_version: {type: integer}
+                reason: {type: string, minLength: 2}
+      responses:
+        '200': {description: 新账号版本，旧会话撤销}
+        '403': {description: 不可授予超出自身范围的权限}
+        '409': {description: 版本冲突或最后管理员保护}
+  /api/v1/roles:
+    get:
+      summary: 固定角色目录：Agora 人员、客户运维，仅 Agora 可访问
+      responses:
+        '200': {description: 角色及权限列表}
+  /api/v1/permissions:
+    get:
+      summary: 固定角色的功能权限目录，仅 Agora 可访问
+      responses:
+        '200': {description: 权限 code/name 列表}
+  /api/v1/baseline/history:
+    get:
+      summary: PostgreSQL 历史台账定义及变更，不执行回滚
+      parameters:
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {in: query, name: offset, schema: {type: integer, minimum: 0}}
+      responses:
+        '200': {description: versions/total}
+  /api/v1/access-keys/owners:
+    get:
+      summary: Key 管理端选择已开通的所属账号
+      responses:
+        '200': {description: 活跃账号列表，不包含密码}
+  /api/v1/access-keys:
+    get:
+      tags: [System]
+      summary: Agora 账号查看已签发重启安全 Key
+      description: 重启安全 Key 不可用于页面登录；响应不含 Secret 或哈希。
+      responses:
+        '200':
+          description: 已签发密钥列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys:
+                    type: array
+                    items: {$ref: '#/components/schemas/AccessKey'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 需要 Agora 账号}
+    post:
+      tags: [System]
+      summary: Agora 账号签发机器密钥
+      description: Agora 人员直接签发。必须明确指定基线内节点，签发不开放节点白名单。Secret 只返回一次。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [approval_reason]
+              properties:
+                name: {type: string, maxLength: 128}
+                purpose: {type: string, enum: [RESTART]}
+                allowed_node_ids:
+                  type: array
+                  maxItems: 64
+                  uniqueItems: true
+                  items: {type: string}
+                approval_reason: {type: string, minLength: 1, maxLength: 1000}
+      responses:
+        '201':
+          description: 已持久化签发；仅此响应含 Secret，需安全交付
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key: {$ref: '#/components/schemas/AccessKey'}
+                  secret: {type: string, description: 仅签发响应返回一次}
+        '400': {description: 用途/范围无效或持久化失败}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 需要 Agora 账号}
+        '404': {description: 授权节点不在基线中}
+  /api/v1/access-keys/{key_id}/revoke:
+    post:
+      tags: [System]
+      summary: Agora 账号停用密钥
+      description: 持久化后后续认证拒绝；不取消已受理操作。轮换采用新签发再停用旧 Key。
+      parameters:
+        - in: path
+          name: key_id
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: 已停用}
+        '400': {description: 密钥不存在或持久化失败}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: 需要 Agora 账号}
+  /api/v1/agents:
+    get:
+      tags: [Inventory]
+      summary: 查询已登记机器供主机筛选
+      description: 仅返回主机及通道新鲜度，不返回 Agent 凭证。
+      operationId: listAgents
+      responses:
+        '200':
+          description: 已登记的 Agent，含尚未连接或失联机器
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents]
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [agent_id, host_name, host_address, agent_online, stale, received_at]
+                      properties:
+                        agent_id: {type: string}
+                        host_name: {type: string}
+                        host_address: {type: string}
+                        agent_online: {type: boolean}
+                        stale: {type: boolean}
+                        received_at: {type: string, format: date-time, nullable: true}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/containers:
+    get:
+      tags: [Inventory]
+      summary: 分页查询所有已接入 Agent 的发现容器
+      description: 包含未纳管和已停止容器；不改变基线。页面默认用 runtime_status=running 查询。
+      operationId: listContainers
+      parameters:
+        - name: agent_id
+          in: query
+          schema: {type: string}
+        - name: name
+          in: query
+          description: 容器名称包含匹配
+          schema: {type: string}
+        - name: image
+          in: query
+          description: 镜像引用包含匹配
+          schema: {type: string}
+        - name: runtime_status
+          in: query
+          schema:
+            $ref: '#/components/schemas/RuntimeStatus'
+        - name: page
+          in: query
+          schema: {type: integer, minimum: 1, default: 1}
+        - name: page_size
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+      responses:
+        '200':
+          description: 最新发现缓存及新鲜度；离线数据可见但不可作为新增候选保存
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerListResponse'
+        '400':
+          $ref: '#/components/responses/InvalidInventoryRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/containers/{agent_id}/{container_id}:
+    get:
+      tags: [Inventory]
+      summary: 查看容器及脱敏启动配置快照
+      operationId: getContainer
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: container_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Docker 实际配置摘要，非原始 inspect 或可执行重建命令
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContainerDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/InventoryNotFound'
+
+  /api/v1/baseline:
+    get:
+      tags: [Inventory]
+      summary: 查询当前生效基线与版本
+      description: 返回全部基线成员，包含缺失/离线成员；不得用发现列表代替。
+      operationId: getBaseline
+      responses:
+        '200':
+          description: 当前基线；初始无基线时 revision 为空、active=false
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaselineResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/baseline/checks:
+    post:
+      tags: [Inventory]
+      summary: 修改一个已纳管容器的多个 TCP 端口并自动生效
+      operationId: updateBaselineChecks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_revision, node_id, checks]
+              properties:
+                expected_revision: {type: string}
+                node_id: {type: string}
+                checks:
+                  type: array
+                  maxItems: 8
+                  items:
+                    $ref: '#/components/schemas/TcpCheck'
+      responses:
+        '200':
+          description: 只修改检查规则，保持成员、归属和重启许可
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaselineResponse'
+        '400':
+          $ref: '#/components/responses/InvalidInventoryRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: 基准版本过期或节点有执行中/未知结果操作
+        '503':
+          description: 保存失败，保持当前基准
+
+  /api/v1/baseline/restart-policy:
+    post:
+      tags: [Inventory]
+      summary: 修改单个基准节点的重启权限
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_revision, node_id, enabled]
+              properties:
+                expected_revision: {type: string}
+                node_id: {type: string}
+                enabled: {type: boolean}
+      responses:
+        '200': {description: 重启权限更新后的当前基线}
+        '400': {$ref: '#/components/responses/InvalidInventoryRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {description: 基准版本过期或节点有执行中/未知结果操作}
+
+  /api/v1/baseline/selection:
+    post:
+      tags: [Inventory]
+      summary: 保存明确增删的选择并生成、生效 YAML
+      description: |
+        校验版本及新增候选身份/快照后原子持久化，无需重启中心。
+        可只提交集群编码和候选引用，服务归属自动生成；已有归属保持，集群名称从当前基准继承。
+        未修改的缺失/离线成员保留，不阻止保存。新增节点默认禁重启。
+        不接受客户端指定宿主机、节点 ID 或重启许可；相同绑定才能继承原白名单。
+        映射变更以明确移出原成员并重新添加表达，执行中节点不得移出或改绑定。
+        超时后读取当前基线并核对版本/内容，不盲目以旧版本重新覆盖。
+      operationId: saveBaselineSelection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BaselineSelectionRequest'
+      responses:
+        '200':
+          description: 已持久化且生效的新版本
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaselineResponse'
+        '400':
+          $ref: '#/components/responses/InvalidInventoryRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: 版本过期、候选离线/过期/身份变化，或目标有执行中重启；旧基线不变
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: 持久化或提交失败，保留原生效版本
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/baseline/yaml:
+    get:
+      tags: [Inventory]
+      summary: 下载当前生效的 YAML 台账
+      operationId: downloadBaselineYaml
+      parameters:
+        - name: revision
+          in: query
+          description: 可传页面所见版本；与当前版本不同返回 409，避免下载了其他版本
+          schema: {type: string}
+      responses:
+        '200':
+          description: 与生效版本一致的 YAML，不含原始 inspect 或启动凭证
+          headers:
+            X-Baseline-Revision:
+              description: 此次下载的基线版本
+              schema: {type: string}
+          content:
+            application/yaml:
+              schema: {type: string}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/InventoryNotFound'
+        '409':
+          description: 请求版本已不是当前生效版本，请刷新后下载
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /health/live:
     get:
       tags: [System]
@@ -157,13 +639,234 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/v1/operations:
+    get:
+      tags: [Operations]
+      summary: 查询最近操作或全部占用节点的操作
+      operationId: listOperations
+      parameters:
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+        - name: active
+          in: query
+          description: 为 true 时返回全部执行中/未知结果锁定操作，不受历史分页截断；供升级前检查。
+          schema: {type: boolean, default: false}
+      responses:
+        '200':
+          description: 操作清单
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operations]
+                properties:
+                  operations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/InvalidInventoryRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/operations/{operation_id}/audit:
+    get:
+      tags: [Operations]
+      summary: 查看单次操作的可靠阶段审计
+      operationId: getOperationAudit
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: 调用来源、声明操作人、目标、阶段、证据与结果；最多最近 200 条
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  records:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        at: {type: string, format: date-time}
+                        kind: {type: string}
+                        operation:
+                          $ref: '#/components/schemas/Operation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/InventoryNotFound'
+        '503':
+          description: 审计读取失败，保留文件供修复
+
+  /api/v1/operations/{operation_id}/resolve:
+    post:
+      tags: [Operations]
+      summary: 现场核实后关闭未知结果的操作锁
+      description: 仅允许 UNCERTAIN 且 node_locked=true；不执行 Docker，不以人工结论修改健康状态或标记 SUCCESS。
+      operationId: resolveUncertainOperation
+      x-credential-purpose: RESTART
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operator, reason, outcome, evidence]
+              properties:
+                operator: {type: string, minLength: 1, maxLength: 128}
+                reason: {type: string, minLength: 2, maxLength: 500}
+                outcome: {type: string, enum: [EXECUTED, NOT_EXECUTED]}
+                evidence: {type: string, minLength: 10, maxLength: 1000}
+      responses:
+        '200':
+          description: 核实已写入审计，关闭操作锁并标记 MANUALLY_CLOSED
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationResponse'
+        '400':
+          $ref: '#/components/responses/InvalidInventoryRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/InventoryNotFound'
+        '409':
+          description: 操作不属于待核实的未知结果
+        '503':
+          description: 核实记录未可靠保存，操作锁保持
+
+  /api/v1/notifications/config:
+    get:
+      tags: [System]
+      summary: 读取可编辑的通知配置，不返回密钥
+      operationId: getNotificationConfig
+      responses:
+        '200':
+          description: 当前生效地址、开关、TLS 域名、版本和鉴权配置状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [System]
+      summary: 保存 HTTPS Webhook 地址和签名密钥
+      operationId: updateNotificationConfig
+      description: 启用或更换地址/密钥必须先通过签名健康检查；更换目标不得沿用原密钥，检查失败保留旧配置。旧配置的待发事件停止重试，停用不影响查询。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_revision, enabled, url, tls_server_name, auth_mode]
+              properties:
+                expected_revision: {type: string}
+                enabled: {type: boolean}
+                url: {type: string, description: '完整 https:// 地址，可在停用时为空'}
+                tls_server_name: {type: string}
+                auth_mode: {type: string, enum: [retain, clear, set]}
+                secret: {type: string, writeOnly: true, description: Webhook HMAC 签名密钥，auth_mode=set 时填写；中心加密保存}
+      responses:
+        '200':
+          description: 保存成功；配置重启可恢复，不返回密钥
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+        '400':
+          $ref: '#/components/responses/InvalidInventoryRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: 配置版本变化
+        '503':
+          description: 不能可靠保存配置
+
+  /api/v1/notifications/test:
+    post:
+      tags: [System]
+      summary: 用已保存配置发送签名健康检查，不能改变业务健康状态
+      responses:
+        '200':
+          description: 健康检查结果；healthy=false 表示接收端未通过
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  healthy: {type: boolean}
+                  http_status: {type: integer}
+                  reason: {type: string}
+                  event_id: {type: string}
+        '400': {description: 未配置接收端或不能保存测试结果}
+        '403': {description: 当前账号无通知配置权限}
+
+  /api/v1/notifications/status:
+    get:
+      tags: [System]
+      summary: 查询通知队列及最近投递结果
+      operationId: getNotificationStatus
+      responses:
+        '200':
+          description: 不返回通知鉴权凭证；失败不改变服务健康
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: {type: boolean}
+                  pending: {type: integer}
+                  delivered: {type: integer}
+                  failed: {type: integer}
+                  dropped: {type: integer}
+                  storage_available: {type: boolean}
+                  recent:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        event:
+                          $ref: '#/components/schemas/NotificationPayload'
+                        status: {type: string, enum: [PENDING, INFLIGHT, DELIVERED, FAILED]}
+                        attempts: {type: integer}
+                        next_at: {type: string, format: date-time}
+                        last_error: {type: string}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/operations/restart:
     post:
       tags: [Operations]
       summary: 异步重启一个已纳管容器
       description: |
         仅允许重启 services.yaml 中 restart_enabled=true 的节点。
-        V1.0 不区分用户角色，operator 仅作为审计信息，不参与权限判断。
+        必须使用已注册、启用且覆盖目标节点的独立 RESTART Key；普通机器凭证不得直接重启。
+        中心/Agent 精确规则、现场状态、身份、互斥和冷却仍独立核验。
+        账号请求需 restart.execute 权限及独立重启 Key；operator 为自填说明，实际账号/Key 来源另行审计。
+      parameters:
+        - in: header
+          name: X-AVOPS-Restart-Key-ID
+          description: 账号 Bearer 请求额外提供的重启 Key ID；机器调用仍可用 Basic
+          schema: {type: string}
+        - in: header
+          name: X-AVOPS-Restart-Key-Secret
+          description: 独立安全 Key，必须通过 HTTPS，不记录或转发
+          schema: {type: string}
       operationId: createRestartOperation
       requestBody:
         required: true
@@ -180,6 +883,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OperationAcceptedResponse"
+        '403':
+          description: RESTART_KEY_REQUIRED 或 KEY_NODE_DENIED；未创建操作
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorResponse'}
         "400":
           description: 请求字段不完整
           content:
@@ -198,11 +906,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        '503':
+          description: 受理记录无法可靠保存，未执行重启
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/v1/operations/{operation_id}:
     get:
       tags: [Operations]
       summary: 查询单次操作结果
+      description: Agora 可查询；客户需要 restart.result 且操作由本人发起；机器 Key 按账号权限、节点范围和调用来源校验，不能用猜测 ID 查询他人结果。
       operationId: getOperation
       parameters:
         - name: operation_id
@@ -229,11 +944,27 @@ paths:
 
 components:
   securitySchemes:
+    AccountSession:
+      type: http
+      scheme: bearer
+      description: 账号登录返回的随机可撤销 token，数据库只保存哈希；API 后端按角色检查权限
     BasicAuth:
       type: http
       scheme: basic
-      description: 本系统配置的接入 ID/密钥；管理 API 经 HTTPS 使用，不引入个人用户角色。
+      description: 系统/Agent 自有 ID/密钥经 HTTPS/WSS；账号采用 AccountSession/RBAC，系统凭证保留用途与节点范围限制。
   responses:
+    InvalidInventoryRequest:
+      description: 查询或选择字段不合法、归属不明确、重复成员或 YAML 校验失败
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InventoryNotFound:
+      description: 未找到容器或尚未保存基线
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     Unauthorized:
       description: Basic Auth 缺失、格式错误或 ID/密钥不匹配。
       headers:
@@ -246,6 +977,393 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    AccountUser:
+      type: object
+      properties:
+        user_id: {type: string}
+        username: {type: string}
+        display_name: {type: string}
+        status: {type: string, enum: [PENDING, ACTIVE, DISABLED]}
+        version: {type: integer}
+        role_ids: {type: array, items: {type: string, enum: [agora, customer_ops]}, minItems: 1, maxItems: 1}
+        permissions: {type: array, items: {type: string}}
+    AccessKey:
+      type: object
+      properties:
+        key_id: {type: string}
+        name: {type: string}
+        purpose: {type: string, enum: [RESTART]}
+        allowed_node_ids:
+          type: array
+          items: {type: string}
+        enabled: {type: boolean}
+        created_at: {type: string, format: date-time}
+        created_by: {type: string}
+        approval_reason: {type: string}
+        request_id: {type: string}
+    NotificationSettings:
+      type: object
+      required: [revision, enabled, url, tls_server_name, auth_configured, storage_available]
+      properties:
+        auth_scheme: {type: string, enum: [webhook_hmac]}
+        response_seconds: {type: integer, enum: [10]}
+        max_retries: {type: integer, enum: [3]}
+        revision: {type: string}
+        enabled: {type: boolean}
+        url: {type: string}
+        tls_server_name: {type: string}
+        auth_configured: {type: boolean}
+        storage_available: {type: boolean}
+    DiscoveredContainer:
+      type: object
+      additionalProperties: false
+      required: [agent_id, host_name, host_address, container_id, container_name, runtime_status, image, collected_at, received_at, agent_online, stale, managed, snapshot_id]
+      properties:
+        agent_id: {type: string}
+        host_name: {type: string}
+        host_address: {type: string}
+        container_id: {type: string}
+        container_name: {type: string}
+        runtime_status:
+          $ref: '#/components/schemas/RuntimeStatus'
+        image: {type: string}
+        collected_at: {type: string, format: date-time}
+        received_at: {type: string, format: date-time}
+        agent_online: {type: boolean}
+        stale: {type: boolean}
+        managed: {type: boolean}
+        node_id:
+          type: string
+          description: 已纳管时返回当前基线节点 ID
+        snapshot_id:
+          type: string
+          description: Agent/容器身份及配置采集版本引用，用于保存时校验
+        resources:
+          $ref: '#/components/schemas/ResourceMetrics'
+        lifecycle: {$ref: '#/components/schemas/ContainerLifecycle'}
+        limits:
+          type: object
+          nullable: true
+          properties:
+            cpu_quota_cores: {type: number, minimum: 0, nullable: true}
+            memory_limit_bytes: {type: integer, minimum: 0, nullable: true}
+
+    ResourceMetrics:
+      type: object
+      nullable: true
+      description: 可选 cAdvisor 当前资源指标；与业务健康独立。缺失值为 null，零值表示实际为零。无历史存储。
+      properties:
+        limits_known: {type: boolean, description: 限额是否已取得，已知但 null 表示未限制}
+        cpu_user_usage_cores: {type: number, minimum: 0, nullable: true}
+        cpu_system_usage_cores: {type: number, minimum: 0, nullable: true}
+        cpu_quota_cores: {type: number, minimum: 0, nullable: true}
+        cpu_throttled_ratio: {type: number, minimum: 0, maximum: 1, nullable: true, description: 受限周期增量/总周期增量}
+        cpu_throttled_seconds_per_second: {type: number, minimum: 0, nullable: true}
+        memory_limit_bytes: {type: integer, minimum: 0, nullable: true}
+        memory_working_set_ratio: {type: number, minimum: 0, nullable: true}
+        memory_rss_bytes: {type: integer, minimum: 0, nullable: true}
+        memory_cache_bytes: {type: integer, minimum: 0, nullable: true}
+        memory_swap_bytes: {type: integer, minimum: 0, nullable: true}
+        memory_peak_bytes: {type: integer, minimum: 0, nullable: true}
+        memory_failures_total: {type: integer, minimum: 0, nullable: true, description: 内存分配失败，不等于 OOM}
+        oom_events_total: {type: integer, minimum: 0, nullable: true, description: 采集器启动以来累计，重启重置}
+        oom_observed_at: {type: string, format: date-time, nullable: true}
+        host_filesystem: {$ref: '#/components/schemas/HostFilesystem'}
+        disk_io_status: {type: string, enum: [AVAILABLE, UNAVAILABLE, UNSUPPORTED, NO_VALID_SAMPLES]}
+        disk_io_scope: {type: string, enum: [SINGLE_DEVICE, PER_DEVICE, '']}
+        disk_devices:
+          type: array
+          nullable: true
+          maxItems: 32
+          items:
+            type: object
+            properties:
+              device: {type: string, maxLength: 160}
+              major: {type: integer, minimum: 0}
+              minor: {type: integer, minimum: 0}
+              read_bytes_per_second: {type: number, minimum: 0, nullable: true}
+              write_bytes_per_second: {type: number, minimum: 0, nullable: true}
+              read_operations_per_second: {type: number, minimum: 0, nullable: true}
+              write_operations_per_second: {type: number, minimum: 0, nullable: true}
+        disk_read_bytes_per_second: {type: number, minimum: 0, nullable: true, description: 多设备不求和，仅单设备返回}
+        disk_write_bytes_per_second: {type: number, minimum: 0, nullable: true}
+        disk_read_operations_per_second: {type: number, minimum: 0, nullable: true}
+        disk_write_operations_per_second: {type: number, minimum: 0, nullable: true}
+        network_receive_packets_per_second: {type: number, minimum: 0, nullable: true}
+        network_transmit_packets_per_second: {type: number, minimum: 0, nullable: true}
+        network_receive_dropped_per_second: {type: number, minimum: 0, nullable: true}
+        network_transmit_dropped_per_second: {type: number, minimum: 0, nullable: true}
+        network_receive_errors_per_second: {type: number, minimum: 0, nullable: true}
+        network_transmit_errors_per_second: {type: number, minimum: 0, nullable: true}
+        source: {type: string, enum: [cadvisor]}
+        status: {type: string, enum: [AVAILABLE, PARTIAL, UNAVAILABLE]}
+        reason_code: {type: string}
+        sampled_at: {type: string, format: date-time, nullable: true}
+        fetched_at: {type: string, format: date-time}
+        stale: {type: boolean}
+        sample_window_seconds: {type: number, minimum: 0, nullable: true}
+        cpu_usage_cores: {type: number, minimum: 0, nullable: true, description: 1.0 表示占用一个逻辑核}
+        memory_usage_bytes: {type: integer, minimum: 0, nullable: true}
+        memory_working_set_bytes: {type: integer, minimum: 0, nullable: true}
+        filesystem_usage_bytes: {type: integer, minimum: 0, nullable: true, description: cAdvisor 容器文件系统口径，不等于挂载卷总占用}
+        network_receive_bytes_per_second: {type: number, minimum: 0, nullable: true}
+        network_transmit_bytes_per_second: {type: number, minimum: 0, nullable: true}
+        network_scope: {type: string, enum: [CONTAINER, HOST_SHARED, UNAVAILABLE], description: host/container 共享命名空间时不归属单容器流量}
+
+    HostFilesystem:
+      type: object
+      nullable: true
+      description: Docker 数据盘 statfs，同机共享不可累加，不覆盖所有挂载卷
+      properties:
+        scope: {type: string, enum: [HOST_DOCKER_STORAGE]}
+        source: {type: string, enum: [agent_statfs]}
+        collected_at: {type: string, format: date-time}
+        capacity_bytes: {type: integer, minimum: 1}
+        free_bytes: {type: integer, minimum: 0}
+        available_bytes: {type: integer, minimum: 0}
+        used_ratio: {type: number, minimum: 0, maximum: 1}
+        inodes_total: {type: integer, minimum: 0, nullable: true}
+        inodes_free: {type: integer, minimum: 0, nullable: true}
+        inodes_used_ratio: {type: number, minimum: 0, maximum: 1, nullable: true}
+
+    ContainerLifecycle:
+      type: object
+      nullable: true
+      properties:
+        created_at: {type: string, format: date-time, nullable: true}
+        started_at: {type: string, format: date-time, nullable: true}
+        finished_at: {type: string, format: date-time, nullable: true, description: 最近结束时间，运行时可能属于上一轮}
+        last_observed_at: {type: string, format: date-time}
+        restart_count: {type: integer, minimum: 0, description: Docker 自动重启次数}
+        exit_code: {type: integer, nullable: true, description: 仅 exited/dead 返回}
+        oom_killed: {type: boolean, nullable: true, description: 当前 State 的 OOMKilled，不是完整历史}
+        docker_health: {type: string}
+        stale: {type: boolean}
+
+    ContainerListResponse:
+      type: object
+      required: [generated_at, page, page_size, total, containers]
+      properties:
+        generated_at: {type: string, format: date-time}
+        page: {type: integer, minimum: 1}
+        page_size: {type: integer, minimum: 1}
+        total: {type: integer, minimum: 0}
+        containers:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveredContainer'
+
+    ContainerDetailResponse:
+      type: object
+      required: [container, startup]
+      properties:
+        started_at: {type: string, description: Docker 实际启动时间}
+        exit_code: {type: integer}
+        restart_count: {type: integer}
+        docker_health: {type: string, description: 无既有 Healthcheck 时为空}
+        container:
+          $ref: '#/components/schemas/DiscoveredContainer'
+        startup:
+          allOf:
+            - $ref: '#/components/schemas/ContainerStartupSnapshot'
+          nullable: true
+          description: 尚未取得启动配置时为空，不以空配置冒充完整配置
+
+    ContainerStartupSnapshot:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, configuration_fingerprint, collected_at, redacted_fields, truncated, incomplete, config]
+      properties:
+        snapshot_id: {type: string}
+        configuration_fingerprint:
+          type: string
+          description: 脱敏后规范化配置指纹，不是明文秘密的摘要
+        collected_at: {type: string, format: date-time}
+        redacted_fields:
+          type: array
+          items: {type: string}
+        truncated: {type: boolean}
+        incomplete: {type: boolean}
+        config:
+          $ref: '#/components/schemas/ContainerStartupConfig'
+
+    ContainerStartupConfig:
+      type: object
+      additionalProperties: false
+      description: 白名单字段均已在 Agent 脱敏；旧 Docker 缺字段可省略并标注 incomplete
+      properties:
+        image: {type: string}
+        image_id: {type: string}
+        entrypoint:
+          type: array
+          items: {type: string}
+        cmd:
+          type: array
+          items: {type: string}
+        path: {type: string}
+        args:
+          type: array
+          items: {type: string}
+        env:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, value, redacted]
+            properties:
+              name: {type: string}
+              value: {type: string, description: '默认为 [REDACTED]；明确非敏感白名单才允许原值'}
+              redacted: {type: boolean}
+        working_dir: {type: string}
+        user: {type: string}
+        mounts:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [source, target, type, read_only]
+            properties:
+              source: {type: string}
+              target: {type: string}
+              type: {type: string}
+              read_only: {type: boolean}
+        exposed_ports:
+          type: array
+          items: {type: string, example: '443/tcp'}
+        port_bindings:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [container_port, host_ip, host_port]
+            properties:
+              container_port: {type: string, example: '443/tcp'}
+              host_ip: {type: string}
+              host_port: {type: string}
+        network_mode: {type: string}
+        restart_policy:
+          type: object
+          additionalProperties: false
+          properties:
+            name: {type: string}
+            maximum_retry_count: {type: integer, minimum: 0}
+
+    TcpCheck:
+      type: object
+      additionalProperties: false
+      required: [type, host, port, timeout_ms]
+      properties:
+        type: {type: string, enum: [tcp]}
+        host: {type: string, description: 经现场确认的 Agent 本机或本机容器监听地址}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        timeout_ms: {type: integer, minimum: 1}
+
+    BaselineAddition:
+      type: object
+      additionalProperties: false
+      required: [agent_id, container_id, snapshot_id, cluster_code]
+      properties:
+        agent_id: {type: string, minLength: 1}
+        container_id: {type: string, minLength: 1}
+        snapshot_id: {type: string, minLength: 1}
+        cluster_code: {type: string, minLength: 1}
+        cluster_name: {type: string, minLength: 1}
+        service_code: {type: string, minLength: 1}
+        service_name: {type: string, minLength: 1}
+        checks:
+          type: array
+          maxItems: 8
+          description: 不从 EXPOSE 自动推导；首期仅配置已确认 TCP，已有 Docker Healthcheck 由 Agent 采集
+          items:
+            $ref: '#/components/schemas/TcpCheck'
+
+    BaselineSelectionRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, additions, removals]
+      properties:
+        expected_revision:
+          type: string
+          description: 页面加载的当前版本；首次保存为空字符串
+        additions:
+          type: array
+          items:
+            $ref: '#/components/schemas/BaselineAddition'
+        removals:
+          type: array
+          uniqueItems: true
+          items: {type: string, minLength: 1}
+          description: 用户明确移出的 node_id；不在当前筛选页不意味着删除
+
+    BaselineNode:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, host_name, host_address, container_name, restart_enabled, checks]
+      properties:
+        id: {type: string, description: '新节点采用 <agent_id>/<container_name>，既有 ID 不重写'}
+        agent_id: {type: string}
+        host_name: {type: string}
+        host_address: {type: string}
+        container_name: {type: string}
+        restart_enabled: {type: boolean}
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TcpCheck'
+
+    BaselineDefinition:
+      type: object
+      additionalProperties: false
+      required: [schema_version, site, clusters]
+      properties:
+        schema_version: {type: integer, enum: [1]}
+        site:
+          type: object
+          additionalProperties: false
+          required: [code, name]
+          properties:
+            code: {type: string}
+            name: {type: string}
+        clusters:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, name, product, services]
+            properties:
+              code: {type: string}
+              name: {type: string}
+              product: {type: string, enum: [RTC], description: 首期仅 RTC，RTM 目录为后续参考}
+              services:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [code, name, nodes]
+                  properties:
+                    code: {type: string}
+                    name: {type: string}
+                    nodes:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/BaselineNode'
+
+    BaselineResponse:
+      type: object
+      required: [revision, active, saved_at, definition, yaml_url]
+      properties:
+        revision: {type: string, description: 无已保存基线时为空字符串}
+        active: {type: boolean}
+        saved_at: {type: string, format: date-time, nullable: true}
+        definition:
+          allOf:
+            - $ref: '#/components/schemas/BaselineDefinition'
+          nullable: true
+        yaml_url:
+          type: string
+          nullable: true
+          description: 带当前 revision 查询参数的下载路径；无基线时为空
+
     NotificationPayload:
       type: object
       required: [event_id, event_type, occurred_at, product, cluster, service_code, previous_status, current_status, reason_code, reason, collected_at, stale]
@@ -255,7 +1373,7 @@ components:
           description: 同一状态变化及其重试的唯一 ID，供接收方去重。
         event_type:
           type: string
-          enum: [STATUS_CHANGED]
+          enum: [STATUS_CHANGED, WEBHOOK_TEST]
         occurred_at:
           type: string
           format: date-time
@@ -270,7 +1388,8 @@ components:
           example: rtc-ap
         node_id:
           type: string
-          description: 节点事件提供节点 ID，服务聚合事件可以不提供。
+          description: STATUS_CHANGED 必须提供主机 IP-容器名，由 cluster + node_id 定位；不发送服务聚合通知。此标识仅用于通知，不是重启/台账接口内部节点 ID；WEBHOOK_TEST 可以不提供。
+          example: 111.230.192.59-agora_web_media_edge_1
         previous_status:
           $ref: "#/components/schemas/HealthStatus"
         current_status:
@@ -297,7 +1416,7 @@ components:
 
     RuntimeStatus:
       type: string
-      enum: [running, exited, restarting, paused, dead, missing, unknown]
+      enum: [created, running, exited, restarting, paused, dead, removing, missing, unknown]
 
     SystemHealth:
       type: object
@@ -361,9 +1480,17 @@ components:
           minimum: 0
         restart_enabled:
           type: boolean
+        restart_allowed: {type: boolean, description: 当前白名单、数据、运行态、互斥和冷却规则均允许}
+        restart_block_reason: {type: string}
+        active_operation_id: {type: string, description: 执行中或未知结果的操作 ID，无占用时为空}
+        resources:
+          $ref: '#/components/schemas/ResourceMetrics'
+        lifecycle: {$ref: '#/components/schemas/ContainerLifecycle'}
         collected_at:
           type: string
           format: date-time
+          nullable: true
+          description: 冷启动或从未取得有效采集时为空，不以响应时间代替
         stale:
           type: boolean
 
@@ -442,7 +1569,7 @@ components:
 
     Operation:
       type: object
-      required: [operation_id, request_key, type, status, node_id, operator, reason, requested_at]
+      required: [operation_id, request_key, type, status, phase, node_id, operator, reason, authenticated_source, source_ip, requested_at, result_known, node_locked]
       properties:
         operation_id:
           type: string
@@ -454,6 +1581,21 @@ components:
         status:
           type: string
           enum: [PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, REJECTED]
+        phase:
+          type: string
+          enum: [ACCEPTED, EXECUTE_INTENT, WAIT_RESULT, VERIFY, UNCERTAIN, DONE, MANUALLY_CLOSED]
+        result_known:
+          type: boolean
+          description: 有可靠执行结果或已记录人工现场核实；未知执行保持 false。
+        node_locked:
+          type: boolean
+          description: TIMEOUT + UNCERTAIN 时仍为 true；不可再重启、移出或重绑定。
+        authenticated_source: {type: string, description: 已鉴别系统接入 ID，不是个人角色}
+        source_ip: {type: string}
+        task: {type: object, description: 原容器、配置快照和截止时间，供审计核验，不含秘密}
+        evidence: {type: object, nullable: true, description: Agent 持久执行阶段、时间和容器身份}
+        ledger_id: {type: string}
+        verify_deadline: {type: string, format: date-time, nullable: true}
         node_id:
           type: string
         operator:

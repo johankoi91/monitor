@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +28,9 @@ func request(h http.Handler, body []byte, secret string) *httptest.ResponseRecor
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/notifications", bytes.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	if secret != "" {
-		r.SetBasicAuth("test-id", secret)
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		r.Header.Set("Agora-Signature-V2", hex.EncodeToString(mac.Sum(nil)))
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -42,7 +47,7 @@ func TestAuthenticationAndPayloadValidation(t *testing.T) {
 	valid, _ := json.Marshal(sampleEvent("event-1"))
 	for _, secret := range []string{"", "wrong"} {
 		w := request(h, valid, secret)
-		if w.Code != 401 || w.Header().Get("WWW-Authenticate") == "" {
+		if w.Code != 401 {
 			t.Fatalf("auth response: %d", w.Code)
 		}
 	}

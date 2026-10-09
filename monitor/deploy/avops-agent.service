@@ -1,0 +1,28 @@
+[Unit]
+Description=RTC Docker monitoring and controlled restart Agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/avops-monitor/agent.env
+ExecStart=/opt/avops-monitor/agent
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=avops-agent
+StateDirectoryMode=0700
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=60
+ReadWritePaths=/var/lib/avops-agent
+MemoryMax=128M
+CPUQuota=25%
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

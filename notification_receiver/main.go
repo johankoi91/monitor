@@ -48,6 +48,7 @@ type event struct {
 type record struct {
 	ReceivedAt time.Time `json:"received_at"`
 	Event      event     `json:"event"`
+	RawBody    string    `json:"raw_body,omitempty"`
 }
 
 type store struct {
@@ -102,7 +103,7 @@ func openStore(dir string, maxBytes int64) (*store, error) {
 	}
 	if err == nil {
 		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 4096), maxBodyBytes*2)
+		scanner.Buffer(make([]byte, 4096), maxBodyBytes*4)
 		line := 0
 		for scanner.Scan() {
 			line++
@@ -144,7 +145,7 @@ func (e event) validate() error {
 			return errors.New("required identifier missing or too long")
 		}
 	}
-	if e.Type != "STATUS_CHANGED" || e.Product != "RTC" || e.OccurredAt.IsZero() || e.Stale == nil {
+	if (e.Type != "STATUS_CHANGED" && e.Type != "WEBHOOK_TEST") || e.Product != "RTC" || e.OccurredAt.IsZero() || e.Stale == nil {
 		return errors.New("invalid event type, product, timestamp or stale flag")
 	}
 	if len(e.Node) > 512 || len(e.Reason) > 4096 {
@@ -160,6 +161,10 @@ func (e event) validate() error {
 }
 
 func (s *store) accept(e event) (bool, error) {
+	return s.acceptBody(e, "")
+}
+
+func (s *store) acceptBody(e event, rawBody string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failed {
@@ -172,7 +177,7 @@ func (s *store) accept(e event) (bool, error) {
 		}
 		return true, nil
 	}
-	r := record{ReceivedAt: time.Now().UTC(), Event: e}
+	r := record{ReceivedAt: time.Now().UTC(), Event: e, RawBody: rawBody}
 	line, err := json.Marshal(r)
 	if err != nil {
 		return false, err
@@ -202,11 +207,15 @@ func (s *store) accept(e event) (bool, error) {
 }
 
 func (s *store) snapshot(limit int) ([]record, int, bool) {
+	return s.snapshotPage(limit, 0)
+}
+
+func (s *store) snapshotPage(limit, offset int) ([]record, int, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	count := len(s.records)
 	items := make([]record, 0, limit)
-	for i := count - 1; i >= 0 && len(items) < limit; i-- {
+	for i := count - 1 - offset; i >= 0 && len(items) < limit; i-- {
 		items = append(items, s.records[i])
 	}
 	return items, count, !s.failed
@@ -219,9 +228,14 @@ func jsonResponse(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-func handler(s *store, id, secret string) http.Handler {
+func handler(s *store, id, secret string, signingSecrets ...string) http.Handler {
+	webhookSecret := secret
+	if len(signingSecrets) > 0 {
+		webhookSecret = signingSecrets[0]
+	}
 	idHash, secretHash := sha256.Sum256([]byte(id)), sha256.Sum256([]byte(secret))
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", receiverPage)
 	mux.HandleFunc("/api/v1/notifications", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -236,6 +250,10 @@ func handler(s *store, id, secret string) http.Handler {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 		if err != nil {
 			jsonResponse(w, 413, map[string]string{"code": "BODY_TOO_LARGE"})
+			return
+		}
+		if !verifySignature(webhookSecret, body, r.Header) {
+			jsonResponse(w, 401, map[string]string{"code": "INVALID_SIGNATURE"})
 			return
 		}
 		var e event
@@ -263,7 +281,7 @@ func handler(s *store, id, secret string) http.Handler {
 			jsonResponse(w, 400, map[string]string{"code": "INVALID_EVENT", "message": err.Error()})
 			return
 		}
-		duplicate, err := s.accept(e)
+		duplicate, err := s.acceptBody(e, string(body))
 		if err != nil {
 			status, code := 503, "STORAGE_UNAVAILABLE"
 			if errors.Is(err, errConflict) {
@@ -291,8 +309,17 @@ func handler(s *store, id, secret string) http.Handler {
 			}
 			limit = v
 		}
-		items, count, ready := s.snapshot(limit)
-		jsonResponse(w, 200, map[string]any{"events": items, "total": count, "ready": ready})
+		offset := 0
+		if q := r.URL.Query().Get("offset"); q != "" {
+			v, err := strconv.Atoi(q)
+			if err != nil || v < 0 {
+				jsonResponse(w, 400, map[string]string{"code": "INVALID_OFFSET"})
+				return
+			}
+			offset = v
+		}
+		items, count, ready := s.snapshotPage(limit, offset)
+		jsonResponse(w, 200, map[string]any{"events": items, "total": count, "ready": ready, "offset": offset})
 	})
 	for _, route := range []string{"/health/live", "/health/ready"} {
 		mux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +337,12 @@ func handler(s *store, id, secret string) http.Handler {
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Webhook callbacks authenticate the raw body; Basic is only for the
+		// receiver's separate diagnostic read endpoints.
+		if r.URL.Path == "/api/v1/notifications" {
+			mux.ServeHTTP(w, r)
+			return
+		}
 		i, key, ok := r.BasicAuth()
 		iH, kH := sha256.Sum256([]byte(i)), sha256.Sum256([]byte(key))
 		validID := subtle.ConstantTimeCompare(iH[:], idHash[:])
@@ -350,6 +383,10 @@ func sourceGuard(next http.Handler, configured string) (http.Handler, error) {
 
 func main() {
 	id, secret := os.Getenv("AVOPS_RECEIVER_ID"), os.Getenv("AVOPS_RECEIVER_SECRET")
+	webhookSecret := os.Getenv("AVOPS_WEBHOOK_SECRET")
+	if webhookSecret == "" {
+		webhookSecret = secret
+	}
 	cert, key := os.Getenv("AVOPS_RECEIVER_TLS_CERT"), os.Getenv("AVOPS_RECEIVER_TLS_KEY")
 	if id == "" || secret == "" || strings.Contains(id, ":") || cert == "" || key == "" {
 		log.Fatal("receiver ID, secret, TLS certificate and key must be configured; ID cannot contain ':'")
@@ -375,7 +412,7 @@ func main() {
 	if addr == "" {
 		addr = "127.0.0.1:18443"
 	}
-	h, err := sourceGuard(handler(s, id, secret), os.Getenv("AVOPS_RECEIVER_ALLOWED_IPS"))
+	h, err := receiverSourceGuard(handler(s, id, secret, webhookSecret), os.Getenv("AVOPS_RECEIVER_ALLOWED_IPS"), os.Getenv("AVOPS_RECEIVER_VIEW_ALLOWED_IPS"))
 	if err != nil {
 		log.Fatal(err)
 	}

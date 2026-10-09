@@ -1,0 +1,445 @@
+:root {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+  color: #262626;
+  background: #f5f5f5;
+  font-size: 14px;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #f5f5f5;
+}
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.app-header.ant-layout-header {
+  height: auto;
+  min-height: 72px;
+  padding: 16px 32px;
+  background: #fff;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  line-height: 1.5;
+}
+.brand-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.session-actions {
+  min-width: 0;
+}
+.profile-trigger > span:not(.anticon) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: #1677ff;
+  color: #fff;
+  font-weight: 700;
+}
+.brand-group h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+.brand-group small {
+  color: #8c8c8c;
+  font-size: 12px;
+}
+.app-content.ant-layout-content {
+  flex: 1;
+  width: 100%;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 24px 32px;
+}
+.app-footer.ant-layout-footer {
+  text-align: center;
+  color: #8c8c8c;
+  padding: 20px;
+  font-size: 12px;
+  background: transparent;
+}
+.workspace-tabs {
+  margin-bottom: 16px;
+}
+.page-card.ant-card {
+  margin: 20px 0;
+}
+.page-card h2,
+.page-card h3 {
+  margin-top: 0;
+}
+.page-card p {
+  line-height: 1.7;
+  color: #8c8c8c;
+}
+.page-alert {
+  margin: 12px 0 20px;
+}
+.login-panel.ant-card {
+  max-width: 440px;
+  margin: 64px auto 0;
+}
+.login-panel .ant-btn-primary {
+  width: 100%;
+  height: 40px;
+}
+.login-register {
+  text-align: center;
+  margin-top: 12px;
+}
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.filters .ant-form-item {
+  margin-bottom: 0;
+  min-width: 180px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+.form-grid .ant-form-item {
+  min-width: 0;
+}
+.actions,
+.table-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+}
+.table-footer {
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.section-title h2,
+.section-title h3 {
+  margin: 0;
+}
+.section-title small,
+.member small {
+  display: block;
+  color: #8c8c8c;
+  font-weight: normal;
+  margin-top: 4px;
+}
+.member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+.member:last-child {
+  border-bottom: 0;
+}
+.member .actions {
+  margin: 0;
+}
+.node-scope-card.ant-card {
+  margin: 0 0 24px;
+}
+.node-scope-grid {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.node-scope-grid .ant-checkbox-wrapper {
+  padding: 12px;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.node-scope-grid .ant-checkbox-wrapper-checked {
+  background: #e6f4ff;
+  border-color: #91caff;
+}
+.service-counts {
+  margin: 12px 0 20px;
+}
+.node-card {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  margin-top: 16px;
+  overflow: hidden;
+}
+.node-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px;
+}
+.node-identity {
+  min-width: 0;
+}
+.node-identity h4 {
+  font-size: 16px;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.node-host {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #8c8c8c;
+  font-size: 12px;
+}
+.node-host-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #1677ff;
+}
+.node-layer {
+  border-left: 1px solid #f0f0f0;
+  padding-left: 8px;
+}
+.node-observation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+.node-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.node-policy {
+  padding: 12px 20px;
+  background: #fafafa;
+  border-top: 1px solid #f0f0f0;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+.node-policy > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.policy-pill {
+  padding: 2px 6px;
+  background: #f0f0f0;
+  border-radius: 4px;
+}
+.policy-enabled {
+  color: #389e0d;
+  background: #f6ffed;
+}
+.resource-view {
+  padding: 0 20px 12px;
+}
+.resource-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.resource-tile.ant-card {
+  background: #fafafa;
+  min-width: 0;
+}
+.resource-tile .ant-statistic-content {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.resource-tile .ant-typography {
+  font-size: 12px;
+}
+.metric-icon {
+  width: 16px;
+  height: 16px;
+  vertical-align: -2px;
+  flex-shrink: 0;
+}
+.metric-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.metric-panel.ant-card {
+  min-width: 0;
+}
+.metric-panel .ant-card-head-title {
+  white-space: normal;
+  font-size: 14px;
+}
+.metric-panel .ant-descriptions-item {
+  padding-bottom: 8px;
+}
+.metric-panel .ant-descriptions-item-label,
+.metric-panel .ant-descriptions-item-content {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.metric-panel .ant-descriptions-item-content {
+  font-variant-numeric: tabular-nums;
+}
+.metric-panel-note,
+.metric-inline-note {
+  font-size: 12px;
+  color: #8c8c8c;
+  line-height: 1.7;
+  margin-top: 16px;
+}
+.metric-empty {
+  text-align: center;
+  padding: 28px 16px;
+  color: #8c8c8c;
+}
+.metric-empty strong {
+  display: block;
+  margin: 8px 0;
+}
+.resource-unavailable {
+  padding: 16px;
+  display: flex;
+  gap: 12px;
+  background: #fafafa;
+  border-radius: 8px;
+  color: #8c8c8c;
+}
+.resource-unavailable strong,
+.resource-unavailable span {
+  display: block;
+}
+.filesystem-hero {
+  font-size: 28px;
+  font-weight: 600;
+  margin-bottom: 20px;
+}
+.device-list {
+  display: grid;
+  gap: 16px;
+}
+.device-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.device-metrics {
+  margin-top: 12px;
+}
+pre {
+  background: #fafafa;
+  border-radius: 6px;
+  padding: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+  font-size: 12px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.ant-modal-body .ant-alert {
+  margin-bottom: 16px;
+}
+.ant-modal-body .page-card {
+  margin: 16px 0;
+}
+.ant-table-cell {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 900px) {
+  .app-header.ant-layout-header {
+    padding: 16px 20px;
+  }
+  .app-content.ant-layout-content {
+    padding: 20px;
+  }
+  .resource-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .metric-panel-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .app-header.ant-layout-header {
+    padding: 12px;
+    gap: 8px;
+  }
+  .brand-group h1 {
+    font-size: 15px;
+  }
+  .brand-group small {
+    display: none;
+  }
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+  }
+  .profile-trigger {
+    max-width: 150px;
+    font-size: 12px;
+  }
+  .app-content.ant-layout-content {
+    padding: 12px;
+  }
+  .form-grid,
+  .node-scope-grid {
+    grid-template-columns: 1fr;
+  }
+  .filters .ant-form-item {
+    width: 100%;
+  }
+  .node-card-header,
+  .node-policy,
+  .section-title,
+  .member {
+    flex-wrap: wrap;
+  }
+  .node-card-header {
+    padding: 16px;
+  }
+  .resource-view {
+    padding: 0 16px 12px;
+  }
+  .resource-tile .ant-statistic-content {
+    font-size: 18px;
+  }
+  .login-panel.ant-card {
+    margin-top: 40px;
+  }
+}
