@@ -279,6 +279,9 @@ func (d *DB) queryRaw(query string, args []any) ([]json.RawMessage, error) {
 	return result, rows.Err()
 }
 func (d *DB) ReadLog(name, selector string, limit int) ([]json.RawMessage, error) {
+	if name == "operations" && selector == "" {
+		return d.restoreLog(name)
+	}
 	if name == "operations" && selector != "" {
 		if limit < 1 || limit > 500 {
 			limit = 200

@@ -22,10 +22,8 @@ import (
 const nodeID = "rtc-192-59/avops-v1-canary"
 
 type privateState struct {
-	Restart  access.Issued `json:"restart"`
-	Wrong    access.Issued `json:"wrong"`
-	Revoked  access.Issued `json:"revoked"`
-	Requests []string      `json:"requests"`
+	Restart access.Issued `json:"restart"`
+	Revoked access.Issued `json:"revoked"`
 }
 type state struct {
 	ContainerID string         `json:"container_id"`
@@ -159,54 +157,29 @@ func main() {
 		p.Image = c.Image
 		p.Results["stage"] = true
 	case "register":
-		for _, purpose := range []string{"RESTART"} {
-			var response struct {
-				ID string `json:"request_id"`
-			}
-			status, e := admin.call("POST", "/api/v1/access-key-requests", map[string]any{"name": "20261006 真实演练 " + purpose, "reason": "在试点新建的独立容器验证权限与恢复"}, &response)
-			if e != nil || status != 202 {
-				fatal("key application failed")
-			}
-			keys.Requests = append(keys.Requests, response.ID)
-			nodes := []string{nodeID}
-			var issued access.Issued
-			status, e = admin.call("POST", "/api/v1/access-keys", access.IssueRequest{RequestID: response.ID, AllowedNodes: nodes, ApprovalReason: "本次授权演练，只含新建非业务容器"}, &issued)
-			if e != nil || status != 201 {
-				fatal("key issuance failed")
-			}
-			keys.Restart = issued
+		var issued access.Issued
+		status, e := admin.call("POST", "/api/v1/access-keys", access.IssueRequest{Name: "演练重启Key", Purpose: "RESTART", ApprovalReason: "独立容器演练"}, &issued)
+		if e != nil || status != 201 {
+			fatal("key issuance failed")
 		}
-		for _, kind := range []string{"wrong", "revoked"} {
-			nodes := []string{nodeID}
-			if kind == "wrong" {
-				nodes = []string{"rtc-192-59/agora_event_collector"}
-			}
-			var issued access.Issued
-			status, e := admin.call("POST", "/api/v1/access-keys", access.IssueRequest{Name: "20261006 演练 " + kind, Purpose: "RESTART", AllowedNodes: nodes, ApprovalReason: "仅做拒绝验证，验证后立即停用"}, &issued)
-			if e != nil || status != 201 {
-				fatal("scope test key failed")
-			}
-			if kind == "wrong" {
-				keys.Wrong = issued
-			} else {
-				keys.Revoked = issued
-				var result map[string]any
-				admin.call("POST", "/api/v1/access-keys/"+issued.Key.ID+"/revoke", map[string]any{}, &result)
-			}
+		keys.Restart = issued
+		status, e = admin.call("POST", "/api/v1/access-keys", access.IssueRequest{Name: "停用验证Key", Purpose: "RESTART", ApprovalReason: "仅做停用验证"}, &issued)
+		if e != nil || status != 201 {
+			fatal("revocation test key failed")
 		}
+		keys.Revoked = issued
+		var result map[string]any
+		admin.call("POST", "/api/v1/access-keys/"+issued.Key.ID+"/revoke", map[string]any{}, &result)
 		encoded, _ := json.Marshal(keys)
 		if os.WriteFile(keyPath, encoded, 0600) != nil {
 			fatal("private key handoff write failed")
 		}
-		p.Results["key_registration"] = map[string]any{"restart_key_id": keys.Restart.Key.ID, "node_scope": []string{nodeID}, "requests": keys.Requests}
+		p.Results["key_registration"] = map[string]any{"restart_key_id": keys.Restart.Key.ID}
 	case "deny":
 		check(api{Client: admin.Client}, request("unauth"), 401, "UNAUTHORIZED")
 		check(api{ID: "invalid", Secret: "invalid", Client: admin.Client}, request("bad"), 401, "UNAUTHORIZED")
 		check(admin, request("bootstrap"), 403, "RESTART_KEY_REQUIRED")
-		check(client(keys.Wrong), request("wrong"), 403, "KEY_NODE_DENIED")
 		check(client(keys.Revoked), request("revoked"), 401, "UNAUTHORIZED")
-		var result map[string]any
-		admin.call("POST", "/api/v1/access-keys/"+keys.Wrong.Key.ID+"/revoke", map[string]any{}, &result)
 	case "node-deny":
 		check(client(keys.Restart), request("demo-white-denied-20261006"), 409, "NODE_NOT_RESTARTABLE")
 	case "center-rule", "agent-rule":

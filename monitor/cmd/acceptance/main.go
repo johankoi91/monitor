@@ -199,12 +199,12 @@ func main() {
 		}) {
 			fail("operation result timed out")
 		}
-		if operation.Status != "SUCCESS" || operation.NodeLocked || !operation.ResultKnown || operation.Evidence == nil || operation.Task.ContainerID != p.ContainerID || operation.Task.SnapshotID != p.SnapshotID {
+		if operation.Status != "SUCCESS" || operation.NodeLocked || !operation.ResultKnown() || operation.Evidence == nil || operation.Task.ContainerID != p.ContainerID || operation.Task.SnapshotID != p.SnapshotID {
 			fail("original restart/verification failed")
 		}
 		p.AfterStartedAt = operation.Evidence.AfterStartedAt
 		p.Results["original_restart_verified"] = true
-		p.Results["operation_seconds"] = operation.DurationMS / 1000
+		p.Results["operation_seconds"] = operation.DurationMS() / 1000
 		var records struct {
 			Records []model.AuditRecord `json:"records"`
 		}

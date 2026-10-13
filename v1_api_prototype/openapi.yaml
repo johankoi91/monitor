@@ -39,6 +39,27 @@ tags:
     description: 容器发现、脱敏启动配置与持久基线
 
 paths:
+  /api/v1/nodes/startup:
+    get:
+      summary: 通过 WSS 实时读取已纳管节点启动参数
+      description: 需要 monitor.read，仅限当前基准成员；中心向对应Agent发送startup_request，按精确容器ID现场inspect，响应直接返回不落库。中心等待8秒、Agent读取5秒；离线/超时不回退旧缓存。
+      parameters:
+        - in: query
+          name: node_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: startup（实际原值参数）、stale=false；仅当前请求使用
+          content:
+            application/json:
+              schema: {type: object}
+        "404":
+          description: 节点未纳管或容器当前不可见
+        "503":
+          description: Agent离线或实际读取失败
+        "504":
+          description: Agent未在期限内返回
   /api/v1/storage/status:
     get:
       summary: 数据库容量、数据盘余量和会话维护状态
@@ -198,11 +219,6 @@ paths:
         - {in: query, name: offset, schema: {type: integer, minimum: 0}}
       responses:
         '200': {description: versions/total}
-  /api/v1/access-keys/owners:
-    get:
-      summary: Key 管理端选择已开通的所属账号
-      responses:
-        '200': {description: 活跃账号列表，不包含密码}
   /api/v1/access-keys:
     get:
       tags: [System]
@@ -224,7 +240,7 @@ paths:
     post:
       tags: [System]
       summary: Agora 账号签发机器密钥
-      description: Agora 人员直接签发。必须明确指定基线内节点，签发不开放节点白名单。Secret 只返回一次。
+      description: 已登录Agora账号签发Key，后端自动绑定当前账号，不接受指定其他owner。不需要签发依据或节点范围，Secret只返回一次。
       requestBody:
         required: true
         content:
@@ -232,16 +248,10 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [approval_reason]
+              required: [name, purpose]
               properties:
                 name: {type: string, maxLength: 128}
                 purpose: {type: string, enum: [RESTART]}
-                allowed_node_ids:
-                  type: array
-                  maxItems: 64
-                  uniqueItems: true
-                  items: {type: string}
-                approval_reason: {type: string, minLength: 1, maxLength: 1000}
       responses:
         '201':
           description: 已持久化签发；仅此响应含 Secret，需安全交付
@@ -252,7 +262,7 @@ paths:
                 properties:
                   key: {$ref: '#/components/schemas/AccessKey'}
                   secret: {type: string, description: 仅签发响应返回一次}
-        '400': {description: 用途/范围无效或持久化失败}
+        '400': {description: 名称/用途/所属账号/无效或持久化失败}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {description: 需要 Agora 账号}
         '404': {description: 授权节点不在基线中}
@@ -723,9 +733,8 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [operator, reason, outcome, evidence]
+              required: [reason, outcome, evidence]
               properties:
-                operator: {type: string, minLength: 1, maxLength: 128}
                 reason: {type: string, minLength: 2, maxLength: 500}
                 outcome: {type: string, enum: [EXECUTED, NOT_EXECUTED]}
                 evidence: {type: string, minLength: 10, maxLength: 1000}
@@ -857,7 +866,7 @@ paths:
         仅允许重启 services.yaml 中 restart_enabled=true 的节点。
         必须使用已注册、启用且覆盖目标节点的独立 RESTART Key；普通机器凭证不得直接重启。
         中心/Agent 精确规则、现场状态、身份、互斥和冷却仍独立核验。
-        账号请求需 restart.execute 权限及独立重启 Key；operator 为自填说明，实际账号/Key 来源另行审计。
+        账号请求需 restart.execute 权限及独立重启 Key；发起人由实际账号/Key确定，不填写说明人。
       parameters:
         - in: header
           name: X-AVOPS-Restart-Key-ID
@@ -993,13 +1002,9 @@ components:
         key_id: {type: string}
         name: {type: string}
         purpose: {type: string, enum: [RESTART]}
-        allowed_node_ids:
-          type: array
-          items: {type: string}
         enabled: {type: boolean}
         created_at: {type: string, format: date-time}
         created_by: {type: string}
-        approval_reason: {type: string}
         request_id: {type: string}
     NotificationSettings:
       type: object
@@ -1550,14 +1555,11 @@ components:
 
     RestartRequest:
       type: object
-      required: [node_id, operator, reason, request_key]
+      required: [node_id, reason, request_key]
       properties:
         node_id:
           type: string
-          example: rtm-zw-01/forwarder0
-        operator:
-          type: string
-          minLength: 1
+          example: 111.230.192.59-avops-v1-canary
         reason:
           type: string
           minLength: 2
@@ -1569,36 +1571,25 @@ components:
 
     Operation:
       type: object
-      required: [operation_id, request_key, type, status, phase, node_id, operator, reason, authenticated_source, source_ip, requested_at, result_known, node_locked]
+      required: [operation_id, request_key, status, node_id, reason, authenticated_source, requested_at, node_locked]
       properties:
         operation_id:
           type: string
         request_key:
           type: string
-        type:
-          type: string
-          enum: [RESTART_CONTAINER]
         status:
           type: string
-          enum: [PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, REJECTED]
-        phase:
-          type: string
-          enum: [ACCEPTED, EXECUTE_INTENT, WAIT_RESULT, VERIFY, UNCERTAIN, DONE, MANUALLY_CLOSED]
-        result_known:
-          type: boolean
-          description: 有可靠执行结果或已记录人工现场核实；未知执行保持 false。
+          enum: [ACCEPTED, EXECUTE_INTENT, WAIT_RESULT, VERIFY, UNCERTAIN, SUCCESS, FAILED, TIMEOUT, REJECTED, MANUALLY_CLOSED]
         node_locked:
           type: boolean
           description: TIMEOUT + UNCERTAIN 时仍为 true；不可再重启、移出或重绑定。
         authenticated_source: {type: string, description: 已鉴别系统接入 ID，不是个人角色}
         source_ip: {type: string}
-        task: {type: object, description: 原容器、配置快照和截止时间，供审计核验，不含秘密}
+        target: {type: object, description: 唯一目标身份；执行中保留截止时间，终态移除期限，不存重复命令封装}
         evidence: {type: object, nullable: true, description: Agent 持久执行阶段、时间和容器身份}
         ledger_id: {type: string}
         verify_deadline: {type: string, format: date-time, nullable: true}
         node_id:
-          type: string
-        operator:
           type: string
         reason:
           type: string
@@ -1613,8 +1604,6 @@ components:
           type: string
           format: date-time
           nullable: true
-        duration_ms:
-          type: integer
         before_status:
           $ref: "#/components/schemas/HealthStatus"
         after_status:

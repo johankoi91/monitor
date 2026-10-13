@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,25 +29,22 @@ type Request struct {
 	KeyID       string    `json:"key_id,omitempty"`
 }
 type Key struct {
-	Kind           string    `json:"kind,omitempty"`
-	OwnerID        string    `json:"owner_id,omitempty"`
-	ID             string    `json:"key_id"`
-	Name           string    `json:"name"`
-	Purpose        string    `json:"purpose"`
-	AllowedNodes   []string  `json:"allowed_node_ids"`
-	CreatedAt      time.Time `json:"created_at"`
-	CreatedBy      string    `json:"created_by"`
-	Enabled        bool      `json:"enabled"`
-	ApprovalReason string    `json:"approval_reason"`
-	RequestID      string    `json:"request_id,omitempty"`
+	Kind      string    `json:"kind,omitempty"`
+	OwnerID   string    `json:"owner_id,omitempty"`
+	ID        string    `json:"key_id"`
+	Name      string    `json:"name"`
+	Purpose   string    `json:"purpose"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by"`
+	Enabled   bool      `json:"enabled"`
+	RequestID string    `json:"request_id,omitempty"`
 }
 type IssueRequest struct {
-	OwnerID        string   `json:"owner_id,omitempty"`
-	RequestID      string   `json:"request_id,omitempty"`
-	Name           string   `json:"name"`
-	Purpose        string   `json:"purpose"`
-	AllowedNodes   []string `json:"allowed_node_ids"`
-	ApprovalReason string   `json:"approval_reason"`
+	OwnerID        string `json:"-"`
+	RequestID      string `json:"request_id,omitempty"`
+	Name           string `json:"name"`
+	Purpose        string `json:"purpose"`
+	ApprovalReason string `json:"approval_reason,omitempty"` // legacy input ignored
 }
 type Issued struct {
 	Key    Key    `json:"key"`
@@ -155,28 +153,12 @@ func (r *Registry) Issue(input IssueRequest, source string) (Issued, error) {
 		input.Name = found.Name
 		input.Purpose = found.Purpose
 	}
-	if strings.TrimSpace(input.Name) == "" || len(input.Name) > 128 || input.Purpose != "RESTART" || strings.TrimSpace(input.ApprovalReason) == "" || len(input.ApprovalReason) > 1000 {
-		return Issued{}, errors.New("仅支持签发重启安全 Key，请填写名称和签发依据")
-	}
-	if input.Purpose == "RESTART" && len(input.AllowedNodes) == 0 {
-		return Issued{}, errors.New("重启安全 Key 必须限定具体节点")
-	}
-	if len(input.AllowedNodes) > 64 {
-		return Issued{}, errors.New("每个重启 Key 最多允许 64 个节点")
-	}
-	seen := map[string]bool{}
-	for _, node := range input.AllowedNodes {
-		if node == "" || len(node) > 512 || seen[node] {
-			return Issued{}, errors.New("节点范围不能为空或重复")
-		}
-		seen[node] = true
+	if strings.TrimSpace(input.Name) == "" || len(input.Name) > 128 || input.Purpose != "RESTART" {
+		return Issued{}, errors.New("仅支持签发重启安全 Key，请填写名称")
 	}
 	secret := random()
-	key := Key{Kind: string(credential.KindRestart), ID: "KEY-" + random()[:24], Name: input.Name, Purpose: input.Purpose, AllowedNodes: input.AllowedNodes, CreatedAt: time.Now().UTC(), CreatedBy: source, Enabled: true, ApprovalReason: input.ApprovalReason, RequestID: input.RequestID}
+	key := Key{Kind: string(credential.KindRestart), ID: "KEY-" + random()[:24], Name: input.Name, Purpose: input.Purpose, CreatedAt: time.Now().UTC(), CreatedBy: source, Enabled: true, RequestID: input.RequestID}
 	key.OwnerID = input.OwnerID
-	if key.AllowedNodes == nil {
-		key.AllowedNodes = []string{}
-	}
 	if request != nil {
 		request.Status = "ISSUED"
 		request.KeyID = key.ID
@@ -194,17 +176,6 @@ func (r *Registry) Authenticate(id, secret string) (Key, bool) {
 	expected := r.hashes[id]
 	valid := subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
 	return key, ok && key.Kind == string(credential.KindRestart) && key.Purpose == "RESTART" && key.Enabled && valid
-}
-func (r *Registry) AllowsNode(key Key, node string) bool {
-	if key.Purpose != "RESTART" {
-		return false
-	}
-	for _, allowed := range key.AllowedNodes {
-		if allowed == node {
-			return true
-		}
-	}
-	return false
 }
 func (r *Registry) Revoke(id, source string) error {
 	r.mu.Lock()
@@ -225,6 +196,12 @@ func (r *Registry) List() any {
 			keys = append(keys, k)
 		}
 	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].CreatedAt.Equal(keys[j].CreatedAt) {
+			return keys[i].ID > keys[j].ID
+		}
+		return keys[i].CreatedAt.After(keys[j].CreatedAt)
+	})
 	return map[string]any{"keys": keys}
 }
 func (r *Registry) Close() { r.log.Close() }

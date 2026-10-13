@@ -13,13 +13,13 @@ func TestDirectIssueAndRevocationRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued, err := r.Issue(IssueRequest{Name: "direct restart", Purpose: "RESTART", AllowedNodes: []string{"a/canary"}, ApprovalReason: "isolated test approval"}, "bootstrap")
+	issued, err := r.Issue(IssueRequest{Name: "direct restart", Purpose: "RESTART", ApprovalReason: "isolated test approval"}, "bootstrap")
 	if err != nil {
 		t.Fatal(err)
 	}
 	key, ok := r.Authenticate(issued.Key.ID, issued.Secret)
-	if !ok || !r.AllowsNode(key, "a/canary") || r.AllowsNode(key, "a/ap") {
-		t.Fatal("key node restriction failed")
+	if !ok || key.Purpose != "RESTART" {
+		t.Fatal("restart key authentication failed")
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "access-keys.jsonl"))
 	if strings.Contains(string(data), issued.Secret) {
@@ -50,7 +50,7 @@ func TestOnlyRestartKeysCanBeIssued(t *testing.T) {
 	if _, err = r.Issue(IssueRequest{Name: "console", Purpose: "CONSOLE", ApprovalReason: "test"}, "bootstrap"); err == nil {
 		t.Fatal("console key was still issued")
 	}
-	if _, err = r.Issue(IssueRequest{Name: "restart", Purpose: "RESTART", AllowedNodes: []string{"a/canary"}, ApprovalReason: "test"}, "bootstrap"); err != nil {
+	if _, err = r.Issue(IssueRequest{Name: "restart", Purpose: "RESTART", ApprovalReason: "test"}, "bootstrap"); err != nil {
 		t.Fatal(err)
 	}
 }

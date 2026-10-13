@@ -4,11 +4,19 @@
 
 ## 数据落点
 
+Key节点范围已取消：Key请求/响应不含allowed_node_ids，数据库key_node_scopes表和当前Key/Key审计JSON中的旧范围字段已清除。现有Key的ID、哈希、所属账号和启停状态保留；中心/Agent批准规则和账号权限仍校验。既有环境停中心后由owner执行 `dbmigrate -remove-key-scopes`，先做一致备份；不授予runtime账号DDL权限，旧程序不可直接回滚到缺少范围表的结构。
+
+2026-10-09启动参数改为WSS按需获取，不再保存在agent_snapshots/containers；表中只保留容器元数据、资源、生命周期及配置指纹/完整性标记。新版启动清除旧快照中的startup字段，周期投影也拒绝持久化该字段。实时参数响应不写documents/审计/任务表，不提供历史参数查询。
+
+本次结构迁移必须停中心后使用数据库owner执行 `dbmigrate -compact-operations`，私有owner.env由部署侧读取；不得授予runtime账号ALTER权限。迁移成功再启动新中心，启动只检查/读取已经完成的迁移标记。首次安装也先由owner运行此命令。
+
+2026-10-09 操作记录收敛：结果JSON仅存一套状态，目标保存在target，命令封装的重复ID/type/action不再保存；耗时和结果是否已知由时间/锁计算，移除自填operator。PG删除operations.phase/result_known/operator列，阶段审计仅保存时间、阶段、说明、调用来源，不重复整份操作。旧记录在中心启动时事务迁移，幂等键、容器身份、启动时间证据和未知锁保留。该数据格式不能直接回滚到旧程序；回滚须使用升级前匹配的数据库一致备份和配置，并核对备份后是否有新操作。
+
 | 表 | 内容与一致性 |
 |---|---|
 | documents、baseline_versions、nodes | 当前基准、历史版本、YAML、变更和结构化节点；保存同一事务提交 |
 | operations、operation_audit | 当前操作、唯一 request_key、节点锁、执行阶段/证据；状态与审计原子提交 |
-| access_keys、key_requests、key_node_scopes、access_audit | Key 哈希、申请、用途、账号归属、授权节点、签发/停用记录 |
+| access_keys、key_requests、access_audit | Key哈希、历史申请、用途、账号归属及签发/停用记录；Key节点范围已移除 |
 | notification_events、notification_facts、notification_state、notification_audit | 状态比较事实、可靠待发/重试、投递结果 |
 | agent_snapshots、containers | 最新完整脱敏快照、启动配置、指标与生命周期；重启恢复后先标为离线/过期 |
 | users、roles、permissions、user_roles、role_permissions | 注册状态、密码哈希、角色及功能权限 |
@@ -20,6 +28,8 @@
 数据库唯一约束保证 request_key 唯一、同节点最多一个 node_locked 操作；中心还保留既有幂等/并发/冷却检查。写者使用数据库会话 advisory lock，另一中心无法成为同一数据库的写者。连接断开即停用该写者，不静默重新获取连接继续执行；修复数据库后重启中心并按账本恢复。查询数据库失败返回 503，可靠写入失败拒绝新重启，最新健康缓存不被伪造为成功。
 
 ## 账号与权限
+
+Key签发自动绑定当前账号：生产签发需有效账号会话，后端以会话user_id设置owner_id，不接受客户端指定所属账号；无需签发依据，签发/轮换均只填写名称。新Key所属账号显示当前账号名，旧Key归属不自动修改。列表按created_at倒序，日期相同时按Key ID稳定排列；历史签发依据保留在旧审计数据，不作为新表单或新响应字段。
 
 ### 通用凭证模型
 
@@ -36,9 +46,9 @@
 
 每个 API 请求在后端校验权限，不能靠隐藏按钮作为控制。停用账号、改变账号角色、修改角色权限及改密使旧会话失效；密码修改需要原密码，退出登录撤销当前会话。登录失败/注册按源 IP 限流；来源网络与跨站写入控制继续生效。会话只保存在当前页面内存，不写 URL、cookie 或浏览器存储，刷新须重新登录。
 
-重启/未知结果核实同时要求账号有权限、独立 RESTART Key 覆盖节点、中心/Agent 精确白名单和现场状态/身份/互斥/冷却检查。账号会话调用使用 Bearer token，加 `X-AVOPS-Restart-Key-ID`、`X-AVOPS-Restart-Key-Secret`。绑定个人账号的 Key 只能由该账号在页面使用，所属账号停用/权限不足时机器调用也拒绝。
+重启/未知结果核实同时要求账号有权限、有效独立 RESTART Key、中心/Agent 精确白名单和现场状态/身份/互斥/冷却检查。账号会话调用使用 Bearer token，加 `X-AVOPS-Restart-Key-ID`、`X-AVOPS-Restart-Key-Secret`。绑定个人账号的 Key 只能由该账号在页面使用，所属账号停用/权限不足时机器调用也拒绝。
 
-Agent 和受控机器接口继续使用独立 Basic Auth；旧 Key 未自动伪造账号归属，保留原用途和节点范围；未绑定账号的 Key 仅可读取状态/资源和配置通知，不能绕过 Agora 专属模块。机器调用台账/全局操作/审计须绑定有权限Agora账号；客户的重启Key可调用批准节点的重启及该Key发起的结果查询。账号会话配独立重启 Key 仍可使用原 Key。页面不提供系统 Key 登录或部署初始化管理凭证入口。Agent/通知认证独立于个人会话。
+Agent 和受控机器接口继续使用独立 Basic Auth；旧 Key 未自动伪造账号归属，保留原用途，移除Key节点范围；未绑定账号的 Key 仅可读取状态/资源和配置通知，不能绕过 Agora 专属模块。机器调用台账/全局操作/审计须绑定有权限Agora账号；客户的重启Key可调用批准节点的重启及该Key发起的结果查询。账号会话配独立重启 Key 仍可使用原 Key。页面不提供系统 Key 登录或部署初始化管理凭证入口。Agent/通知认证独立于个人会话。
 
 ## 接口
 
@@ -56,7 +66,6 @@ Agent 和受控机器接口继续使用独立 Basic Auth；旧 Key 未自动伪�
 | GET /api/v1/permissions | 权限目录 |
 | GET /api/v1/baseline/history | 历史定义/变更分页，未提供自动回滚 |
 | GET /api/v1/operations | status/node_id/source/limit/offset 查询；active=true 为全部锁定操作 |
-| GET /api/v1/access-keys/owners | Key 管理端选择已开通账号 |
 
 ## 部署与密钥
 

@@ -17,6 +17,25 @@ import (
 
 const fixture = `{"Id":"container-a","Name":"/agora_local_ap","Image":"sha256:image","Path":"/opt/ap","Args":["--password","-secret-cli","--port=443","https://alice:url-secret@example.com/a?q=query-secret"],"Config":{"Image":"rtc/ap:1","Entrypoint":["sh","-c","echo shell-secret"],"Cmd":["--api-key=api-secret"],"Env":["PASSWORD=env-secret","TZ=Asia/Shanghai","ACCESS_TOKEN=token-secret"],"WorkingDir":"/opt","User":"root","ExposedPorts":{"443/tcp":{}}},"HostConfig":{"Binds":["/config:/etc/ap:ro"],"NetworkMode":"host","RestartPolicy":{"Name":"always","MaximumRetryCount":0},"PortBindings":{"443/tcp":[{"HostIp":"127.0.0.1","HostPort":"443"}]}},"State":{"Status":"running","StartedAt":"2026-01-01T00:00:00Z","ExitCode":0},"RestartCount":0}`
 
+func TestRawStartupPreservesActualValues(t *testing.T) {
+	var raw inspect
+	if err := json.Unmarshal([]byte(fixture), &raw); err != nil {
+		t.Fatal(err)
+	}
+	s := startup(raw, time.Now(), Policy{RawStartup: true})
+	if len(s.RedactedFields) != 0 || s.Config.Cmd[0] != raw.Config.Cmd[0] || s.Config.Entrypoint[2] != raw.Config.Entrypoint[2] || s.Config.Args[3] != raw.Args[3] {
+		t.Fatal("raw command arguments were changed")
+	}
+	for _, e := range s.Config.Env {
+		if e.Redacted {
+			t.Fatal("raw environment value redacted")
+		}
+	}
+	if s.Config.Env[0].Value != "token-secret" {
+		t.Fatal("raw environment value changed")
+	}
+}
+
 func TestRedactionAndStableFingerprint(t *testing.T) {
 	var raw inspect
 	if err := json.Unmarshal([]byte(fixture), &raw); err != nil {

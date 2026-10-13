@@ -1,18 +1,35 @@
-# RTC 运维监控 V1.0 离线交付
+# 运维监控 V1.0.3 离线 Docker 交付
 
-本包面向 Linux x86_64/Kylin V10/Docker 18.09+/systemd 243+。bin 为静态程序，中心已内嵌 React；images 包含 Docker 离线镜像，source 包含源码、锁文件、OpenAPI、模板及完整文档。没有真实凭证、私钥、客户运行数据或原始音视频。
+适用于Linux x86_64、Docker25+。Web随中心镜像提供，无需Node/CDN或独立前端容器，API仍为V1.0。包含最新中心/Agent镜像、PG17.11镜像、迁移/配置工具、cAdvisor、通知接收服务与当前源码。证书/私钥、密码、Key和运行数据独立交付。
 
-1. 用 SHA256SUMS 核对程序/镜像文件。
-2. 按 source/monitor/OPERATIONS.md 准备各机的独立接入凭证、证书、Agent 登记和来源限制；实际配置独立交付，不复制占位值。
-3. 先按 source/monitor/POSTGRESQL.md 生成私有材料、加载PG17.11镜像、初始化受限runtime账号与schema；已有环境先备份再迁移。随后按systemd方式安装，把bin/center或bin/agent与对应私有配置/service单元放入材料目录。中心还须database.env和center-postgres.conf，再运行install-center.sh或install-agent.sh。
-4. 可选 `docker load -i images/avops-images-linux-amd64.tar`。中心镜像为非 root，按所选 UID 设置配置/数据权限；Agent 挂载本机 Socket、独立任务目录和批准规则，采用 host 网络。不要将试点的空/禁止白名单改为全开放。
-5. 先按 source/monitor/POSTGRESQL.md 生成PG私有材料，加载images/avops-postgres-17-linux-amd64.tar，启动PG17.11并迁移数据库；数据库不可用时正式中心不能回退文件鉴权。页面使用已开通账号/密码，采用会话和RBAC；机器/Agent接口仍按用途使用Basic，查询异常业务节点返回HTTP200，通过body判断。
+## 新环境安装
 
-升级前由Agora查询 /api/v1/operations?active=true 并完成/核实所有占用节点操作。中心使用pg_dump一致备份并独立保存加密密钥/配置/证书；Agent停服一致备份执行WAL。只能回滚兼容当前PG数据与角色权限的程序，不能回退旧文件鉴权绕过RBAC，禁止删任务日志解锁。
+1. 在包根目录执行 `sha256sum -c SHA256SUMS`，加载 `images/avops-postgres-17-linux-amd64.tar`。无需Compose或公网拉取。
+2. 执行 `bin/pgprovision -out /私有配置目录`，按实际回环PG地址/端口调整owner.env/database.env。以999:999拥有的新目录持久PG数据，端口只发布127.0.0.1。PG运行参数见source/monitor/deploy/start-postgres.sh，已有数据库不得重新初始化。
+3. 在新PG执行生成的init.sql，创建受限runtime和默认读写权限；从私有owner.env加载环境，用owner依次执行 `bin/dbmigrate -compact-operations`、`bin/dbmigrate -remove-key-scopes`，先完成DDL再启动中心。不授予runtime ALTER权限。
+4. 准备center.env、database.env、center.yaml、server.pem和server-key.pem，登记实际Agent和证书身份、HTTPS/WSS监听；批准规则默认空。执行 `bash deploy/docker-install.sh center /私有配置目录 /持久中心目录 avops-center`。
+5. 每台主机准备agent.env和restart-rules.yaml（默认空数组），配置主动WSS地址、Agent凭证和证书域名。执行 `bash deploy/docker-install.sh agent /私有配置目录 /持久Agent目录 avops-agent`。Agent使用本机Docker Socket和host网络，独立账本目录；不能双实例共用账本。可选配置本机cAdvisor和实际Docker数据盘路径。
+6. 初始化账号登录，核对Agent在线，从发现清单选择真实容器保存基准/YAML。新节点默认禁重启。Key签发只填名称，自动绑定当前Agora账号。启动参数点击后WSS现场读取，不存数据库。
 
-详细说明：[运行维护](source/monitor/OPERATIONS.md)、[功能说明](source/monitor/README.md)、[PRD](source/音视频运维监控管理系统_PRD_v1.0_评审版.md)、[真实验收记录](source/dp/RTC试点_V1.0_完整功能验收记录_2026-10-05.md)。真实 RTC 核心节点的重启批准不由本包自动授予。
-# PostgreSQL 依赖更新（2026-10-07）
+安装脚本遇同名容器拒绝覆盖，镜像从包内加载、使用pull=never；Docker限制CPU/内存/PID、只读根文件系统及轮转日志。HTTPS域名/DNS和客户来源限制按现场配置，不跳过证书验证。Socket读取及受控restart权限需在交付环境确认。
 
-2026-10-08重新打包的1.0.1包含当前中心/Agent、React、账号/RBAC、PG17.11离线镜像与工具、cAdvisor v0.60.6二进制、Webhook接收服务/页面及本地查看代理。镜像标签avops-center:1.0.1和avops-agent:1.0.1；API仍属于V1.0/v1。Docker升级包未附带，使用cAdvisor需现场Docker25+，不要自动升级客户业务Docker。
+## 隔离干净安装验收
 
-当前中心正式存储必须 PostgreSQL；历史离线包不包含本次账号/RBAC 功能，不能作为当前发布版本。新包须带 postgres 17 镜像、dbmigrate/pgprovision 工具和 schema，私有凭证另行生成。按 [POSTGRESQL](../POSTGRESQL.md) 先初始化 DB/受限 runtime，再迁移或建立 schema，最后启动中心；加密密钥独立备份。
+Linux Docker主机上，端口25433/29444/28085空闲、已有有效TLS证书时：
+
+```bash
+python3 deploy/clean-install-check.py \
+  --bundle /绝对路径/monitor-1.0.3-linux-amd64 \
+  --work /新的私有测试目录 \
+  --cert /证书.pem --key /私钥.pem --tls-name 证书域名
+```
+
+脚本创建全新PG目录、凭证、容器和端口，验证owner迁移/受限runtime、HTTPS账号登录、Agent WSS发现、保存台账、实时参数且不落库、Key自动归属、Basic REST演练重启/幂等/审计和中心重启恢复。它仅纳管自己新建的canary，结束移除测试容器，保留私有数据和proof.json。需要root、Python3标准库、Docker及有效证书，不需要Go/Node/Compose或网络下载。
+
+## 备份与升级回退
+
+升级前查询活动/未知操作并完成核实。中心做pg_dump一致备份，密钥/配置/证书独立保护；Agent停服备份账本。保留旧镜像和数据，安装工具不能覆盖旧实例；明确停旧写者后启动新容器，不执行整个栈down或删除volume。
+
+操作schema已精简、Key范围表已移除，旧二进制不能直接回滚到新数据库结构。只有兼容程序可以原库回退；恢复旧DB备份必须核对备份后新增操作和未知执行，不能丢失幂等证据。启动后核对台账/账号/Key/审计/新快照。
+
+不含客户Docker升级包，不自动升级业务Docker。cAdvisor需要Docker25+。RTM、ARM服务端、主备、黑盒与长期压测不属于本次打包验收。

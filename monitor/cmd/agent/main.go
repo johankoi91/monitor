@@ -61,7 +61,7 @@ func main() {
 	if err != nil || seconds < 10 || seconds > 60 {
 		log.Fatal("collection period must be 10–60 seconds")
 	}
-	collector := docker.New(env("AVOPS_DOCKER_SOCKET", "/var/run/docker.sock"), docker.Policy{EnvAllow: allow("AVOPS_PUBLIC_ENV"), ArgAllow: allow("AVOPS_PUBLIC_ARGS")})
+	collector := docker.New(env("AVOPS_DOCKER_SOCKET", "/var/run/docker.sock"), docker.Policy{RawStartup: os.Getenv("AVOPS_RAW_STARTUP") == "1", EnvAllow: allow("AVOPS_PUBLIC_ENV"), ArgAllow: allow("AVOPS_PUBLIC_ARGS")})
 	resources, err := cadvisor.New(os.Getenv("AVOPS_CADVISOR_URL"))
 	if err != nil {
 		log.Fatal(err)
@@ -125,6 +125,7 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 	finish := func() { once.Do(func() { close(done); stopCollection(); conn.Close() }) }
 	defer finish()
 	outbound := make(chan any, 64)
+	startupSlots := make(chan struct{}, 4)
 	conn.SetReadLimit(1 << 20)
 	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPingHandler(func(data string) error {
@@ -155,6 +156,29 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 				mu.Lock()
 				plan = next
 				mu.Unlock()
+			case "startup_request":
+				var request model.StartupRequest
+				if dec.Decode(&request) != nil || dec.Decode(&struct{}{}) != io.EOF {
+					return
+				}
+				select {
+				case startupSlots <- struct{}{}:
+					go func() {
+						defer func() { <-startupSlots }()
+						readCtx, cancel := context.WithTimeout(collectionCtx, 5*time.Second)
+						defer cancel()
+						result := collector.Startup(readCtx, request)
+						select {
+						case outbound <- result:
+						case <-collectionCtx.Done():
+						}
+					}()
+				default:
+					select {
+					case outbound <- model.StartupResult{Type: "startup_result", RequestID: request.RequestID, ContainerID: request.ContainerID, ContainerName: request.ContainerName, Error: "AGENT_BUSY"}:
+					case <-collectionCtx.Done():
+					}
+				}
 			case "task":
 				var task model.Task
 				if dec.Decode(&task) != nil || dec.Decode(&struct{}{}) != io.EOF {
@@ -205,6 +229,11 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 			mu.RUnlock()
 			passCtx, cancel := context.WithTimeout(collectionCtx, 25*time.Second)
 			report := collector.Collect(passCtx, current)
+			for i := range report.Containers {
+				o := &report.Containers[i]
+				o.StartupValid = o.Startup != nil && !o.Startup.Incomplete && !o.Startup.Truncated
+				o.Startup = nil
+			}
 			cancel()
 			if len(resourceClients) > 0 && resourceClients[0] != nil {
 				resourceClients[0].Enrich(collectionCtx, &report)

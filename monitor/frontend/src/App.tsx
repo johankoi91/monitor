@@ -36,7 +36,8 @@ import NotificationSettingsForm from "./NotificationSettings";
 import StorageStatus from "./StorageStatus";
 import AccessKeys from "./AccessKeys";
 import Resources from "./Resources";
-import { MetricIcon } from "./MetricUI";
+import Operations, { OperationDetails } from "./Operations";
+import StartupParameters from "./StartupParameters";
 import Accounts, {
   Register,
   PasswordChange,
@@ -58,6 +59,18 @@ const stamp = (value?: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无";
 const key = (c: Container) => `${c.agent_id}/${c.container_id}`;
 const message = (e: unknown) => (e instanceof Error ? e.message : "请求未完成");
+const operationLabels: Record<string, string> = {
+  ACCEPTED: "已受理",
+  EXECUTE_INTENT: "执行前核验通过",
+  WAIT_RESULT: "正在重启",
+  VERIFY: "正在复查",
+  UNCERTAIN: "结果未知，需现场核实",
+  SUCCESS: "成功",
+  FAILED: "失败",
+  REJECTED: "已拒绝",
+  TIMEOUT: "超时",
+  MANUALLY_CLOSED: "已现场核实关闭",
+};
 function Badge({ value, label }: { value: string; label?: string }) {
   const colors: Record<string, string> = {
     HEALTHY: "success",
@@ -70,7 +83,11 @@ function Badge({ value, label }: { value: string; label?: string }) {
     CREATED: "processing",
     created: "processing",
   };
-  return <Tag color={colors[value] || "default"}>{label || value}</Tag>;
+  return (
+    <Tag color={colors[value] || "default"}>
+      {label || operationLabels[value] || value}
+    </Tag>
+  );
 }
 function Empty({ children }: { children: ReactNode }) {
   return (
@@ -336,7 +353,6 @@ function Workspace({
     [portsNode, setPortsNode] = useState<Node | null>(null),
     [restart, setRestart] = useState<NodeStatus | null>(null),
     [operation, setOperation] = useState<Operation | null>(null),
-    [audit, setAudit] = useState<unknown[] | null>(null),
     [resolve, setResolve] = useState<Operation | null>(null);
   const draft = useRef(false),
     requestGeneration = useRef(0),
@@ -544,17 +560,6 @@ function Workspace({
         `/api/v1/operations/${id}`,
       );
       setOperation(response.operation);
-      setAudit(null);
-    } catch (e) {
-      setNotice(message(e));
-    }
-  }
-  async function showAudit(id: string) {
-    try {
-      const response = await api.get<{ records: unknown[] }>(
-        `/api/v1/operations/${id}/audit`,
-      );
-      setAudit(response.records);
     } catch (e) {
       setNotice(message(e));
     }
@@ -595,8 +600,10 @@ function Workspace({
       )}
       {tab === "status" && (
         <section>
-          <Typography.Title level={2}>已纳管服务</Typography.Title>
-          <p>状态来自采集数据；容器运行不代表业务链路成功。</p>
+          <Typography.Title level={2}>服务状态</Typography.Title>
+          <Typography.Paragraph type="secondary">
+            容器与就绪检查 · 业务链路状态需另行验证
+          </Typography.Paragraph>
           {!status.length && (
             <Empty>尚未保存基准。进入“容器与基准台账”选择要监控的容器。</Empty>
           )}
@@ -606,12 +613,7 @@ function Workspace({
               key={`${s.cluster_code}/${s.service_code}`}
             >
               <div className="section-title">
-                <Typography.Title level={3}>
-                  {s.service_name}{" "}
-                  <small>
-                    {s.cluster_code} / {s.service_code}
-                  </small>
-                </Typography.Title>
+                <Typography.Title level={3}>{s.cluster_code}</Typography.Title>
                 <Badge
                   value={s.status}
                   label={
@@ -625,9 +627,8 @@ function Workspace({
                 />
               </div>
               <p className="service-counts">
-                应有 {s.expected_node_count} · 发现 {s.discovered_node_count} ·
-                正常 {s.healthy_node_count} · 异常 {s.unhealthy_node_count} ·
-                未知 {s.unknown_node_count}
+                {s.expected_node_count} 个容器 · 正常 {s.healthy_node_count} ·
+                异常 {s.unhealthy_node_count} · 未知 {s.unknown_node_count}
               </p>
               {s.nodes.map((n) => (
                 <div className="node-card" key={n.node_id}>
@@ -649,7 +650,7 @@ function Workspace({
                         {n.container_name}
                       </Typography.Title>
                       <div className="node-observation">
-                        <span>{n.reason}</span>
+                        {n.status !== "HEALTHY" && <span>{n.reason}</span>}
                         <span
                           className="node-observation-time"
                           title={stamp(n.collected_at)}
@@ -710,25 +711,8 @@ function Workspace({
                     value={n.resources}
                     lifecycle={n.lifecycle}
                     runtime={n.runtime_status}
+                    startup={<StartupParameters api={api} nodeID={n.node_id} />}
                   />
-                  {can("restart.execute") && (
-                    <div className="node-policy">
-                      <div>
-                        <MetricIcon name="lock" />
-                        <span>重启管控</span>
-                        <span
-                          className={`policy-pill ${n.restart_enabled && n.restart_allowed ? "policy-enabled" : ""}`}
-                        >
-                          {!n.restart_enabled
-                            ? "白名单未开放"
-                            : n.restart_allowed
-                              ? "规则已通过"
-                              : n.restart_block_reason || "暂不可操作"}
-                        </span>
-                      </div>
-                      <span>独立安全 Key 授权 · Agent 执行前复核</span>
-                    </div>
-                  )}
                 </div>
               ))}
             </Card>
@@ -1051,42 +1035,18 @@ function Workspace({
       )}
       {tab === "operations" &&
         (can("operations.read") || can("restart.result")) && (
-          <section>
-            <Typography.Title level={2}>
-              {can("operations.read") ? "操作与审计" : "我的重启"}
-            </Typography.Title>
-            <p>
-              操作状态与服务健康分开。未知结果保持节点锁，先现场核实再关闭。
-            </p>
-            {!operations.length && <Empty>暂无重启操作。</Empty>}
-            {operations.map((o) => (
-              <Card className="page-card" key={o.operation_id}>
-                <div className="section-title">
-                  <Typography.Title level={3}>{o.node_id}</Typography.Title>
-                  <Badge value={o.status} />
-                </div>
-                <p>{o.message}</p>
-                <small>
-                  {stamp(o.requested_at)} · 操作说明人 {o.operator} · {o.reason}
-                </small>
-                <div className="actions">
-                  <Button onClick={() => void showOperation(o.operation_id)}>
-                    {can("audit.read") ? "详情与审计" : "查看结果"}
-                  </Button>
-                  {o.phase === "UNCERTAIN" &&
-                    o.node_locked &&
-                    can("restart.resolve") && (
-                      <Button onClick={() => setResolve(o)}>
-                        已现场核实，关闭未知结果
-                      </Button>
-                    )}
-                </div>
-              </Card>
-            ))}
-          </section>
+          <Operations
+            operations={operations}
+            services={status}
+            canAudit={can("audit.read")}
+            canResolve={can("restart.resolve")}
+            onOpen={(id) => void showOperation(id)}
+            onResolve={setResolve}
+            onRefresh={() => void reload()}
+          />
         )}
       {tab === "access" && canManageKeys && (
-        <AccessKeys api={api} canManage={canManageKeys} services={status} />
+        <AccessKeys api={api} canManage={canManageKeys} />
       )}
       {tab === "accounts" && can("users.manage") && (
         <Accounts
@@ -1210,27 +1170,15 @@ function Workspace({
         />
       )}
       {operation && (
-        <Modal
-          title="重启操作详情"
+        <OperationDetails
+          operation={operation}
+          services={status}
+          api={api}
+          canAudit={can("audit.read")}
           onClose={() => {
             setOperation(null);
-            setAudit(null);
           }}
-        >
-          <Badge value={operation.status} />
-          <p>{operation.message}</p>
-          <p>
-            结果{operation.result_known ? "已确认" : "尚未确认"} · 节点
-            {operation.node_locked ? "保持锁定" : "已解除操作锁"}
-          </p>
-          <pre>{JSON.stringify(operation, null, 2)}</pre>
-          {can("audit.read") && (
-            <Button onClick={() => void showAudit(operation.operation_id)}>
-              查看过程审计
-            </Button>
-          )}
-          {audit && <pre>{JSON.stringify(audit, null, 2)}</pre>}
-        </Modal>
+        />
       )}
       {resolve && (
         <ResolveModal
@@ -1424,7 +1372,6 @@ function RestartModal({
   const requestKey = useRef(crypto.randomUUID()),
     [restartKeyID, setRestartKeyID] = useState(""),
     [restartSecret, setRestartSecret] = useState(""),
-    [operator, setOperator] = useState(""),
     [reason, setReason] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
@@ -1435,12 +1382,11 @@ function RestartModal({
     setError("");
     try {
       if (!restartKeyID || !restartSecret)
-        throw new Error("请填写已注册且获准该节点的重启安全 Key");
+        throw new Error("请填写有效的重启安全 Key");
       const r = await api.postRestart<{ operation: Operation }>(
         "/api/v1/operations/restart",
         {
           node_id: node.node_id,
-          operator,
           reason,
           request_key: requestKey.current,
         },
@@ -1494,15 +1440,6 @@ function RestartModal({
             onChange={(e) => setRestartSecret(e.target.value)}
           />
         </Form.Item>
-        <Form.Item label="操作说明人" htmlFor="app-field-11">
-          <Input
-            id="app-field-11"
-            value={operator}
-            onChange={(e) => setOperator(e.target.value)}
-            required
-            maxLength={128}
-          />
-        </Form.Item>
         <Form.Item label="重启原因" htmlFor="app-field-12">
           <Input.TextArea
             id="app-field-12"
@@ -1536,7 +1473,6 @@ function ResolveModal({
 }) {
   const [restartKeyID, setRestartKeyID] = useState(""),
     [restartSecret, setRestartSecret] = useState(""),
-    [operator, setOperator] = useState(""),
     [reason, setReason] = useState(""),
     [evidence, setEvidence] = useState(""),
     [outcome, setOutcome] = useState("NOT_EXECUTED"),
@@ -1549,11 +1485,10 @@ function ResolveModal({
     setBusy(true);
     try {
       if (!restartKeyID || !restartSecret)
-        throw new Error("请填写获准此节点的重启安全 Key");
+        throw new Error("请填写有效的重启安全 Key");
       await api.postRestart(
         `/api/v1/operations/${operation.operation_id}/resolve`,
         {
-          operator,
           reason,
           evidence,
           outcome,
@@ -1595,15 +1530,6 @@ function ResolveModal({
             autoComplete="off"
             value={restartSecret}
             onChange={(e) => setRestartSecret(e.target.value)}
-          />
-        </Form.Item>
-        <Form.Item label="核实说明人" htmlFor="app-field-15">
-          <Input
-            id="app-field-15"
-            required
-            value={operator}
-            onChange={(e) => setOperator(e.target.value)}
-            maxLength={128}
           />
         </Form.Item>
         <Form.Item label="核实结论" htmlFor="app-field-16">

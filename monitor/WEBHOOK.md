@@ -47,7 +47,7 @@ def verify(raw_body: bytes, headers, secret: str) -> bool:
 
 ## 配置与迁移
 
-节点通知的 node_id 使用 `主机IP-容器名`，例如 `111.230.192.59-agora_web_media_edge_1`，接收方以 `cluster + node_id` 定位。台账/重启接口的内部 ID 保持原绑定，不把通知标识直接传入重启 API。旧通知历史与已排队事件不改写，以保持事件 ID、原始消息体与重试一致。
+节点通知和重启请求的 node_id 使用 `主机IP-容器名`，例如 `111.230.192.59-agora_web_media_edge_1`，中心先映射到内部绑定再执行任务。旧通知历史与已排队事件不改写。
 
 页面配置 HTTPS URL、TLS 域名、启停和签名密钥，支持生成/复制新密钥。将同一密钥配置到接收端后再启用。中心 PostgreSQL AES-GCM 加密存储签名密钥，配置查询不返回密钥；更换目标要求重新填写，旧目标未完成投递停止重试。
 

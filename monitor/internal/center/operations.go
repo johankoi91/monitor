@@ -94,6 +94,16 @@ func (s *Store) findNodeLocked(id string) (model.Node, string, *model.Observatio
 						}
 						return n, v.Code, found
 					}
+					if a := s.agents[n.AgentID]; a != nil && len(a.Report.Containers) > 0 && a.Report.Containers[0].Container.HostAddress+"-"+n.ContainerName == id {
+						var found *model.Observation
+						for i := range a.Report.Containers {
+							if a.Report.Containers[i].Container.ContainerName == n.ContainerName {
+								found = &a.Report.Containers[i]
+								break
+							}
+						}
+						return n, v.Code, found
+					}
 				}
 			}
 		}
@@ -118,7 +128,7 @@ func (s *Store) restartAllowedLocked(n model.Node, service string, now time.Time
 	if o == nil {
 		return false, "容器缺失"
 	}
-	if o.Startup == nil || o.Startup.Incomplete || o.Startup.Truncated {
+	if !o.StartupValid {
 		return false, "启动配置不完整"
 	}
 	if !s.ruleLocked(n, service, o.Container.Image) {
@@ -161,10 +171,13 @@ func (s *Store) createRestart(r model.RestartRequest, source, ip, ownerPrefix st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r.NodeID = strings.TrimSpace(r.NodeID)
-	r.Operator = strings.TrimSpace(r.Operator)
+	r.Operator = ""
 	r.Reason = strings.TrimSpace(r.Reason)
 	r.RequestKey = strings.TrimSpace(r.RequestKey)
-	if r.NodeID == "" || len(r.NodeID) > 512 || r.Operator == "" || utf8.RuneCountInString(r.Operator) > 128 || utf8.RuneCountInString(r.Reason) < 2 || utf8.RuneCountInString(r.Reason) > 500 || r.RequestKey == "" || len(r.RequestKey) > 128 {
+	if n, _, _ := s.findNodeLocked(r.NodeID); n.ID != "" {
+		r.NodeID = n.ID
+	}
+	if r.NodeID == "" || len(r.NodeID) > 512 || utf8.RuneCountInString(r.Reason) < 2 || utf8.RuneCountInString(r.Reason) > 500 || r.RequestKey == "" || len(r.RequestKey) > 128 {
 		return model.Operation{}, problem(400, "INVALID_RESTART_REQUEST", "请填写节点、操作说明人、2–500 字原因和幂等键")
 	}
 	if id := s.requestKeys[r.RequestKey]; id != "" {
@@ -172,7 +185,7 @@ func (s *Store) createRestart(r model.RestartRequest, source, ip, ownerPrefix st
 		if ownerPrefix != "" && !strings.HasPrefix(o.AuthenticatedSource, ownerPrefix) {
 			return model.Operation{}, problem(403, "OPERATION_OWNER_DENIED", "幂等键已属于其他调用来源")
 		}
-		if o.NodeID != r.NodeID || o.Operator != r.Operator || o.Reason != r.Reason {
+		if o.NodeID != r.NodeID || o.Reason != r.Reason {
 			return model.Operation{}, problem(409, "IDEMPOTENCY_CONFLICT", "同一幂等键的目标或参数不同")
 		}
 		return clone(o), nil
@@ -205,7 +218,7 @@ func (s *Store) createRestart(r model.RestartRequest, source, ip, ownerPrefix st
 	now := time.Now().UTC()
 	id := ID()
 	task := model.Task{Type: "task", Action: "PREPARE", OperationID: id, AgentID: n.AgentID, NodeID: n.ID, ServiceCode: service, ContainerID: o.Container.ContainerID, ContainerName: n.ContainerName, Image: o.Container.Image, SnapshotID: o.Container.SnapshotID, Deadline: now.Add(40 * time.Second)}
-	operation := model.Operation{OperationID: id, RequestKey: r.RequestKey, Type: "RESTART_CONTAINER", Status: "PENDING", Phase: "ACCEPTED", NodeID: n.ID, Operator: r.Operator, Reason: r.Reason, AuthenticatedSource: source, SourceIP: ip, RequestedAt: now, BeforeStatus: before, Message: "任务已可靠受理，等待 Agent 执行前核验", NodeLocked: true, Task: task}
+	operation := model.Operation{OperationID: id, RequestKey: r.RequestKey, Type: "RESTART_CONTAINER", Status: "PENDING", Phase: "ACCEPTED", NodeID: n.ID, Reason: r.Reason, AuthenticatedSource: source, SourceIP: ip, RequestedAt: now, BeforeStatus: before, Message: "任务已可靠受理，等待 Agent 执行前核验", NodeLocked: true, Task: task}
 	if err := s.persistOperationLocked(operation, "ACCEPTED", int64(active+1)*32768); err != nil {
 		return model.Operation{}, err
 	}
@@ -256,22 +269,29 @@ func (s *Store) ActiveOperations() []model.Operation {
 	return result
 }
 
-func (s *Store) Audit(id string) ([]model.AuditRecord, error) {
+func (s *Store) Audit(id string) ([]model.OperationStep, error) {
 	if _, err := s.Operation(id); err != nil {
 		return nil, err
 	}
-	records := []model.AuditRecord{}
+	records := []model.OperationStep{}
 	if s.backend != nil {
 		rows, err := s.backend.ReadLog("operations", id, 200)
 		if err != nil {
 			return nil, problem(503, "AUDIT_UNAVAILABLE", "审计读取失败")
 		}
 		for _, raw := range rows {
-			var r model.AuditRecord
-			if json.Unmarshal(raw, &r) != nil {
+			var step model.OperationStep
+			if json.Unmarshal(raw, &step) != nil {
 				return nil, problem(503, "AUDIT_UNAVAILABLE", "审计数据无效")
 			}
-			records = append(records, r)
+			if step.OperationID == "" {
+				var r model.AuditRecord
+				if json.Unmarshal(raw, &r) != nil {
+					return nil, problem(503, "AUDIT_UNAVAILABLE", "审计数据无效")
+				}
+				step = r.Step()
+			}
+			records = append(records, step)
 		}
 		return records, nil
 	}
@@ -281,7 +301,7 @@ func (s *Store) Audit(id string) ([]model.AuditRecord, error) {
 			return errors.New("audit corrupt")
 		}
 		if record.Operation.OperationID == id {
-			records = append(records, record)
+			records = append(records, record.Step())
 			if len(records) > 200 {
 				records = records[1:]
 			}
@@ -334,10 +354,8 @@ func finishOperation(o *model.Operation, status, phase, message string, known bo
 	o.Status = status
 	o.Phase = phase
 	o.Message = message
-	o.ResultKnown = known
 	o.NodeLocked = !known
 	o.FinishedAt = &at
-	o.DurationMS = at.Sub(o.RequestedAt).Milliseconds()
 }
 
 func (s *Store) ReceiveResult(agent, session string, r model.TaskResult) error {
@@ -578,11 +596,11 @@ func (s *Store) Resolve(id string, r model.ResolveRequest, source, ip string) (m
 	if o.Phase != "UNCERTAIN" || !o.NodeLocked {
 		return o, problem(409, "NOT_UNCERTAIN", "仅可关闭待现场核实的未知结果")
 	}
-	if strings.TrimSpace(r.Operator) == "" || len(r.Operator) > 128 || len(strings.TrimSpace(r.Reason)) < 2 || len(r.Reason) > 500 || len(strings.TrimSpace(r.Evidence)) < 10 || len(r.Evidence) > 1000 || (r.Outcome != "EXECUTED" && r.Outcome != "NOT_EXECUTED") {
+	if len(strings.TrimSpace(r.Reason)) < 2 || len(r.Reason) > 500 || len(strings.TrimSpace(r.Evidence)) < 10 || len(r.Evidence) > 1000 || (r.Outcome != "EXECUTED" && r.Outcome != "NOT_EXECUTED") {
 		return o, problem(400, "INVALID_RESOLUTION", "需填写核实人、原因、现场证据及 EXECUTED/NOT_EXECUTED 结论")
 	}
 	finishOperation(&o, "FAILED", "MANUALLY_CLOSED", "人工核实并关闭未知结果（"+r.Outcome+"），不据此修改健康状态", true, time.Now().UTC())
-	o.Message += "；" + r.Operator + "：" + r.Reason + "；证据：" + r.Evidence + "；来源：" + source + "/" + ip
+	o.Message += "；" + r.Reason + "；证据：" + r.Evidence + "；来源：" + source
 	if err := s.persistOperationLocked(o, "MANUAL_RESOLUTION", 0); err != nil {
 		return model.Operation{}, err
 	}

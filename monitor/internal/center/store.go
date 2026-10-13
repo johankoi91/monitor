@@ -52,23 +52,24 @@ type diskRecord struct {
 	Change   model.Selection `json:"change"`
 }
 type Store struct {
-	mu           sync.RWMutex
-	config       Config
-	agents       map[string]*agentState
-	record       diskRecord
-	dir          string
-	lock         *os.File
-	storageBad   bool
-	checks       map[string]*debounce
-	bursts       map[string]*restartBurst
-	write        func([]byte) error // injected only by tests
-	opJournal    storage.Log
-	backend      storage.Backend
-	operations   map[string]model.Operation
-	requestKeys  map[string]string
-	executeReady map[string]string
-	acks         map[string]map[string]bool
-	opWrite      func(model.AuditRecord, int64) error
+	startupRequests map[string]*pendingStartup
+	mu              sync.RWMutex
+	config          Config
+	agents          map[string]*agentState
+	record          diskRecord
+	dir             string
+	lock            *os.File
+	storageBad      bool
+	checks          map[string]*debounce
+	bursts          map[string]*restartBurst
+	write           func([]byte) error // injected only by tests
+	opJournal       storage.Log
+	backend         storage.Backend
+	operations      map[string]model.Operation
+	requestKeys     map[string]string
+	executeReady    map[string]string
+	acks            map[string]map[string]bool
+	opWrite         func(model.AuditRecord, int64) error
 }
 type Problem struct {
 	Status        int
@@ -180,6 +181,13 @@ func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, e
 				return nil, errors.New("corrupt stored snapshot")
 			}
 			s.agents[id] = &agentState{Report: r, Connected: false}
+			for i := range r.Containers {
+				o := &r.Containers[i]
+				if o.Startup != nil {
+					o.StartupValid = !o.Startup.Incomplete && !o.Startup.Truncated
+				}
+				o.Startup = nil
+			}
 		}
 	}
 	return s, nil
@@ -367,9 +375,13 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 	for i := range r.Containers {
 		o := &r.Containers[i]
 		c := &o.Container
-		if c.ContainerID == "" || c.ContainerName == "" || stringsInvalidName(c.ContainerName) || names[c.ContainerName] || ids[c.ContainerID] || o.Startup == nil || c.SnapshotID == "" || o.Startup.SnapshotID != c.SnapshotID {
+		if c.ContainerID == "" || c.ContainerName == "" || stringsInvalidName(c.ContainerName) || names[c.ContainerName] || ids[c.ContainerID] || c.SnapshotID == "" || o.Startup != nil && o.Startup.SnapshotID != c.SnapshotID {
 			return errors.New("invalid container identity or startup snapshot")
 		}
+		if o.Startup != nil {
+			o.StartupValid = !o.Startup.Incomplete && !o.Startup.Truncated
+		}
+		o.Startup = nil
 		if c.CollectedAt.Before(r.CollectedAt) || c.CollectedAt.After(now.Add(5*time.Second)) {
 			return errors.New("invalid container collection time")
 		}

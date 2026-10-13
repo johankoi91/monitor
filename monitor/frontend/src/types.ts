@@ -197,8 +197,6 @@ export interface Operation {
   request_key: string;
   type: string;
   status: string;
-  phase: string;
-  operator: string;
   reason: string;
   authenticated_source: string;
   source_ip: string;
@@ -208,7 +206,7 @@ export interface Operation {
   before_status: string;
   after_status: string | null;
   message: string;
-  result_known: boolean;
+  target?: { agent_id: string; container_name: string; image: string };
   node_locked: boolean;
 }
 export interface Delivery {

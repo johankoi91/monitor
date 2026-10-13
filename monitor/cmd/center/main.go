@@ -70,6 +70,12 @@ func main() {
 			log.Fatal(e)
 		}
 		defer db.Close()
+		if e = db.PurgeStartupSnapshots(); e != nil {
+			log.Fatal("cannot remove cached startup parameters")
+		}
+		if e = db.CompactOperations(); e != nil {
+			log.Fatal("cannot compact operation records")
+		}
 		backend = db
 		database = db
 		accounts, e = identity.New(db.Pool)

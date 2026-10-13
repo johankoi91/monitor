@@ -1,0 +1,29 @@
+services:
+  avops-center:
+    image: avops-center:1.0.0
+    container_name: avops-center
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - /etc/avops-monitor/center.env
+      - /etc/avops-monitor/database.env
+    environment:
+      AVOPS_CENTER_CONFIG: /config/center.yaml
+      AVOPS_DATA_DIR: /var/lib/avops-monitor
+      AVOPS_TLS_CERT: /config/server.pem
+      AVOPS_TLS_KEY: /config/server-key.pem
+      AVOPS_DATABASE_WARNING_BYTES: "1073741824"
+      AVOPS_STORAGE_DISK_PATH: /var/lib
+    volumes:
+      - /opt/avops-monitor/docker-center/config/center.yaml:/config/center.yaml:ro
+      - /opt/avops-monitor/docker-center/config/server.pem:/config/server.pem:ro
+      - /opt/avops-monitor/docker-center/config/server-key.pem:/config/server-key.pem:ro
+      - /var/lib/avops-monitor:/var/lib/avops-monitor
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true

@@ -214,8 +214,9 @@ type CheckResult struct {
 	CollectedAt time.Time `json:"collected_at"`
 }
 type Observation struct {
+	StartupValid bool          `json:"startup_valid"`
 	Container    Container     `json:"container"`
-	Startup      *Startup      `json:"startup"`
+	Startup      *Startup      `json:"startup,omitempty"`
 	StartedAt    string        `json:"started_at"`
 	ExitCode     int           `json:"exit_code"`
 	RestartCount int           `json:"restart_count"`

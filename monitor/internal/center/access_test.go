@@ -10,7 +10,7 @@ import (
 	"github.com/johankoi91/monitor/runtime/internal/access"
 )
 
-func TestRegisteredRestartKeyRequiredAndNodeScopeEnforced(t *testing.T) {
+func TestRegisteredRestartKeyWithoutNodeScope(t *testing.T) {
 	s, _, _ := operational(t)
 	registry, err := access.New(t.TempDir())
 	if err != nil {
@@ -18,8 +18,8 @@ func TestRegisteredRestartKeyRequiredAndNodeScopeEnforced(t *testing.T) {
 	}
 	defer registry.Close()
 	handler := (&Server{Store: s, AdminID: "admin", AdminSecret: strings.Repeat("z", 32), Access: registry}).Handler()
-	other, _ := registry.Issue(access.IssueRequest{Name: "other", Purpose: "RESTART", AllowedNodes: []string{"rtc-a/other"}, ApprovalReason: "test"}, "admin")
-	restart, _ := registry.Issue(access.IssueRequest{Name: "restart", Purpose: "RESTART", AllowedNodes: []string{"rtc-a/ap"}, ApprovalReason: "test"}, "admin")
+	other, _ := registry.Issue(access.IssueRequest{Name: "other", Purpose: "RESTART", ApprovalReason: "test"}, "admin")
+	restart, _ := registry.Issue(access.IssueRequest{Name: "restart", Purpose: "RESTART", ApprovalReason: "test"}, "admin")
 	post := func(id, secret string) *httptest.ResponseRecorder {
 		data, _ := json.Marshal(request())
 		r := httptest.NewRequest("POST", "http://center/api/v1/operations/restart", strings.NewReader(string(data)))
@@ -32,8 +32,8 @@ func TestRegisteredRestartKeyRequiredAndNodeScopeEnforced(t *testing.T) {
 	if post("admin", strings.Repeat("z", 32)).Code != 403 {
 		t.Fatal("admin credential bypassed registered restart key")
 	}
-	if post(other.Key.ID, other.Secret).Code != 403 {
-		t.Fatal("wrong node key bypassed node scope")
+	if post(other.Key.ID, other.Secret).Code != 202 {
+		t.Fatal("restart key without node scope denied")
 	}
 	if post(restart.Key.ID, restart.Secret).Code != 202 {
 		t.Fatal("approved node restart key refused")
@@ -62,7 +62,7 @@ func TestDirectKeyIssuanceAndPurposeBoundaries(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	input, _ := json.Marshal(access.IssueRequest{Name: "direct restart", Purpose: "RESTART", AllowedNodes: []string{"rtc-a/ap"}, ApprovalReason: "test verified"})
+	input, _ := json.Marshal(access.IssueRequest{Name: "direct restart", Purpose: "RESTART", ApprovalReason: "test verified"})
 	w := call("POST", "/api/v1/access-keys", string(input), "admin", strings.Repeat("z", 32))
 	var issued access.Issued
 	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &issued) != nil || issued.Secret == "" {

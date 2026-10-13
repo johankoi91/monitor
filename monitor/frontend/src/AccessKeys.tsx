@@ -1,59 +1,49 @@
 import Form from "antd/es/form";
-import Radio from "antd/es/radio";
 import { useEffect, useState, type FormEvent } from "react";
 import Alert from "antd/es/alert";
 import Button from "antd/es/button";
 import Card from "antd/es/card";
-import Checkbox from "antd/es/checkbox";
 import Input from "antd/es/input";
-import Select from "antd/es/select";
 import Space from "antd/es/space";
 import Typography from "antd/es/typography";
 import Table from "antd/es/table";
 import Tag from "antd/es/tag";
 import Popconfirm from "antd/es/popconfirm";
 import type { API } from "./api";
-import type { ServiceStatus } from "./types";
 const text = (e: unknown) => (e instanceof Error ? e.message : "申请未完成");
 type Key = {
   owner_id?: string;
   key_id: string;
   name: string;
   purpose: string;
-  allowed_node_ids: string[];
   enabled: boolean;
-  approval_reason: string;
+  created_at: string;
 };
 export default function AccessKeys({
   api,
   canManage,
-  services,
 }: {
   api: API;
   canManage: boolean;
-  services: ServiceStatus[];
 }) {
   const [data, setData] = useState<{ keys: Key[] }>({
       keys: [],
     }),
     [name, setName] = useState(""),
-    [reason, setReason] = useState(""),
-    [nodes, setNodes] = useState<string[]>([]),
     [issued, setIssued] = useState<{ key: Key; secret: string } | null>(null),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false);
-  const [owner, setOwner] = useState("");
-  const [owners, setOwners] = useState<
-    Array<{ user_id: string; username: string; display_name: string }>
-  >([]);
+  const [currentAccount, setCurrentAccount] = useState("");
   async function load() {
     if (!canManage) return;
     try {
       setData(await api.get("/api/v1/access-keys"));
-      const result = await api.get<{ users: typeof owners }>(
-        "/api/v1/access-keys/owners",
-      );
-      setOwners(result.users);
+      if (api.accountSession) {
+        const me = await api.get<{ user: { username: string } }>(
+          "/api/v1/auth/me",
+        );
+        setCurrentAccount(me.user.username);
+      }
     } catch (e) {
       setNotice(text(e));
     }
@@ -70,10 +60,7 @@ export default function AccessKeys({
         "/api/v1/access-keys",
         {
           name,
-          approval_reason: reason,
           purpose: "RESTART",
-          allowed_node_ids: nodes,
-          owner_id: owner,
         },
       );
       setIssued(result);
@@ -112,9 +99,6 @@ export default function AccessKeys({
         {
           name: key.name,
           purpose: "RESTART",
-          allowed_node_ids: key.allowed_node_ids,
-          owner_id: key.owner_id || "",
-          approval_reason: "轮换历史重启安全 Key",
         },
       );
       setIssued(result);
@@ -148,25 +132,10 @@ export default function AccessKeys({
       <Typography.Title level={2}>重启安全 Key 签发与管理</Typography.Title>
       <p>重启安全 Key 仍须同时满足中心/Agent 的节点白名单和现场状态规则。</p>
       {notice && <Alert message={notice} type="info" showIcon />}
-      <Card title="直接签发重启安全 Key" className="page-card">
+      <Card className="page-card">
         <Form layout="vertical" onSubmitCapture={issue}>
-          <Form.Item label="所属账号（可选）" htmlFor="accesskeys-field-1">
-            <Select
-              id="accesskeys-field-1"
-              style={{ width: "100%" }}
-              value={owner || undefined}
-              placeholder={
-                owners.length ? "请选择所属账号（可选）" : "暂无可绑定账号"
-              }
-              allowClear
-              showSearch
-              optionFilterProp="label"
-              onChange={(value) => setOwner(value || "")}
-              options={owners.map((u) => ({
-                value: u.user_id,
-                label: u.username,
-              }))}
-            />
+          <Form.Item label="所属账号">
+            <Input value={currentAccount || "当前登录账号"} readOnly />
           </Form.Item>
           <Form.Item label="密钥名称" htmlFor="accesskeys-field-2">
             <Input
@@ -176,37 +145,7 @@ export default function AccessKeys({
               onChange={(e) => setName(e.target.value)}
             />
           </Form.Item>
-          <Card
-            size="small"
-            title={`允许重启的节点范围（已选 ${nodes.length} 个）`}
-            className="node-scope-card"
-          >
-            <Checkbox.Group
-              value={nodes}
-              onChange={(values) => setNodes(values as string[])}
-              options={services
-                .flatMap((s) => s.nodes)
-                .map((n) => ({
-                  value: n.node_id,
-                  label: `${n.host_address} / ${n.container_name}`,
-                }))}
-              className="node-scope-grid"
-            />
-          </Card>
-          <Form.Item label="签发依据" htmlFor="accesskeys-field-3">
-            <Input.TextArea
-              id="accesskeys-field-3"
-              required
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              maxLength={1000}
-            />
-          </Form.Item>
-          <Button
-            type="primary"
-            htmlType="submit"
-            disabled={busy || !nodes.length}
-          >
+          <Button type="primary" htmlType="submit" disabled={busy}>
             签发密钥
           </Button>
         </Form>
@@ -222,7 +161,6 @@ export default function AccessKeys({
                 key_id: issued.key.key_id,
                 secret: issued.secret,
                 purpose: issued.key.purpose,
-                allowed_node_ids: issued.key.allowed_node_ids,
               },
               null,
               2,
@@ -241,6 +179,16 @@ export default function AccessKeys({
           scroll={{ x: 850 }}
           pagination={{ pageSize: 10, showSizeChanger: false }}
           columns={[
+            {
+              title: "签发时间",
+              dataIndex: "created_at",
+              width: 180,
+              render: (value: string) =>
+                new Date(value).toLocaleString("zh-CN", { hour12: false }),
+              sorter: (a, b) =>
+                Date.parse(a.created_at) - Date.parse(b.created_at),
+              defaultSortOrder: "descend",
+            },
             {
               title: "密钥",
               key: "identity",
@@ -264,12 +212,6 @@ export default function AccessKeys({
                   {k.enabled ? "有效" : "已停用"}
                 </Tag>
               ),
-            },
-            {
-              title: "节点范围",
-              key: "nodes",
-              render: (_, k) =>
-                k.allowed_node_ids.map((id) => <Tag key={id}>{id}</Tag>),
             },
             {
               title: "操作",

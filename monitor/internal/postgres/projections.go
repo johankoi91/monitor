@@ -43,11 +43,11 @@ func projectOperation(ctx context.Context, tx *sql.Tx, b []byte) error {
 		return errors.New("invalid operation audit")
 	}
 	o := r.Operation
-	_, err := tx.ExecContext(ctx, "INSERT INTO avops.operations(operation_id,request_key,node_id,agent_id,status,phase,node_locked,result_known,requested_at,finished_at,authenticated_source,source_ip,operator,reason,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(operation_id) DO UPDATE SET status=excluded.status,phase=excluded.phase,node_locked=excluded.node_locked,result_known=excluded.result_known,finished_at=excluded.finished_at,payload=excluded.payload", o.OperationID, o.RequestKey, o.NodeID, o.Task.AgentID, o.Status, o.Phase, o.NodeLocked, o.ResultKnown, o.RequestedAt, o.FinishedAt, o.AuthenticatedSource, o.SourceIP, o.Operator, o.Reason, jsonText(o))
+	_, err := tx.ExecContext(ctx, "INSERT INTO avops.operations(operation_id,request_key,node_id,agent_id,status,node_locked,requested_at,finished_at,authenticated_source,source_ip,reason,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(operation_id) DO UPDATE SET status=excluded.status,node_locked=excluded.node_locked,finished_at=excluded.finished_at,payload=excluded.payload", o.OperationID, o.RequestKey, o.NodeID, o.Task.AgentID, o.Status, o.NodeLocked, o.RequestedAt, o.FinishedAt, o.AuthenticatedSource, o.SourceIP, o.Reason, jsonText(o))
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO avops.operation_audit(operation_id,at,kind,payload) VALUES($1,$2,$3,$4)", o.OperationID, r.At, r.Kind, string(b))
+	_, err = tx.ExecContext(ctx, "INSERT INTO avops.operation_audit(operation_id,at,kind,payload) VALUES($1,$2,$3,$4)", o.OperationID, r.At, r.Kind, jsonText(r.Step()))
 	return err
 }
 func projectAccess(ctx context.Context, tx *sql.Tx, b []byte) error {
@@ -87,21 +87,24 @@ func projectAccess(ctx context.Context, tx *sql.Tx, b []byte) error {
 			Enabled   bool      `json:"enabled"`
 			CreatedAt time.Time `json:"created_at"`
 			OwnerID   string    `json:"owner_id"`
-			Nodes     []string  `json:"allowed_node_ids"`
 		}
 		if json.Unmarshal(r.Key, &k) != nil || k.ID == "" {
 			return errors.New("invalid key")
 		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(r.Key, &fields); err != nil {
+			return err
+		}
+		delete(fields, "allowed_node_ids")
+		r.Key, _ = json.Marshal(fields)
+		var audit map[string]json.RawMessage
+		if err := json.Unmarshal(b, &audit); err != nil {
+			return err
+		}
+		audit["key"] = r.Key
+		b, _ = json.Marshal(audit)
 		if _, err := tx.ExecContext(ctx, "INSERT INTO avops.access_keys(key_id,name,purpose,secret_hash,enabled,created_at,owner_id,payload) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,''),$8) ON CONFLICT(key_id) DO UPDATE SET enabled=excluded.enabled,payload=excluded.payload,owner_id=excluded.owner_id,secret_hash=COALESCE(NULLIF(excluded.secret_hash,''),avops.access_keys.secret_hash)", k.ID, k.Name, k.Purpose, r.Hash, k.Enabled, k.CreatedAt, k.OwnerID, string(r.Key)); err != nil {
 			return err
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM avops.key_node_scopes WHERE key_id=$1", k.ID); err != nil {
-			return err
-		}
-		for _, n := range k.Nodes {
-			if _, err := tx.ExecContext(ctx, "INSERT INTO avops.key_node_scopes(key_id,node_id) VALUES($1,$2)", k.ID, n); err != nil {
-				return err
-			}
 		}
 	}
 	_, err := tx.ExecContext(ctx, "INSERT INTO avops.access_audit(at,kind,source,payload) VALUES($1,$2,$3,$4)", r.At, r.Kind, r.Source, string(b))
@@ -179,6 +182,14 @@ func projectSnapshot(ctx context.Context, tx *sql.Tx, id string, b []byte) error
 	if json.Unmarshal(b, &report) != nil || !report.Complete {
 		return errors.New("invalid agent snapshot")
 	}
+	for i := range report.Containers {
+		o := &report.Containers[i]
+		if o.Startup != nil {
+			o.StartupValid = !o.Startup.Incomplete && !o.Startup.Truncated
+		}
+		o.Startup = nil
+	}
+	b, _ = json.Marshal(report)
 	if _, err := tx.ExecContext(ctx, "INSERT INTO avops.agent_snapshots(agent_id,collected_at,payload) VALUES($1,$2,$3) ON CONFLICT(agent_id) DO UPDATE SET collected_at=excluded.collected_at,received_at=now(),payload=excluded.payload", id, report.CollectedAt, string(b)); err != nil {
 		return err
 	}

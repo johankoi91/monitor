@@ -228,20 +228,8 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			if purpose == "RESTART" && account == nil && !(path == "/version" || path == "/api/v1/operations/restart" || strings.HasPrefix(path, "/api/v1/operations/")) {
-				failure(w, 403, "KEY_PURPOSE_DENIED", "重启安全 Key 仅用于其节点范围的操作接口")
+				failure(w, 403, "KEY_PURPOSE_DENIED", "重启安全 Key 仅用于操作接口")
 				return
-			}
-			if purpose == "RESTART" && strings.HasPrefix(path, "/api/v1/operations/") && path != "/api/v1/operations/restart" {
-				parts := strings.Split(strings.TrimPrefix(path, "/api/v1/operations/"), "/")
-				o, err := s.Store.Operation(parts[0])
-				if err != nil {
-					writeProblem(w, err)
-					return
-				}
-				if !s.Access.AllowsNode(accessKey, o.NodeID) {
-					failure(w, 403, "KEY_NODE_DENIED", "重启安全 Key 未获准操作该节点")
-					return
-				}
 			}
 		}
 		if r.Method != "GET" && r.Method != "HEAD" {
@@ -261,21 +249,6 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		switch {
-		case path == "/api/v1/access-keys/owners":
-			if r.Method != "GET" {
-				method(w)
-				return
-			}
-			if s.Accounts == nil {
-				send(w, 200, map[string]any{"users": []any{}})
-				return
-			}
-			v, e := s.Accounts.Users("ACTIVE", "", 100, 0)
-			if e != nil {
-				identityProblem(w, e)
-			} else {
-				send(w, 200, v)
-			}
 		case path == "/api/v1/baseline/history":
 			if r.Method != "GET" {
 				method(w)
@@ -314,16 +287,17 @@ func (s *Server) Handler() http.Handler {
 			if !decode(w, r, &input) {
 				return
 			}
+			if account != nil {
+				input.OwnerID = account.ID
+			}
+			if s.Accounts != nil && account == nil {
+				failure(w, 403, "ACCOUNT_SESSION_REQUIRED", "签发Key需要登录账号，所属账号自动绑定本人")
+				return
+			}
 			if s.Accounts != nil && input.OwnerID != "" {
 				owner, e := s.Accounts.User(input.OwnerID)
 				if e != nil || owner.Status != "ACTIVE" || input.Purpose == "RESTART" && !identity.Has(owner, "restart.execute") {
 					failure(w, 400, "INVALID_KEY_OWNER", "所属账号不可用或无重启权限")
-					return
-				}
-			}
-			for _, node := range input.AllowedNodes {
-				if _, err := s.findNodeForKey(node); err != nil {
-					writeProblem(w, err)
 					return
 				}
 			}
@@ -355,10 +329,6 @@ func (s *Server) Handler() http.Handler {
 			}
 			var request model.RestartRequest
 			if !decode(w, r, &request) {
-				return
-			}
-			if s.Access != nil && !s.Access.AllowsNode(accessKey, request.NodeID) {
-				failure(w, 403, "KEY_NODE_DENIED", "重启安全 Key 未获准操作该节点")
 				return
 			}
 			var o model.Operation
@@ -646,7 +616,24 @@ func (s *Server) Handler() http.Handler {
 				writeProblem(w, err)
 				return
 			}
+			startup, err := s.Store.RequestStartup(r.Context(), parts[0], parts[1])
+			if err != nil {
+				writeProblem(w, err)
+				return
+			}
+			detail.(map[string]any)["startup"] = startup.(map[string]any)["startup"]
 			send(w, 200, detail)
+		case path == "/api/v1/nodes/startup":
+			if r.Method != "GET" {
+				method(w)
+				return
+			}
+			view, err := s.Store.NodeStartup(r.Context(), r.URL.Query().Get("node_id"))
+			if err != nil {
+				writeProblem(w, err)
+				return
+			}
+			send(w, 200, view)
 		case path == "/api/v1/services/status":
 			if r.Method != "GET" {
 				method(w)
@@ -747,15 +734,6 @@ func allowedOrigin(r *http.Request) bool {
 	}
 	return origin == "" || origin == scheme+r.Host && r.Header.Get("X-AVOPS-Request") == "1"
 }
-func (s *Server) findNodeForKey(id string) (model.Node, error) {
-	s.Store.mu.RLock()
-	defer s.Store.mu.RUnlock()
-	n, _, _ := s.Store.findNodeLocked(id)
-	if n.ID == "" {
-		return n, problem(404, "NODE_NOT_FOUND", "密钥节点范围必须来自已保存台账")
-	}
-	return n, nil
-}
 func queryLimit(r *http.Request, fallback int) (int, error) {
 	raw := r.URL.Query().Get("limit")
 	if raw == "" {
@@ -849,6 +827,13 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request, id string) {
 					}
 					revision = plan.Revision
 				}
+				for _, request := range s.Store.StartupCommands(id, session) {
+					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+					if conn.WriteJSON(request) != nil {
+						conn.Close()
+						return
+					}
+				}
 				tasks, acks := s.Store.Commands(id, session)
 				for _, task := range tasks {
 					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -899,6 +884,12 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request, id string) {
 			if s.Store.Receive(id, session, report) != nil {
 				return
 			}
+		case "startup_result":
+			var result model.StartupResult
+			if dec.Decode(&result) != nil || dec.Decode(&struct{}{}) != io.EOF {
+				return
+			}
+			s.Store.ReceiveStartup(id, session, result)
 		case "task_result":
 			var result model.TaskResult
 			if dec.Decode(&result) != nil || dec.Decode(&struct{}{}) != io.EOF {

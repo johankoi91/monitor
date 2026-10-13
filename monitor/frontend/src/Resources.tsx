@@ -3,9 +3,7 @@ import Collapse from "antd/es/collapse";
 import Tabs from "antd/es/tabs";
 import Empty from "antd/es/empty";
 import Typography from "antd/es/typography";
-import Timeline from "antd/es/timeline";
-import Card from "antd/es/card";
-import Statistic from "antd/es/statistic";
+import Table from "antd/es/table";
 import type {
   ResourceMetrics,
   ContainerLifecycle,
@@ -75,19 +73,13 @@ function OverviewItem({
   ratio?: number | null;
 }) {
   return (
-    <Card size="small" className="resource-tile">
-      <Statistic
-        title={
-          <>
-            <MetricIcon name={icon} /> {label}
-          </>
-        }
-        value={0}
-        formatter={() => value}
-      />
-      <Typography.Text type="secondary">{note}</Typography.Text>
-      <Meter ratio={ratio} label={label} />
-    </Card>
+    <div className="resource-inline-metric" title={note}>
+      <span className="resource-inline-label">
+        <MetricIcon name={icon} />
+        {label}
+      </span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 function Lifecycle({
@@ -110,124 +102,67 @@ function Lifecycle({
     !!value.started_at &&
     Date.parse(value.finished_at) < Date.parse(value.started_at);
   return (
-    <div className="metric-panel-grid">
-      <MetricPanel
-        title="运行时间线"
-        icon="clock"
-        tag={value.stale ? "数据过期" : "Docker 观测"}
-      >
-        <Timeline
-          items={[
-            {
-              children: (
-                <>
-                  创建容器{" "}
-                  <Typography.Text type="secondary">
-                    {date(value.created_at)}
-                  </Typography.Text>
-                </>
-              ),
-            },
-            ...(previous
-              ? [
-                  {
-                    color: "gray",
-                    children: (
-                      <>
-                        上一轮结束{" "}
-                        <Typography.Text type="secondary">
-                          {date(value.finished_at)}
-                        </Typography.Text>
-                      </>
-                    ),
-                  },
-                ]
-              : []),
-            {
-              color: runtime === "running" && !value.stale ? "green" : "gray",
-              children: (
-                <>
-                  本次启动{" "}
-                  <Typography.Text type="secondary">
-                    {date(value.started_at)}
-                  </Typography.Text>
-                </>
-              ),
-            },
-            ...(!previous && value.finished_at
-              ? [
-                  {
-                    color: "gray",
-                    children: (
-                      <>
-                        最近结束{" "}
-                        <Typography.Text type="secondary">
-                          {date(value.finished_at)}
-                        </Typography.Text>
-                      </>
-                    ),
-                  },
-                ]
-              : []),
-            {
-              children: (
-                <>
-                  最近观测{" "}
-                  <Typography.Text type="secondary">
-                    {date(value.last_observed_at)}
-                  </Typography.Text>
-                </>
-              ),
-            },
-          ]}
-        />
-      </MetricPanel>
-      <MetricPanel
-        title="运行与退出"
-        icon="cpu"
-        note="重启次数来自 Docker 自动重启计数；人工重启记录在操作与审计中。"
-      >
-        <div className="metric-list">
-          <MetricRow
-            label="本次运行时长"
-            value={
+    <div className="lifecycle-unified">
+      <Table
+        size="small"
+        bordered
+        rowKey="name"
+        pagination={false}
+        tableLayout="fixed"
+        columns={[
+          { title: "指标", dataIndex: "name", width: "40%" },
+          { title: "当前值", dataIndex: "value" },
+        ]}
+        dataSource={[
+          { name: "创建时间", value: date(value.created_at) },
+          { name: "本次启动时间", value: date(value.started_at) },
+          {
+            name: previous ? "上一轮结束时间" : "最近结束时间",
+            value: date(value.finished_at),
+          },
+          {
+            name: "本次运行时长",
+            value:
               runtime === "running" && !value.stale
                 ? duration(value.started_at)
-                : "—"
-            }
-          />
-          <MetricRow
-            label="自动重启"
-            value={`${number(value.restart_count, 0)} 次`}
-          />
-          <MetricRow
-            label="退出码"
-            value={
+                : "—",
+          },
+          {
+            name: "Docker 自动重启次数",
+            value: number(value.restart_count, 0) + " 次",
+          },
+          {
+            name: "退出码",
+            value:
               value.exit_code == null && runtime === "running"
                 ? "运行中 · 不适用"
-                : number(value.exit_code, 0)
-            }
-            muted={value.exit_code == null}
-          />
-          <MetricRow
-            label="OOMKilled"
-            value={
-              value.oom_killed == null ? "未知" : value.oom_killed ? "是" : "否"
-            }
-          />
-          <MetricRow
-            label="Healthcheck"
-            value={
+                : number(value.exit_code, 0),
+          },
+          {
+            name: "OOMKilled",
+            value:
+              value.oom_killed == null
+                ? "未知"
+                : value.oom_killed
+                  ? "是"
+                  : "否",
+          },
+          {
+            name: "Docker Healthcheck",
+            value:
               value.docker_health === "healthy"
                 ? "通过"
                 : value.docker_health === "unhealthy"
                   ? "未通过"
-                  : value.docker_health || "未配置"
-            }
-            muted={!value.docker_health}
-          />
-        </div>
-      </MetricPanel>
+                  : value.docker_health || "未配置",
+          },
+          { name: "最近观测时间", value: date(value.last_observed_at) },
+          { name: "数据新鲜度", value: value.stale ? "已过期" : "有效" },
+        ]}
+      />
+      <Typography.Paragraph type="secondary" className="metric-inline-note">
+        重启次数为 Docker 自动重启计数；人工重启记录在“操作与审计”中。
+      </Typography.Paragraph>
     </div>
   );
 }
@@ -247,41 +182,32 @@ function Filesystem({
       </div>
     );
   return (
-    <div className="metric-panel-grid">
-      <MetricPanel
-        title="Docker 数据盘"
-        icon="disk"
-        tag="宿主机共享"
-        note="同机容器共享这块数据盘，容量不能按容器累加。"
-      >
-        <div className="filesystem-hero">
-          <span>空间使用率</span>
-          <strong>{percent(value.used_ratio)}</strong>
-        </div>
-        <Meter ratio={value.used_ratio} label="数据盘使用率" />
-        <div className="metric-list">
-          <MetricRow label="总容量" value={bytes(value.capacity_bytes)} />
-          <MetricRow label="可用空间" value={bytes(value.available_bytes)} />
-          <MetricRow label="空闲空间" value={bytes(value.free_bytes)} />
-        </div>
-      </MetricPanel>
-      <MetricPanel
-        title="inode"
-        icon="disk"
-        tag="文件数量资源"
-        note="inode 与磁盘字节容量分别计算；任一耗尽都可能使文件写入失败。"
-      >
-        <div className="filesystem-hero">
-          <span>inode 使用率</span>
-          <strong>{percent(value.inodes_used_ratio)}</strong>
-        </div>
-        <Meter ratio={value.inodes_used_ratio} label="inode 使用率" />
-        <div className="metric-list">
-          <MetricRow label="总数" value={number(value.inodes_total, 0)} />
-          <MetricRow label="剩余" value={number(value.inodes_free, 0)} />
-          <MetricRow label="采集时间" value={date(value.collected_at)} />
-        </div>
-      </MetricPanel>
+    <div className="filesystem-unified">
+      <Table
+        size="small"
+        bordered
+        rowKey="name"
+        pagination={false}
+        tableLayout="fixed"
+        columns={[
+          { title: "指标", dataIndex: "name", width: "40%" },
+          { title: "当前值", dataIndex: "value" },
+        ]}
+        dataSource={[
+          { name: "数据盘总容量", value: bytes(value.capacity_bytes) },
+          { name: "可用空间", value: bytes(value.available_bytes) },
+          { name: "空闲空间", value: bytes(value.free_bytes) },
+          { name: "空间使用率", value: percent(value.used_ratio) },
+          { name: "inode 总数", value: number(value.inodes_total, 0) },
+          { name: "inode 剩余", value: number(value.inodes_free, 0) },
+          { name: "inode 使用率", value: percent(value.inodes_used_ratio) },
+          { name: "采集时间", value: date(value.collected_at) },
+        ]}
+      />
+      <Typography.Paragraph type="secondary" className="metric-inline-note">
+        宿主机 Docker 共享数据盘，容量不能按容器累加；空间与 inode
+        任一耗尽均可能导致写入失败。
+      </Typography.Paragraph>
     </div>
   );
 }
@@ -471,11 +397,13 @@ export default function Resources({
   compact = false,
   lifecycle,
   runtime,
+  startup,
 }: {
   value?: ResourceMetrics | null;
   compact?: boolean;
   lifecycle?: ContainerLifecycle | null;
   runtime?: string;
+  startup?: ReactNode;
 }) {
   const [tab, setTab] = useState("resources");
   const current = !!value && !value.stale && value.status !== "UNAVAILABLE";
@@ -555,10 +483,11 @@ export default function Resources({
       )}
       <Collapse
         ghost
+        destroyOnHidden
         items={[
           {
             key: "details",
-            label: "资源与生命周期详情",
+            label: "查看详情",
             extra: (
               <Typography.Text type="secondary">
                 采样 {time(value?.sampled_at)}
@@ -566,9 +495,13 @@ export default function Resources({
             ),
             children: (
               <Tabs
+                destroyOnHidden
                 activeKey={tab}
                 onChange={setTab}
                 items={[
+                  ...(startup
+                    ? [{ key: "startup", label: "启动参数", children: startup }]
+                    : []),
                   {
                     key: "resources",
                     label: "资源详情",

@@ -81,7 +81,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	issued, e := keys.Issue(access.IssueRequest{Name: "legacy restart", Purpose: "RESTART", AllowedNodes: []string{"qa/canary"}, ApprovalReason: "fixture"}, "legacy")
+	issued, e := keys.Issue(access.IssueRequest{Name: "legacy restart", Purpose: "RESTART", ApprovalReason: "fixture"}, "legacy")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -230,6 +230,38 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
+	adminSession, _, _, e := accounts.Login("admin", "strong-admin-password", "fixture")
+	if e != nil {
+		t.Fatal(e)
+	}
+	selfResponse := post("/api/v1/access-keys", map[string]any{"name": "self-issued", "purpose": "RESTART"}, adminSession, access.Issued{})
+	var selfIssued access.Issued
+	if selfResponse.Code != 201 || json.Unmarshal(selfResponse.Body.Bytes(), &selfIssued) != nil || selfIssued.Key.OwnerID != admin.ID {
+		t.Fatalf("current-account issuance failed: %d", selfResponse.Code)
+	}
+	if w := post("/api/v1/access-keys", map[string]any{"name": "forged-owner", "purpose": "RESTART", "owner_id": user.ID}, adminSession, access.Issued{}); w.Code != 400 {
+		t.Fatal("client-selected owner accepted")
+	}
+	basicIssue := httptest.NewRequest("POST", "http://center/api/v1/access-keys", strings.NewReader(`{"name":"unbound","purpose":"RESTART"}`))
+	basicIssue.SetBasicAuth("bootstrap", strings.Repeat("b", 32))
+	basicIssue.Header.Set("Content-Type", "application/json")
+	basicResult := httptest.NewRecorder()
+	handler.ServeHTTP(basicResult, basicIssue)
+	if basicResult.Code != 403 {
+		t.Fatal("accountless production issuance accepted")
+	}
+	var ordered struct {
+		Keys []access.Key `json:"keys"`
+	}
+	listResponse := get("/api/v1/access-keys", adminSession)
+	if listResponse.Code != 200 || json.Unmarshal(listResponse.Body.Bytes(), &ordered) != nil {
+		t.Fatal("key listing failed")
+	}
+	for i := 1; i < len(ordered.Keys); i++ {
+		if ordered.Keys[i-1].CreatedAt.Before(ordered.Keys[i].CreatedAt) {
+			t.Fatal("keys not ordered newest first")
+		}
+	}
 	for _, path := range []string{"/api/v1/baseline", "/api/v1/baseline/yaml", "/api/v1/baseline/history", "/api/v1/containers", "/api/v1/containers/qa/canary", "/api/v1/operations", "/api/v1/operations/" + op.OperationID, "/api/v1/operations/" + op.OperationID + "/audit", "/api/v1/access-keys", "/api/v1/access-keys/owners", "/api/v1/users", "/api/v1/roles", "/api/v1/permissions"} {
 		if w := get(path, token); w.Code != 403 {
 			t.Fatalf("customer restricted endpoint %s: %d", path, w.Code)
@@ -257,14 +289,14 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if w := post("/api/v1/operations/restart", request, token, issued); w.Code != 403 {
 		t.Fatalf("viewer restart bypass: %d", w.Code)
 	}
-	customerKey, e := registry.Issue(access.IssueRequest{OwnerID: user.ID, Name: "customer key", Purpose: "RESTART", AllowedNodes: []string{request.NodeID}, ApprovalReason: "fixture"}, "fixture")
+	customerKey, e := registry.Issue(access.IssueRequest{OwnerID: user.ID, Name: "customer key", Purpose: "RESTART", ApprovalReason: "fixture"}, "fixture")
 	if e != nil {
 		t.Fatal(e)
 	}
 	if w := post("/api/v1/operations/restart", request, token, customerKey); w.Code != 403 {
 		t.Fatalf("customer replay exposed other operation: %d %s", w.Code, w.Body.String())
 	}
-	otherKey, e := registry.Issue(access.IssueRequest{OwnerID: admin.ID, Name: "other owner", Purpose: "RESTART", AllowedNodes: []string{request.NodeID}, ApprovalReason: "fixture"}, "fixture")
+	otherKey, e := registry.Issue(access.IssueRequest{OwnerID: admin.ID, Name: "other owner", Purpose: "RESTART", ApprovalReason: "fixture"}, "fixture")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -290,6 +322,28 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	}
 	originalHandler := handler
 	handler = (&center.Server{Store: customerStore, Access: registry, Accounts: accounts, Database: db, Notifier: notifier}).Handler()
+	startupCtx, stopStartup := context.WithCancel(context.Background())
+	defer stopStartup()
+	go func() {
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-startupCtx.Done():
+				return
+			case <-ticker.C:
+				for _, r := range customerStore.StartupCommands("qa", customerSession) {
+					customerStore.ReceiveStartup("qa", customerSession, model.StartupResult{Type: "startup_result", RequestID: r.RequestID, ContainerID: r.ContainerID, ContainerName: r.ContainerName, Startup: &model.Startup{CollectedAt: time.Now(), Config: model.StartupConfig{Image: "canary:test"}}})
+				}
+			}
+		}
+	}()
+	if w := get("/api/v1/nodes/startup?node_id=qa%2Fcanary", token); w.Code != 200 || !strings.Contains(w.Body.String(), "startup") {
+		t.Fatalf("customer managed startup denied: %d", w.Code)
+	}
+	if w := get("/api/v1/nodes/startup?node_id=qa%2Funmanaged", token); w.Code != 404 {
+		t.Fatal("unmanaged startup exposed")
+	}
 	acceptedResponse := post("/api/v1/operations/restart", request, token, customerKey)
 	if acceptedResponse.Code != 202 {
 		t.Fatalf("customer restart rejected: %d %s", acceptedResponse.Code, acceptedResponse.Body.String())
@@ -385,7 +439,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if e = accounts.ChangePassword(operator.ID, "strong-operator-password", "changed-operator-password", "fixture"); e != nil {
 		t.Fatal(e)
 	}
-	owned, e := registry.Issue(access.IssueRequest{Name: "owned", Purpose: "RESTART", OwnerID: operator.ID, AllowedNodes: []string{"qa/canary"}, ApprovalReason: "owned permission"}, admin.ID)
+	owned, e := registry.Issue(access.IssueRequest{Name: "owned", Purpose: "RESTART", OwnerID: operator.ID, ApprovalReason: "owned permission"}, admin.ID)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -421,6 +475,61 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal("plaintext password")
 	}
 	// A killed writer connection must fail closed and cannot silently acquire a new lease.
+	if _, e = pool.Exec("CREATE TABLE avops.key_node_scopes(key_id text,node_id text)"); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = pool.Exec("INSERT INTO avops.key_node_scopes VALUES($1,'legacy/node')", issued.Key.ID); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = pool.Exec("UPDATE avops.access_keys SET payload=jsonb_set(payload,'{allowed_node_ids}','[\"legacy/node\"]') WHERE key_id=$1", issued.Key.ID); e != nil {
+		t.Fatal(e)
+	}
+	if e = db.RemoveKeyNodeScopes(); e != nil {
+		t.Fatal(e)
+	}
+	if e = db.RemoveKeyNodeScopes(); e != nil {
+		t.Fatal("scope migration not idempotent")
+	}
+	var scopeTables int
+	if e = pool.QueryRow("SELECT count(*) FROM information_schema.tables WHERE table_schema='avops' AND table_name='key_node_scopes'").Scan(&scopeTables); e != nil || scopeTables != 0 {
+		t.Fatal("scope table still present")
+	}
+	var scopeFields int
+	if e = pool.QueryRow("SELECT count(*) FROM avops.access_keys WHERE payload ? 'allowed_node_ids'").Scan(&scopeFields); e != nil || scopeFields != 0 {
+		t.Fatal("scope field still present")
+	}
+	if _, valid := registry.Authenticate(issued.Key.ID, issued.Secret); !valid {
+		t.Fatal("existing key invalidated by scope removal")
+	}
+	freshKeys, e := access.New(t.TempDir(), db)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, valid := freshKeys.Authenticate(issued.Key.ID, issued.Secret); !valid {
+		t.Fatal("existing key not recovered after scope cleanup")
+	}
+	freshKeys.Close()
+	if e = db.PurgeStartupSnapshots(); e != nil {
+		t.Fatal(e)
+	}
+	var cachedStartup int
+	if e = pool.QueryRow("SELECT count(*) FROM avops.containers WHERE payload ? 'startup'").Scan(&cachedStartup); e != nil || cachedStartup != 0 {
+		t.Fatal("startup parameters persisted")
+	}
+	if e = db.CompactOperations(); e != nil {
+		t.Fatal(e)
+	}
+	if e = db.CompactOperations(); e != nil {
+		t.Fatal("compact migration not idempotent")
+	}
+	var compactAudit bool
+	if e = pool.QueryRow("SELECT bool_and(NOT(payload ? 'operation')) FROM avops.operation_audit").Scan(&compactAudit); e != nil || !compactAudit {
+		t.Fatal("stage audit retains full operation snapshot")
+	}
+	var legacyColumns int
+	if e = pool.QueryRow("SELECT count(*) FROM information_schema.columns WHERE table_schema='avops' AND table_name='operations' AND column_name IN ('phase','result_known','operator')").Scan(&legacyColumns); e != nil || legacyColumns != 0 {
+		t.Fatal("redundant operation columns retained")
+	}
 	if _, e = pool.Exec(`INSERT INTO avops.sessions(token_hash,user_id,expires_at,revoked) VALUES
 		('expired-old',$1,now()-interval '25 hours',false),
 		('expired-recent',$1,now()-interval '1 hour',false),

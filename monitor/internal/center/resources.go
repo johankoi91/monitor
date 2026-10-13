@@ -1,9 +1,28 @@
 package center
 
 import (
+	"context"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"time"
 )
+
+// Node startup is limited to saved baseline members. It does not expose the
+// broader discovery inventory to customer operators.
+func (s *Store) NodeStartup(ctx context.Context, id string) (any, error) {
+	s.mu.RLock()
+	n, _, observed := s.findNodeLocked(id)
+	if n.ID == "" {
+		s.mu.RUnlock()
+		return nil, problem(404, "NODE_NOT_FOUND", "节点不在当前基准中")
+	}
+	if observed == nil {
+		s.mu.RUnlock()
+		return nil, problem(404, "STARTUP_UNAVAILABLE", "容器缺失或尚未收到采集")
+	}
+	cid := observed.Container.ContainerID
+	s.mu.RUnlock()
+	return s.RequestStartup(ctx, n.AgentID, cid)
+}
 
 // Freshness belongs to each cAdvisor sample, not just to the Agent report.
 func resourceView(m *model.ResourceMetrics, a *agentState, now time.Time) *model.ResourceMetrics {

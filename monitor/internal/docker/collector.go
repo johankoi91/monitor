@@ -29,8 +29,9 @@ var sensitive = regexp.MustCompile(`(?i)pass(word|wd)?|secret|token|credential|a
 var urls = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+`)
 
 type Policy struct {
-	EnvAllow map[string]bool
-	ArgAllow map[string]bool
+	RawStartup bool
+	EnvAllow   map[string]bool
+	ArgAllow   map[string]bool
 }
 
 // SafeText strips URL credentials and all query values even in otherwise allowed fields.
@@ -144,26 +145,36 @@ type inspect struct {
 
 func startup(raw inspect, at time.Time, policy Policy) *model.Startup {
 	s := &model.Startup{CollectedAt: at, RedactedFields: []string{}}
+	text := SafeText
+	if policy.RawStartup {
+		text = func(v string) string { return v }
+	}
+	args := func(v []string, executable bool, field string) []string {
+		if policy.RawStartup {
+			return append([]string{}, v...)
+		}
+		return redactArgs(v, executable, policy.ArgAllow, field, &s.RedactedFields)
+	}
 	c := &s.Config
-	c.ImageID, c.Path = SafeText(raw.Image), SafeText(raw.Path)
-	c.Args = redactArgs(raw.Args, false, policy.ArgAllow, "args", &s.RedactedFields)
+	c.ImageID, c.Path = text(raw.Image), text(raw.Path)
+	c.Args = args(raw.Args, false, "args")
 	c.Env, c.Mounts, c.PortBindings, c.ExposedPorts = []model.Env{}, []model.Mount{}, []model.PortBinding{}, []string{}
 	c.Entrypoint, c.Cmd = []string{}, []string{}
 	if raw.Config == nil {
 		s.Incomplete = true
 	} else {
 		r := raw.Config
-		c.Image, c.WorkingDir, c.User = SafeText(r.Image), SafeText(r.WorkingDir), SafeText(r.User)
-		c.Entrypoint = redactArgs(r.Entrypoint, true, policy.ArgAllow, "entrypoint", &s.RedactedFields)
-		c.Cmd = redactArgs(r.Cmd, len(r.Entrypoint) == 0, policy.ArgAllow, "cmd", &s.RedactedFields)
+		c.Image, c.WorkingDir, c.User = text(r.Image), text(r.WorkingDir), text(r.User)
+		c.Entrypoint = args(r.Entrypoint, true, "entrypoint")
+		c.Cmd = args(r.Cmd, len(r.Entrypoint) == 0, "cmd")
 		for _, item := range r.Env {
 			name, value, _ := strings.Cut(item, "=")
-			redacted := !policy.EnvAllow[name] || sensitive.MatchString(name)
+			redacted := !policy.RawStartup && (!policy.EnvAllow[name] || sensitive.MatchString(name))
 			if redacted {
 				value = masked
 				s.RedactedFields = append(s.RedactedFields, "env."+name)
 			} else {
-				value = SafeText(value)
+				value = text(value)
 			}
 			c.Env = append(c.Env, model.Env{Name: name, Value: value, Redacted: redacted})
 		}
@@ -176,7 +187,7 @@ func startup(raw inspect, at time.Time, policy Policy) *model.Startup {
 		s.Incomplete = true
 	} else {
 		h := raw.HostConfig
-		c.NetworkMode = SafeText(h.NetworkMode)
+		c.NetworkMode = text(h.NetworkMode)
 		c.RestartPolicy = model.RestartPolicy{Name: h.RestartPolicy.Name, MaximumRetryCount: h.RestartPolicy.MaximumRetryCount}
 		keys := []string{}
 		for key := range h.PortBindings {
@@ -197,12 +208,12 @@ func startup(raw inspect, at time.Time, policy Policy) *model.Startup {
 					continue
 				}
 				ro := len(parts) > 2 && strings.Contains(parts[2], "ro")
-				c.Mounts = append(c.Mounts, model.Mount{Source: SafeText(parts[0]), Target: SafeText(parts[1]), Type: "bind", ReadOnly: ro})
+				c.Mounts = append(c.Mounts, model.Mount{Source: text(parts[0]), Target: text(parts[1]), Type: "bind", ReadOnly: ro})
 			}
 		}
 	}
 	for _, m := range raw.Mounts {
-		c.Mounts = append(c.Mounts, model.Mount{Source: SafeText(m.Source), Target: SafeText(m.Destination), Type: m.Type, ReadOnly: !m.RW})
+		c.Mounts = append(c.Mounts, model.Mount{Source: text(m.Source), Target: text(m.Destination), Type: m.Type, ReadOnly: !m.RW})
 	}
 	sort.Slice(c.Env, func(i, j int) bool { return c.Env[i].Name < c.Env[j].Name })
 	sort.Slice(c.Mounts, func(i, j int) bool { return c.Mounts[i].Target < c.Mounts[j].Target })
@@ -231,6 +242,25 @@ func New(socket string, policy Policy) *Collector {
 		return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", socket)
 	}, MaxIdleConnsPerHost: 4}
 	return &Collector{client: &http.Client{Transport: transport, Timeout: 5 * time.Second}, policy: policy}
+}
+
+func (c *Collector) Startup(ctx context.Context, request model.StartupRequest) model.StartupResult {
+	result := model.StartupResult{Type: "startup_result", RequestID: request.RequestID, ContainerID: request.ContainerID, ContainerName: request.ContainerName}
+	if request.RequestID == "" || request.ContainerID == "" || strings.ContainsAny(request.ContainerID, "/?#") {
+		result.Error = "INVALID_TARGET"
+		return result
+	}
+	var raw inspect
+	if c.get(ctx, "/containers/"+request.ContainerID+"/json", &raw) != nil {
+		result.Error = "DOCKER_READ_FAILED"
+		return result
+	}
+	if raw.ID != request.ContainerID || strings.TrimPrefix(raw.Name, "/") != request.ContainerName {
+		result.Error = "CONTAINER_IDENTITY_CHANGED"
+		return result
+	}
+	result.Startup = startup(raw, time.Now().UTC(), Policy{RawStartup: true})
+	return result
 }
 func (c *Collector) get(ctx context.Context, path string, target any) error {
 	r, err := http.NewRequestWithContext(ctx, "GET", "http://docker/v1.39"+path, nil)

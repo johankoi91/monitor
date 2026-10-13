@@ -120,7 +120,7 @@ func TestExecutionEvidenceVerifiedAgainstFreshSnapshot(t *testing.T) {
 	}
 	s.TickOperations(time.Now())
 	item, _ = s.Operation(o.OperationID)
-	if item.Status != "SUCCESS" || item.NodeLocked || !item.ResultKnown {
+	if item.Status != "SUCCESS" || item.NodeLocked || !item.ResultKnown() {
 		t.Fatalf("verification: %+v", item)
 	}
 	records, err := s.Audit(item.OperationID)
@@ -138,7 +138,7 @@ func TestUnknownResultsRemainLockedUntilHumanEvidence(t *testing.T) {
 	s.ReceiveResult("rtc-a", session, r)
 	s.TickOperations(o.Task.Deadline.Add(time.Second))
 	item, _ := s.Operation(o.OperationID)
-	if item.ResultKnown || !item.NodeLocked || item.Phase != "UNCERTAIN" {
+	if item.ResultKnown() || !item.NodeLocked || item.Phase != "UNCERTAIN" {
 		t.Fatal("unknown result unlocked node")
 	}
 	tasks, _ := s.Commands("rtc-a", session)

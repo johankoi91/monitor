@@ -2,6 +2,21 @@ package model
 
 import "time"
 
+type StartupRequest struct {
+	Type          string `json:"type"`
+	RequestID     string `json:"request_id"`
+	ContainerID   string `json:"container_id"`
+	ContainerName string `json:"container_name"`
+}
+type StartupResult struct {
+	Type          string   `json:"type"`
+	RequestID     string   `json:"request_id"`
+	ContainerID   string   `json:"container_id"`
+	ContainerName string   `json:"container_name"`
+	Startup       *Startup `json:"startup,omitempty"`
+	Error         string   `json:"error,omitempty"`
+}
+
 type RestartRule struct {
 	AgentID       string `json:"agent_id" yaml:"agent_id"`
 	ContainerName string `json:"container_name" yaml:"container_name"`
@@ -54,29 +69,53 @@ type Operation struct {
 	Status              string      `json:"status"`
 	Phase               string      `json:"phase"`
 	NodeID              string      `json:"node_id"`
-	Operator            string      `json:"operator"`
 	Reason              string      `json:"reason"`
 	AuthenticatedSource string      `json:"authenticated_source"`
 	SourceIP            string      `json:"source_ip"`
 	RequestedAt         time.Time   `json:"requested_at"`
 	StartedAt           *time.Time  `json:"started_at"`
 	FinishedAt          *time.Time  `json:"finished_at"`
-	DurationMS          int64       `json:"duration_ms"`
 	BeforeStatus        string      `json:"before_status"`
 	AfterStatus         *string     `json:"after_status"`
 	Message             string      `json:"message"`
-	ResultKnown         bool        `json:"result_known"`
 	NodeLocked          bool        `json:"node_locked"`
 	Task                Task        `json:"task"`
 	LedgerID            string      `json:"ledger_id,omitempty"`
 	Evidence            *TaskResult `json:"evidence,omitempty"`
 	VerifyDeadline      *time.Time  `json:"verify_deadline,omitempty"`
 }
+
+func (o Operation) ResultKnown() bool { return !o.NodeLocked && o.FinishedAt != nil }
+func (o Operation) DurationMS() int64 {
+	if o.FinishedAt == nil {
+		return 0
+	}
+	return o.FinishedAt.Sub(o.RequestedAt).Milliseconds()
+}
+
 type AuditRecord struct {
 	At        time.Time `json:"at"`
 	Kind      string    `json:"kind"`
 	Operation Operation `json:"operation"`
 }
+
+type OperationStep struct {
+	At          time.Time `json:"at"`
+	Kind        string    `json:"kind"`
+	OperationID string    `json:"operation_id"`
+	Status      string    `json:"status"`
+	Message     string    `json:"message"`
+	Source      string    `json:"source,omitempty"`
+}
+
+func (r AuditRecord) Step() OperationStep {
+	state := r.Operation.Phase
+	if !r.Operation.NodeLocked {
+		state = r.Operation.Status
+	}
+	return OperationStep{At: r.At, Kind: r.Kind, OperationID: r.Operation.OperationID, Status: state, Message: r.Operation.Message, Source: r.Operation.AuthenticatedSource}
+}
+
 type ResolveRequest struct {
 	Operator string `json:"operator"`
 	Reason   string `json:"reason"`
