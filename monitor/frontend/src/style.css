@@ -205,6 +205,7 @@ body {
   padding: 20px;
 }
 .node-identity {
+  flex: 1;
   min-width: 0;
 }
 .node-identity h4 {
@@ -218,6 +219,33 @@ body {
   gap: 8px;
   color: #8c8c8c;
   font-size: 12px;
+}
+.node-service-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+.node-service-info {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+.node-service-row h4 {
+  min-width: 0;
+}
+.node-service-row .node-actions {
+  margin-left: auto;
+}
+.node-action-group {
+  flex-shrink: 0;
+  padding: 4px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fafafa;
+  white-space: nowrap;
 }
 .node-host-dot {
   width: 6px;
@@ -647,7 +675,7 @@ pre {
 }
 .service-panel .node-identity h4 {
   font-size: 15px;
-  margin: 5px 0;
+  margin: 0;
 }
 .service-panel .node-observation {
   font-size: 12px;
@@ -688,6 +716,23 @@ pre {
   }
   .service-panel .node-card-header {
     padding: 12px 14px 6px;
+  }
+  .service-panel .node-service-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .service-panel .node-service-info {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .service-panel .node-service-row .node-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .service-panel .node-action-group {
+    justify-content: flex-end;
   }
   .service-panel .resource-view {
     padding: 0 14px 6px;

@@ -1,5 +1,4 @@
 import { useState, type ReactNode } from "react";
-import Collapse from "antd/es/collapse";
 import Tabs from "antd/es/tabs";
 import Empty from "antd/es/empty";
 import Typography from "antd/es/typography";
@@ -30,8 +29,6 @@ const percent = (v: number | null | undefined) =>
   v == null ? "—" : `${(v * 100).toFixed(1)}%`;
 const date = (v: string | null | undefined) =>
   v ? new Date(v).toLocaleString("zh-CN", { hour12: false }) : "—";
-const time = (v: string | null | undefined) =>
-  v ? new Date(v).toLocaleTimeString("zh-CN", { hour12: false }) : "—";
 function bytes(v: number | null | undefined) {
   if (v == null) return "—";
   for (const [unit, size] of [
@@ -398,14 +395,20 @@ export default function Resources({
   lifecycle,
   runtime,
   startup,
+  detailsOpen,
+  onDetailsOpenChange,
 }: {
   value?: ResourceMetrics | null;
   compact?: boolean;
   lifecycle?: ContainerLifecycle | null;
   runtime?: string;
   startup?: ReactNode;
+  detailsOpen?: boolean;
+  onDetailsOpenChange?: (open: boolean) => void;
 }) {
-  const [tab, setTab] = useState("resources");
+  const [tab, setTab] = useState("resources"),
+    [internalDetailsOpen, setInternalDetailsOpen] = useState(false);
+  const isDetailsOpen = detailsOpen ?? internalDetailsOpen;
   const current = !!value && !value.stale && value.status !== "UNAVAILABLE";
   const f = value?.host_filesystem;
   const storageCurrent =
@@ -481,24 +484,13 @@ export default function Resources({
           </div>
         </div>
       )}
-      <Collapse
-        ghost
-        destroyOnHidden
-        items={[
-          {
-            key: "details",
-            label: "查看详情",
-            extra: (
-              <Typography.Text type="secondary">
-                采样 {time(value?.sampled_at)}
-              </Typography.Text>
-            ),
-            children: (
-              <Tabs
-                destroyOnHidden
-                activeKey={tab}
-                onChange={setTab}
-                items={[
+      {isDetailsOpen && (
+        <div className="resource-details">
+          <Tabs
+            destroyOnHidden
+            activeKey={tab}
+            onChange={setTab}
+            items={[
                   ...(startup
                     ? [{ key: "startup", label: "启动参数", children: startup }]
                     : []),
@@ -528,12 +520,10 @@ export default function Resources({
                     label: "生命周期",
                     children: <Lifecycle value={lifecycle} runtime={runtime} />,
                   },
-                ]}
-              />
-            ),
-          },
-        ]}
-      />
+            ]}
+          />
+        </div>
+      )}
     </div>
   );
 }

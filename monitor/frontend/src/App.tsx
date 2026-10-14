@@ -58,6 +58,7 @@ import type {
 const stamp = (value?: string | null) =>
   value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "暂无";
 const key = (c: Container) => `${c.agent_id}/${c.container_id}`;
+const authorizationStorageKey = "avops-monitor-authorization";
 const message = (e: unknown) => (e instanceof Error ? e.message : "请求未完成");
 const operationLabels: Record<string, string> = {
   ACCEPTED: "已受理",
@@ -187,15 +188,44 @@ export default function App() {
     [registering, setRegistering] = useState(false),
     [user, setUser] = useState<AccountUser | null>(null),
     [permissions, setPermissions] = useState<string[]>([]),
-    [changingPassword, setChangingPassword] = useState(false);
+    [changingPassword, setChangingPassword] = useState(false),
+    [restoring, setRestoring] = useState(true);
   const api = useMemo(
     () =>
       client(authorization, () => {
+        localStorage.removeItem(authorizationStorageKey);
         setAuthorization("");
         setLoginError("凭证无效，请重新登录");
       }),
     [authorization],
   );
+  useEffect(() => {
+    const savedAuthorization = localStorage.getItem(authorizationStorageKey);
+    if (!savedAuthorization) {
+      setRestoring(false);
+      return;
+    }
+    void (async () => {
+      try {
+        const version = await client(savedAuthorization, () => {}).get<{
+          credential_purpose?: string;
+          can_manage_keys?: boolean;
+          user?: AccountUser | null;
+          permissions?: string[];
+        }>("/version");
+        if (version.credential_purpose === "RESTART")
+          throw new Error("重启安全 Key 仅用于操作接口，请使用账号登录");
+        setCanManageKeys(!!version.can_manage_keys);
+        setUser(version.user || null);
+        setPermissions(version.permissions || []);
+        setAuthorization(savedAuthorization);
+      } catch {
+        localStorage.removeItem(authorizationStorageKey);
+      } finally {
+        setRestoring(false);
+      }
+    })();
+  }, []);
   async function login(id: string, secret: string, mode: string) {
     let token = basic(id, secret);
     if (mode === "ACCOUNT") {
@@ -221,6 +251,7 @@ export default function App() {
     setUser(version.user || null);
     setPermissions(version.permissions || []);
     setLoginError("");
+    localStorage.setItem(authorizationStorageKey, token);
     setAuthorization(token);
   }
   return (
@@ -252,6 +283,7 @@ export default function App() {
                           try {
                             await api.post("/api/v1/auth/logout", {});
                           } catch {}
+                        localStorage.removeItem(authorizationStorageKey);
                         setAuthorization("");
                         setCanManageKeys(false);
                         setUser(null);
@@ -272,7 +304,9 @@ export default function App() {
         )}
       </Layout.Header>
       <Layout.Content className="app-content">
-        {authorization ? (
+        {restoring ? (
+          <Card className="page-card login-panel">登录状态恢复中…</Card>
+        ) : authorization ? (
           <Workspace
             api={api}
             canManageKeys={canManageKeys}
@@ -297,6 +331,7 @@ export default function App() {
           onClose={() => setChangingPassword(false)}
           onChanged={() => {
             setChangingPassword(false);
+            localStorage.removeItem(authorizationStorageKey);
             setAuthorization("");
             setUser(null);
             setPermissions([]);
@@ -328,9 +363,11 @@ function Workspace({
           : "access",
     ),
     [notice, setNotice] = useState(""),
+    [noticeType, setNoticeType] = useState<"info" | "error">("info"),
     [baseline, setBaseline] = useState<Baseline | null>(null),
     [agents, setAgents] = useState<Agent[]>([]),
     [status, setStatus] = useState<ServiceStatus[]>([]),
+    [statusCluster, setStatusCluster] = useState(""),
     [operations, setOperations] = useState<Operation[]>([]),
     [notifications, setNotifications] = useState<Notifications>({
       enabled: false,
@@ -346,6 +383,9 @@ function Workspace({
   const [chosen, setChosen] = useState<Map<string, Container>>(new Map()),
     [additions, setAdditions] = useState<Map<string, Addition>>(new Map()),
     [removals, setRemovals] = useState<Set<string>>(new Set()),
+    [expandedStatusDetails, setExpandedStatusDetails] = useState<Set<string>>(
+      new Set(),
+    ),
     [saving, setSaving] = useState(false);
   const [clusterCode, setClusterCode] = useState("rtc-pilot");
   const [tcpPort, setTCPPort] = useState("");
@@ -359,6 +399,10 @@ function Workspace({
     busy = useRef(false);
   draft.current = chosen.size + additions.size + removals.size > 0;
   busy.current = saving;
+  const showNotice = (value: string, type: "info" | "error" = "info") => {
+    setNoticeType(type);
+    setNotice(value);
+  };
   const reload = useCallback(async () => {
     if (!permissions.includes("monitor.read")) return;
     const generation = ++requestGeneration.current;
@@ -391,7 +435,7 @@ function Workspace({
         if (!b) return null;
         if (!old || !draft.current) return b;
         if (old.revision !== b.revision)
-          setNotice("基准已被其他请求更新。请清空变更并刷新后重新确认。");
+          showNotice("基准已被其他请求更新。请清空变更并刷新后重新确认。", "error");
         return old;
       });
       setAgents(a.agents);
@@ -408,7 +452,7 @@ function Workspace({
           : null,
       );
     } catch (e) {
-      setNotice(message(e));
+      showNotice(message(e), "error");
     }
   }, [api, query, page, permissions]);
   useEffect(() => {
@@ -434,6 +478,10 @@ function Workspace({
   const nodeStatuses = new Map(
     status.flatMap((s) => s.nodes.map((n) => [n.node_id, n] as const)),
   );
+  const statusClusters = [...new Set(status.map((item) => item.cluster_code))].sort();
+  const visibleStatus = statusCluster
+    ? status.filter((item) => item.cluster_code === statusCluster)
+    : status;
   const eligible = (c: Container) =>
     c.agent_online &&
     !c.stale &&
@@ -449,14 +497,14 @@ function Workspace({
   }
   function stage() {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(clusterCode)) {
-      setNotice("请填写合法的集群编码");
+      showNotice("请填写合法的集群编码", "error");
       return;
     }
     let checks;
     try {
       checks = checksForPorts(tcpPort);
     } catch (e) {
-      setNotice(message(e));
+      showNotice(message(e), "error");
       return;
     }
     setAdditions((previous) => {
@@ -480,7 +528,7 @@ function Workspace({
   async function save() {
     if (saving || !baseline) return;
     if (chosen.size) {
-      setNotice("还有勾选容器未归类，请先加入变更预览");
+      showNotice("还有勾选容器未归类，请先加入变更预览", "error");
       return;
     }
     setSaving(true);
@@ -500,7 +548,7 @@ function Workspace({
       setNotice("基准已保存并生效，可下载 YAML。");
       await reload();
     } catch (e) {
-      setNotice(`${message(e)}。变更已保留；若请求超时，请先核对当前基准。`);
+      showNotice(`${message(e)}。变更已保留；若请求超时，请先核对当前基准。`, "error");
     } finally {
       setSaving(false);
     }
@@ -551,7 +599,7 @@ function Workspace({
       };
       setDetail(strip(value));
     } catch (e) {
-      setNotice(message(e));
+      showNotice(message(e), "error");
     }
   }
   async function showOperation(id: string) {
@@ -561,7 +609,7 @@ function Workspace({
       );
       setOperation(response.operation);
     } catch (e) {
-      setNotice(message(e));
+      showNotice(message(e), "error");
     }
   }
   return (
@@ -595,8 +643,8 @@ function Workspace({
             : []),
         ].map(([key, label]) => ({ key, label }))}
       />
-      {notice && (
-        <Alert message={notice} type="info" showIcon className="page-alert" />
+      {notice && (noticeType === "info" || tab !== "inventory") && (
+        <Alert message={notice} type={noticeType} showIcon className="page-alert" />
       )}
       {tab === "status" && (
         <section>
@@ -604,10 +652,30 @@ function Workspace({
           <Typography.Paragraph type="secondary">
             容器与就绪检查 · 业务链路状态需另行验证
           </Typography.Paragraph>
+          <Form layout="vertical" className="filters status-filters">
+            <Form.Item label="集群标识" htmlFor="app-field-status-cluster">
+              <Select
+                id="app-field-status-cluster"
+                style={{ minWidth: 240, width: "100%" }}
+                value={statusCluster}
+                onChange={setStatusCluster}
+              >
+                <Select.Option value="">全部集群</Select.Option>
+                {statusClusters.map((cluster) => (
+                  <Select.Option key={cluster} value={cluster}>
+                    {cluster}
+                  </Select.Option>
+                ))}
+              </Select>
+            </Form.Item>
+          </Form>
           {!status.length && (
             <Empty>尚未保存基准。进入“容器与基准台账”选择要监控的容器。</Empty>
           )}
-          {status.map((s) => (
+          {status.length > 0 && !visibleStatus.length && (
+            <Empty>没有匹配的集群状态。</Empty>
+          )}
+          {visibleStatus.map((s) => (
             <Card
               className="page-card service-panel"
               key={`${s.cluster_code}/${s.service_code}`}
@@ -634,76 +702,68 @@ function Workspace({
                 <div className="node-card" key={n.node_id}>
                   <div className="node-card-header">
                     <div className="node-identity">
-                      <div className="node-host">
-                        <span className="node-host-dot" />
-                        {n.host_address}
-                        <span className="node-layer">
-                          {{
-                            AGENT: "采集通道",
-                            CONTAINER: "容器检查",
-                            READINESS: "就绪检查",
-                            BLACKBOX: "业务检查",
-                          }[n.check_level] || n.check_level}
-                        </span>
+                      <div className="node-service-row">
+                        <div className="node-service-info">
+                          <Typography.Title level={4}>
+                            {n.container_name}
+                          </Typography.Title>
+                          <div className="node-host">
+                            <span className="node-host-dot" />
+                            {n.host_address}
+                            <span className="node-observation-time">
+                              {stamp(n.collected_at)}
+                              {n.stale ? " · 已过期" : ""}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="node-actions node-action-group">
+                          <Badge
+                            value={n.status}
+                            label={
+                              {
+                                HEALTHY: "正常",
+                                UNHEALTHY: "异常",
+                                DEGRADED: "部分异常",
+                                UNKNOWN: "未知",
+                              }[n.status] || n.status
+                            }
+                          />
+                          {can("restart.execute") && (
+                            <Button
+                              className="node-restart-button"
+                              disabled={
+                                !n.restart_enabled || !can("restart.execute")
+                              }
+                              title={
+                                !can("restart.execute")
+                                  ? "当前角色无重启权限"
+                                  : !n.restart_enabled
+                                    ? "当前基准未开放重启"
+                                    : n.restart_allowed
+                                      ? "需要独立重启安全 Key"
+                                      : n.restart_block_reason || "当前暂不可重启"
+                              }
+                              onClick={() => setRestart(n)}
+                            >
+                              重启
+                            </Button>
+                          )}
+                          <Button
+                            onClick={() =>
+                              setExpandedStatusDetails((previous) => {
+                                const next = new Set(previous);
+                                if (next.has(n.node_id)) next.delete(n.node_id);
+                                else next.add(n.node_id);
+                                return next;
+                              })
+                            }
+                          >
+                            查看详情
+                          </Button>
+                        </div>
                       </div>
-                      <Typography.Title level={4}>
-                        {n.container_name}
-                      </Typography.Title>
-                      <div className="node-observation">
-                        {n.status !== "HEALTHY" && <span>{n.reason}</span>}
-                        <span
-                          className="node-observation-time"
-                          title={stamp(n.collected_at)}
-                        >
-                          上报{" "}
-                          {n.collected_at
-                            ? new Date(n.collected_at).toLocaleTimeString(
-                                "zh-CN",
-                                { hour12: false },
-                              )
-                            : "—"}
-                          {n.stale ? " · 已过期" : ""}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="node-actions">
-                      <Badge
-                        value={n.status}
-                        label={
-                          {
-                            HEALTHY: "正常",
-                            UNHEALTHY: "异常",
-                            DEGRADED: "部分异常",
-                            UNKNOWN: "未知",
-                          }[n.status] || n.status
-                        }
-                      />
-                      {can("operations.read") && n.active_operation_id && (
-                        <Button
-                          onClick={() =>
-                            void showOperation(n.active_operation_id)
-                          }
-                        >
-                          查看操作
-                        </Button>
-                      )}
-                      {can("restart.execute") && (
-                        <Button
-                          className="node-restart-button"
-                          disabled={
-                            !n.restart_allowed || !can("restart.execute")
-                          }
-                          title={
-                            !can("restart.execute")
-                              ? "当前角色无重启权限"
-                              : n.restart_allowed
-                                ? "需要独立重启安全 Key"
-                                : n.restart_block_reason || "节点白名单未开放"
-                          }
-                          onClick={() => setRestart(n)}
-                        >
-                          重启
-                        </Button>
+                      {n.status !== "HEALTHY" && (
+                        <div className="node-observation">{n.reason}</div>
                       )}
                     </div>
                   </div>
@@ -712,6 +772,15 @@ function Workspace({
                     lifecycle={n.lifecycle}
                     runtime={n.runtime_status}
                     startup={<StartupParameters api={api} nodeID={n.node_id} />}
+                    detailsOpen={expandedStatusDetails.has(n.node_id)}
+                    onDetailsOpenChange={(open) =>
+                      setExpandedStatusDetails((previous) => {
+                        const next = new Set(previous);
+                        if (open) next.add(n.node_id);
+                        else next.delete(n.node_id);
+                        return next;
+                      })
+                    }
                   />
                 </div>
               ))}
@@ -884,11 +953,68 @@ function Workspace({
                 加入待保存变更
               </Button>
             </Form>
+            {notice && noticeType === "error" && (
+              <Alert message={notice} type="error" showIcon className="page-alert" />
+            )}
             <p>
               服务归属自动生成；一批容器使用相同端口，不同端口可分批添加。多个
               TCP 端口用逗号分隔，空值使用容器状态和已有 Healthcheck；纯 UDP
               端口不填写。新节点禁重启。
             </p>
+          </Card>
+          <Card className="page-card">
+            <Typography.Title level={2}>变更预览</Typography.Title>
+            {!additions.size && !removals.size && (
+              <Empty>尚无待保存变更。筛选不会移出任何基准成员。</Empty>
+            )}
+            {[...additions].map(([k, a]) => (
+              <div className="member" key={k}>
+                <div>
+                  新增 / 调整：{a.host_address} / {a.container_name}
+                  <small>
+                    {a.cluster_code} · TCP：
+                    {a.checks.map((c) => c.port).join(", ") || "未配置"}
+                  </small>
+                </div>
+                <Button
+                  disabled={saving}
+                  onClick={() =>
+                    setAdditions((old) => {
+                      const next = new Map(old);
+                      next.delete(k);
+                      return next;
+                    })
+                  }
+                >
+                  取消新增
+                </Button>
+              </div>
+            ))}
+            {[...removals].map((id) => {
+              const n = members.find((n) => n.id === id);
+              return (
+                <p key={id}>
+                  移出：{n ? `${n.host_address} / ${n.container_name}` : id}
+                </p>
+              );
+            })}
+            <div className="actions">
+              <Button disabled={saving} onClick={clear}>
+                清空变更
+              </Button>
+              <Button
+                type="primary"
+                disabled={
+                  !can("baseline.write") ||
+                  saving ||
+                  !baseline ||
+                  (!additions.size && !removals.size)
+                }
+                onClick={() => void save()}
+              >
+                {saving ? "正在保存…" : "保存并生效"}
+              </Button>
+            </div>
           </Card>
           <Card className="page-card">
             <div className="section-title">
@@ -898,7 +1024,7 @@ function Workspace({
                   onClick={() =>
                     void api
                       .download(baseline.yaml_url!)
-                      .catch((e) => setNotice(message(e)))
+                      .catch((e) => showNotice(message(e), "error"))
                   }
                 >
                   下载 YAML
@@ -977,73 +1103,22 @@ function Workspace({
               ]}
             />
           </Card>
-          <Card className="page-card">
-            <Typography.Title level={2}>变更预览</Typography.Title>
-            {!additions.size && !removals.size && (
-              <Empty>尚无待保存变更。筛选不会移出任何基准成员。</Empty>
-            )}
-            {[...additions].map(([k, a]) => (
-              <div className="member" key={k}>
-                <div>
-                  新增 / 调整：{a.host_address} / {a.container_name}
-                  <small>
-                    {a.cluster_code} · TCP：
-                    {a.checks.map((c) => c.port).join(", ") || "未配置"}
-                  </small>
-                </div>
-                <Button
-                  disabled={saving}
-                  onClick={() =>
-                    setAdditions((old) => {
-                      const next = new Map(old);
-                      next.delete(k);
-                      return next;
-                    })
-                  }
-                >
-                  取消新增
-                </Button>
-              </div>
-            ))}
-            {[...removals].map((id) => {
-              const n = members.find((n) => n.id === id);
-              return (
-                <p key={id}>
-                  移出：{n ? `${n.host_address} / ${n.container_name}` : id}
-                </p>
-              );
-            })}
-            <div className="actions">
-              <Button disabled={saving} onClick={clear}>
-                清空变更
-              </Button>
-              <Button
-                type="primary"
-                disabled={
-                  !can("baseline.write") ||
-                  saving ||
-                  !baseline ||
-                  (!additions.size && !removals.size)
-                }
-                onClick={() => void save()}
-              >
-                {saving ? "正在保存…" : "保存并生效"}
-              </Button>
-            </div>
-          </Card>
         </section>
       )}
       {tab === "operations" &&
         (can("operations.read") || can("restart.result")) && (
-          <Operations
-            operations={operations}
-            services={status}
-            canAudit={can("audit.read")}
-            canResolve={can("restart.resolve")}
-            onOpen={(id) => void showOperation(id)}
-            onResolve={setResolve}
-            onRefresh={() => void reload()}
-          />
+          <>
+            <Operations
+              operations={operations}
+              services={status}
+              canAudit={can("audit.read")}
+              canResolve={can("restart.resolve")}
+              onOpen={(id) => void showOperation(id)}
+              onResolve={setResolve}
+              onRefresh={() => void reload()}
+            />
+            <StorageStatus api={api} />
+          </>
         )}
       {tab === "access" && canManageKeys && (
         <AccessKeys api={api} canManage={canManageKeys} />
@@ -1057,7 +1132,6 @@ function Workspace({
       )}
       {tab === "notifications" && (
         <section>
-          <StorageStatus api={api} />
           <Typography.Title level={3}>通知投递</Typography.Title>
           <Typography.Paragraph type="secondary">
             轮询提供最新事实，通知投递失败不会触发业务重启。
@@ -1421,6 +1495,14 @@ function RestartModal({
           {node.image} · {node.check_level}
         </small>
       </Card>
+      {!node.restart_allowed && (
+        <Alert
+          showIcon
+          type="warning"
+          message={`当前暂不可重启：${node.restart_block_reason || "前置条件未满足"}`}
+          className="page-alert"
+        />
+      )}
       <Form layout="vertical" onSubmitCapture={submit}>
         <Form.Item label="重启安全 Key ID" htmlFor="app-field-9">
           <Input
@@ -1453,7 +1535,11 @@ function RestartModal({
         {error && (
           <Alert showIcon type="error" message={error} className="page-alert" />
         )}
-        <Button htmlType="submit" type="primary" disabled={busy}>
+        <Button
+          htmlType="submit"
+          type="primary"
+          disabled={busy || !node.restart_allowed}
+        >
           {busy ? "正在受理…" : "确认重启"}
         </Button>
       </Form>
