@@ -15,13 +15,9 @@ func (s *Store) NodeStartup(ctx context.Context, id string) (any, error) {
 		s.mu.RUnlock()
 		return nil, problem(404, "NODE_NOT_FOUND", "节点不在当前基准中")
 	}
-	if observed == nil {
-		s.mu.RUnlock()
-		return nil, problem(404, "STARTUP_UNAVAILABLE", "容器缺失或尚未收到采集")
-	}
-	cid := observed.Container.ContainerID
+	view := s.startupViewLocked(n.AgentID, n.ContainerName, observed)
 	s.mu.RUnlock()
-	return s.RequestStartup(ctx, n.AgentID, cid)
+	return view, nil
 }
 
 // Freshness belongs to each cAdvisor sample, not just to the Agent report.

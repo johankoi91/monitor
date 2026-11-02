@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Fresh install from the extracted offline bundle. Configuration is private.
-role=${1:?center or agent required}
+role=${1:?center, agent or receiver required}
 config=${2:?absolute private configuration directory required}
 data=${3:?absolute data directory required}
 name=${4:-avops-$role}
-case "$role" in center|agent) ;; *) exit 1;; esac
+case "$role" in center|agent|receiver) ;; *) exit 1;; esac
 case "$config:$data" in /*:/*) ;; *) exit 1;; esac
 test "$(id -u)" = 0
 test -d "$config"
@@ -32,7 +32,7 @@ if test "$role" = center; then
     -v "$runtime_config:/config:ro" -v "$data:/state" \
     --read-only --tmpfs /tmp:size=16m,mode=1777 --memory 256m --cpus 0.5 --pids-limit 256 \
     --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 "avops-center:$version"
-else
+elif test "$role" = agent; then
   test -f "$config/agent.env"
   test -f "$config/restart-rules.yaml"
   docker run -d --pull=never --name "$name" --restart unless-stopped --network host \
@@ -42,4 +42,16 @@ else
     -v "$config/restart-rules.yaml:/config/restart-rules.yaml:ro" \
     --read-only --tmpfs /tmp:size=16m,mode=1777 --memory 128m --cpus 0.25 --pids-limit 128 \
     --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 "avops-agent:$version"
+else
+  for file in receiver.env server.pem server-key.pem; do test -f "$config/$file"; done
+  runtime_config="$data/runtime-config"
+  install -d -m 0755 "$runtime_config"
+  for file in server.pem server-key.pem; do install -m 0400 -o 65532 -g 65532 "$config/$file" "$runtime_config/$file"; done
+  chown 65532:65532 "$data"
+  docker run -d --pull=never --name "$name" --restart unless-stopped --network host \
+    --env-file "$config/receiver.env" -e AVOPS_RECEIVER_DATA_DIR=/state \
+    -e AVOPS_RECEIVER_TLS_CERT=/config/server.pem -e AVOPS_RECEIVER_TLS_KEY=/config/server-key.pem \
+    -v "$runtime_config:/config:ro" -v "$data:/state" \
+    --read-only --tmpfs /tmp:size=16m,mode=1777 --memory 128m --cpus 0.25 --pids-limit 128 \
+    --security-opt no-new-privileges --log-opt max-size=10m --log-opt max-file=3 "avops-notification-receiver:$version"
 fi

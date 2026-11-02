@@ -2,7 +2,6 @@ package notify
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"github.com/johankoi91/monitor/runtime/internal/model"
@@ -15,24 +14,28 @@ import (
 )
 
 type Settings struct {
-	AuthScheme       string `json:"auth_scheme"`
-	ResponseSeconds  int    `json:"response_seconds"`
-	MaxRetries       int    `json:"max_retries"`
-	Revision         string `json:"revision"`
-	Enabled          bool   `json:"enabled"`
-	URL              string `json:"url"`
-	TLSServerName    string `json:"tls_server_name"`
-	AuthConfigured   bool   `json:"auth_configured"`
-	StorageAvailable bool   `json:"storage_available"`
+	Endpoints        []EndpointSettings `json:"endpoints"`
+	Routes           [3]Route           `json:"routes"`
+	AuthScheme       string             `json:"auth_scheme"`
+	ResponseSeconds  int                `json:"response_seconds"`
+	MaxRetries       int                `json:"max_retries"`
+	Revision         string             `json:"revision"`
+	Enabled          bool               `json:"enabled"`
+	URL              string             `json:"url"`
+	TLSServerName    string             `json:"tls_server_name"`
+	AuthConfigured   bool               `json:"auth_configured"`
+	StorageAvailable bool               `json:"storage_available"`
 }
 type SettingsRequest struct {
-	ExpectedRevision string `json:"expected_revision"`
-	Enabled          bool   `json:"enabled"`
-	URL              string `json:"url"`
-	TLSServerName    string `json:"tls_server_name"`
-	AuthMode         string `json:"auth_mode"`
-	ID               string `json:"id,omitempty"`
-	Secret           string `json:"secret,omitempty"`
+	Endpoints        *[]EndpointRequest `json:"endpoints,omitempty"`
+	Routes           []Route            `json:"routes,omitempty"`
+	ExpectedRevision string             `json:"expected_revision"`
+	Enabled          bool               `json:"enabled"`
+	URL              string             `json:"url"`
+	TLSServerName    string             `json:"tls_server_name"`
+	AuthMode         string             `json:"auth_mode"`
+	ID               string             `json:"id,omitempty"`
+	Secret           string             `json:"secret,omitempty"`
 }
 type settingsRecord struct {
 	Version  int    `json:"version"`
@@ -51,7 +54,7 @@ func loadSettings(path string) (settingsRecord, bool, error) {
 	if err != nil {
 		return settingsRecord{}, false, err
 	}
-	if len(data) > 64<<10 {
+	if len(data) > 256<<10 {
 		return settingsRecord{}, false, errors.New("oversized notification settings")
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -63,6 +66,9 @@ func loadSettings(path string) (settingsRecord, bool, error) {
 	return record, true, nil
 }
 func validSettings(c Config) error {
+	if c.EndpointMode {
+		return validateEndpoints(c)
+	}
 	if len(c.URL) > 2048 || len(c.TLSServerName) > 253 {
 		return errors.New("通知地址或 TLS 域名过长")
 	}
@@ -82,7 +88,7 @@ func validSettings(c Config) error {
 	return nil
 }
 func (n *Notifier) settingsLocked() Settings {
-	return Settings{AuthScheme: "webhook_hmac", ResponseSeconds: 10, MaxRetries: 3, Revision: n.settingsRevision, Enabled: n.config.Enabled, URL: n.config.URL, TLSServerName: n.config.TLSServerName, AuthConfigured: n.config.Secret != "", StorageAvailable: !n.failed}
+	return Settings{Endpoints: endpointViews(n.config), Routes: n.config.Routes, AuthScheme: "webhook_hmac", ResponseSeconds: 10, MaxRetries: 3, Revision: n.settingsRevision, Enabled: n.config.Enabled, URL: n.config.URL, TLSServerName: n.config.TLSServerName, AuthConfigured: n.config.Secret != "", StorageAvailable: !n.failed}
 }
 func (n *Notifier) Settings() Settings { n.mu.Lock(); defer n.mu.Unlock(); return n.settingsLocked() }
 func (n *Notifier) UpdateSettings(r SettingsRequest, forbidden []string) (Settings, error) {
@@ -97,10 +103,26 @@ func (n *Notifier) UpdateSettings(r SettingsRequest, forbidden []string) (Settin
 	if n.failed {
 		return Settings{}, ErrSettingsWrite
 	}
+	if r.Endpoints != nil {
+		return n.updateEndpointsLocked(r, forbidden)
+	}
+	if n.config.EndpointMode {
+		return Settings{}, errors.New("请使用通知配置列表更新接收地址")
+	}
 	c := n.config
 	c.Enabled = r.Enabled
 	c.URL = strings.TrimSpace(r.URL)
 	c.TLSServerName = strings.TrimSpace(r.TLSServerName)
+	if r.Routes != nil {
+		if len(r.Routes) != 3 {
+			return Settings{}, errors.New("请提供三个通知分类配置")
+		}
+		copy(c.Routes[:], r.Routes)
+		c.RoutesConfigured = true
+	}
+	if err := validateRoutes(c); err != nil {
+		return Settings{}, err
+	}
 	c.ID = ""
 	c.AuthScheme = "webhook_hmac"
 	if err := validSettings(c); err != nil {
@@ -108,7 +130,12 @@ func (n *Notifier) UpdateSettings(r SettingsRequest, forbidden []string) (Settin
 	}
 	switch r.AuthMode {
 	case "retain":
-		if c.URL != n.config.URL || c.TLSServerName != n.config.TLSServerName {
+		targetsChanged := c.URL != n.config.URL || c.TLSServerName != n.config.TLSServerName
+		for i, r := range c.Routes {
+			old := n.config.Routes[i]
+			targetsChanged = targetsChanged || r.URL != old.URL || r.TLSServerName != old.TLSServerName
+		}
+		if targetsChanged {
 			return Settings{}, errors.New("更换通知目标时不能沿用原接收端密钥")
 		}
 		if r.ID != "" || r.Secret != "" {
@@ -138,16 +165,24 @@ func (n *Notifier) UpdateSettings(r SettingsRequest, forbidden []string) (Settin
 	}
 	// A new or changed enabled endpoint must acknowledge the signed health
 	// check before activation, as required by the referenced Webhook design.
-	if c.Enabled && (!n.config.Enabled || c.URL != n.config.URL || c.TLSServerName != n.config.TLSServerName || c.Secret != n.config.Secret) {
+	if c.Enabled && c != n.config {
+		targets := []Config{c}
+		seen := map[string]bool{c.URL + "|" + c.TLSServerName: true}
+		for _, r := range c.Routes {
+			target, selected := routeConfig(c, r.Category)
+			key := target.URL + "|" + target.TLSServerName
+			if selected && !seen[key] {
+				targets = append(targets, target)
+				seen[key] = true
+			}
+		}
 		now := time.Now().UTC()
 		probe := model.Notification{ID: eventID(), Type: "WEBHOOK_TEST", Product: "RTC", Cluster: "webhook-check", Service: "webhook-test", PreviousStatus: "UNKNOWN", CurrentStatus: "UNKNOWN", ReasonCode: "MONITOR_WEBHOOK_TEST", Reason: "签名和响应健康检查，不代表业务状态", OccurredAt: now, CollectedAt: &now}
 		body, _ := json.Marshal(probe)
-		client := n.newClient(c)
-		// Network validation must not block collection, polling or delivery.
+		factory := n.newClient
 		revisionBeforeProbe := n.settingsRevision
 		n.mu.Unlock()
-		ok, _, reason := postWebhook(context.Background(), client, c, body)
-		client.CloseIdleConnections()
+		reason := probeTargets(targets, factory, body)
 		n.mu.Lock()
 		if revisionBeforeProbe != n.settingsRevision {
 			return Settings{}, ErrSettingsConflict
@@ -155,7 +190,7 @@ func (n *Notifier) UpdateSettings(r SettingsRequest, forbidden []string) (Settin
 		if n.failed {
 			return Settings{}, ErrSettingsWrite
 		}
-		if !ok {
+		if reason != "" {
 			return Settings{}, errors.New("Webhook 健康检查未通过：" + reason + "；接收端须在 10 秒内返回 HTTP 200 和 JSON")
 		}
 	}
@@ -167,10 +202,12 @@ func (n *Notifier) UpdateSettings(r SettingsRequest, forbidden []string) (Settin
 		n.inflightCancel()
 		n.inflightCancel = nil
 	}
+	n.client.CloseIdleConnections()
 	n.config = c
 	n.settingsRevision = revision
 	n.client = n.newClient(c)
 	n.cancelOldDeliveries()
+	n.refreshNormalQueued()
 	return n.settingsLocked(), nil
 }
 func (n *Notifier) cancelOldDeliveries() {

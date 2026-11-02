@@ -15,7 +15,7 @@ func ensureAdmin(tx *sql.Tx, ctx context.Context) error {
 		return err
 	}
 	if count == 0 {
-		return problem(409, "LAST_ADMIN", "当前只有一个 Agora 人员账号，需先开通另一名 Agora 人员后才能改为客户运维")
+		return problem(409, "LAST_ADMIN", "当前只有一个 管理者账号，需先开通另一名 管理者后才能改为使用者")
 	}
 	return nil
 }
@@ -89,7 +89,7 @@ type UserUpdate struct {
 
 func (s *Service) UpdateUser(uid string, r UserUpdate, actor, ip string) (User, error) {
 	if (r.Status != "ACTIVE" && r.Status != "DISABLED" && r.Status != "PENDING") || len(r.RoleIDs) != 1 || (r.RoleIDs[0] != AgoraRole && r.RoleIDs[0] != CustomerRole) || len(strings.TrimSpace(r.Reason)) < 2 || len(r.Reason) > 1000 {
-		return User{}, problem(400, "INVALID_USER_UPDATE", "请选择 Agora 人员或客户运维中的一个角色，并填写状态及变更依据")
+		return User{}, problem(400, "INVALID_USER_UPDATE", "请选择 管理者或使用者中的一个角色，并填写状态及变更依据")
 	}
 	context, cancel := ctx()
 	defer cancel()
@@ -186,7 +186,7 @@ type RoleUpdate struct {
 }
 
 func (s *Service) SaveRole(roleID string, r RoleUpdate, actor, ip string) (Role, error) {
-	return Role{}, problem(409, "FIXED_ROLES", "角色固定为 Agora 人员和客户运维，不支持新增或修改角色权限")
+	return Role{}, problem(409, "FIXED_ROLES", "角色固定为 管理者和使用者，不支持新增或修改角色权限")
 }
 func (s *Service) AuditList(action, actor string, limit, offset int) (any, error) {
 	if limit < 1 || limit > 100 || offset < 0 {

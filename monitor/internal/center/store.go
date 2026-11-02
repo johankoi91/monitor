@@ -18,6 +18,7 @@ import (
 
 	"github.com/johankoi91/monitor/runtime/internal/cadvisor"
 	"github.com/johankoi91/monitor/runtime/internal/credential"
+	"github.com/johankoi91/monitor/runtime/internal/history"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/notify"
 	"github.com/johankoi91/monitor/runtime/internal/storage"
@@ -52,7 +53,8 @@ type diskRecord struct {
 	Change   model.Selection `json:"change"`
 }
 type Store struct {
-	startupRequests map[string]*pendingStartup
+	lastStartups    map[string]map[string]StartupRecord
+	resourceHistory history.Backend
 	mu              sync.RWMutex
 	config          Config
 	agents          map[string]*agentState
@@ -125,9 +127,12 @@ func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, e
 		lock.Close()
 		return nil, errors.New("another center is using the data directory")
 	}
-	s := &Store{config: config, agents: map[string]*agentState{}, checks: map[string]*debounce{}, bursts: map[string]*restartBurst{}, dir: dir, lock: lock}
+	s := &Store{lastStartups: map[string]map[string]StartupRecord{}, resourceHistory: history.NewMemory(), config: config, agents: map[string]*agentState{}, checks: map[string]*debounce{}, bursts: map[string]*restartBurst{}, dir: dir, lock: lock}
 	if len(backends) > 0 {
 		s.backend = backends[0]
+		if backend, ok := s.backend.(history.Backend); ok {
+			s.resourceHistory = backend
+		}
 	}
 	s.write = s.atomicWrite
 	data, err := os.ReadFile(filepath.Join(dir, "current-baseline.json"))
@@ -170,6 +175,21 @@ func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, e
 		if e != nil {
 			s.Close()
 			return nil, e
+		}
+		for _, cfg := range config.Agents {
+			raw, found, e := s.backend.LoadDocument("startup/" + cfg.ID)
+			if e != nil {
+				s.Close()
+				return nil, e
+			}
+			if found {
+				var records map[string]StartupRecord
+				if json.Unmarshal(raw, &records) != nil {
+					s.Close()
+					return nil, errors.New("corrupt stored startup records")
+				}
+				s.lastStartups[cfg.ID] = records
+			}
 		}
 		for id, raw := range snapshots {
 			if _, ok := s.Agent(id); !ok {
@@ -353,6 +373,7 @@ func (s *Store) Disconnect(id, session string) {
 	}
 }
 func (s *Store) Receive(id, session string, r model.Report) error {
+	r.Containers = append([]model.Observation(nil), r.Containers...)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := s.agents[id]
@@ -371,6 +392,7 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 	if r.CollectedAt.Before(now.Add(-45*time.Second)) || r.CollectedAt.After(now.Add(5*time.Second)) || len(r.Containers) > 512 {
 		return errors.New("invalid snapshot freshness or size")
 	}
+	pendingStartups := map[string]StartupRecord{}
 	names, ids := map[string]bool{}, map[string]bool{}
 	for i := range r.Containers {
 		o := &r.Containers[i]
@@ -380,6 +402,9 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 		}
 		if o.Startup != nil {
 			o.StartupValid = !o.Startup.Incomplete && !o.Startup.Truncated
+			if o.StartupValid && o.Startup.CollectedAt.Equal(c.CollectedAt) {
+				pendingStartups[c.ContainerName] = StartupRecord{ContainerID: c.ContainerID, Startup: clone(o.Startup), ReportedAt: now}
+			}
 		}
 		o.Startup = nil
 		if c.CollectedAt.Before(r.CollectedAt) || c.CollectedAt.After(now.Add(5*time.Second)) {
@@ -398,6 +423,20 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 		}
 		names[c.ContainerName] = true
 		ids[c.ContainerID] = true
+	}
+	if len(pendingStartups) > 0 {
+		if s.lastStartups[id] == nil {
+			s.lastStartups[id] = map[string]StartupRecord{}
+		}
+		for name, record := range pendingStartups {
+			s.lastStartups[id][name] = record
+		}
+		if s.backend != nil {
+			data, _ := json.Marshal(s.lastStartups[id])
+			if err := s.backend.SaveDocument("startup/"+id, data); err != nil {
+				s.storageBad = true
+			}
+		}
 	}
 	a.ReceivedAt = now
 	a.Report = r
@@ -482,7 +521,7 @@ func (s *Store) Detail(id, cid string) (any, error) {
 				c.Lifecycle = lifecycleView(c.Lifecycle, a, time.Now().UTC())
 				c.NodeID = s.managed()[id+"/"+c.ContainerName]
 				c.Managed = c.NodeID != ""
-				return map[string]any{"container": c, "startup": clone(o.Startup), "started_at": o.StartedAt, "exit_code": o.ExitCode, "restart_count": o.RestartCount, "docker_health": o.DockerHealth}, nil
+				return map[string]any{"container": c, "startup": s.startupViewLocked(id, c.ContainerName, &o)["startup"], "started_at": o.StartedAt, "exit_code": o.ExitCode, "restart_count": o.RestartCount, "docker_health": o.DockerHealth}, nil
 			}
 		}
 	}
@@ -570,7 +609,7 @@ func (s *Store) Save(selection model.Selection, source string) (model.Baseline, 
 	}
 	for _, add := range selection.Additions {
 		if !identifier.MatchString(add.ClusterCode) || len(add.ClusterName) > 128 {
-			return fail(400, "INVALID_MAPPING", "请填写合法的集群与服务归属")
+			return fail(400, "INVALID_MAPPING", "请填写合法的分组与服务归属")
 		}
 		agent := s.agents[add.AgentID]
 		if !fresh(agent, time.Now()) {
@@ -649,7 +688,7 @@ func (s *Store) Save(selection model.Selection, source string) (model.Baseline, 
 			d.Clusters = append(d.Clusters, model.Cluster{Code: add.ClusterCode, Name: name, Product: "RTC", Services: []model.Service{}})
 			ci = len(d.Clusters) - 1
 		} else if add.ClusterName != "" && d.Clusters[ci].Name != add.ClusterName {
-			return fail(400, "MAPPING_CONFLICT", "相同集群编码不能使用不同名称")
+			return fail(400, "MAPPING_CONFLICT", "分组名称与现有分组不一致，请重新选择")
 		}
 		si := -1
 		for i, v := range d.Clusters[ci].Services {

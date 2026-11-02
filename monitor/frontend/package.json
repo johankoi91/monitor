@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "antd": "^5.29.3",
+    "echarts": "^6.1.0",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },

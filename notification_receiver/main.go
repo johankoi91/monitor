@@ -30,6 +30,7 @@ var errCapacity = errors.New("receiver storage capacity reached")
 var errUnavailable = errors.New("receiver storage unavailable")
 
 type event struct {
+	Category       string     `json:"event_category,omitempty"`
 	ID             string     `json:"event_id"`
 	Type           string     `json:"event_type"`
 	OccurredAt     time.Time  `json:"occurred_at"`
@@ -145,7 +146,10 @@ func (e event) validate() error {
 			return errors.New("required identifier missing or too long")
 		}
 	}
-	if (e.Type != "STATUS_CHANGED" && e.Type != "WEBHOOK_TEST") || e.Product != "RTC" || e.OccurredAt.IsZero() || e.Stale == nil {
+	if e.Category != "" && e.Category != "CONTAINER_ABNORMAL" && e.Category != "COLLECTION_ABNORMAL" && e.Category != "RECOVERED" && e.Category != "NORMAL" {
+		return errors.New("invalid event category")
+	}
+	if (e.Type != "STATUS_CHANGED" && e.Type != "STATUS_SNAPSHOT" && e.Type != "WEBHOOK_TEST") || e.Product != "RTC" || e.OccurredAt.IsZero() || e.Stale == nil {
 		return errors.New("invalid event type, product, timestamp or stale flag")
 	}
 	if len(e.Node) > 512 || len(e.Reason) > 4096 {

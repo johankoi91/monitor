@@ -35,7 +35,11 @@ export function client(authorization: string, onUnauthorized: () => void) {
       try {
         data = await response.json();
       } catch {}
-      if (response.status === 401 && auth === authorization) onUnauthorized();
+      if (response.status === 401 && auth === authorization) {
+        onUnauthorized();
+        if (data.code === "SESSION_REPLACED")
+          window.dispatchEvent(new CustomEvent("session-replaced"));
+      }
       throw new APIError(
         data.message || `请求失败（${response.status}）`,
         response.status,
@@ -64,7 +68,6 @@ export function client(authorization: string, onUnauthorized: () => void) {
     postRestart: async <T>(
       path: string,
       body: unknown,
-      keyID: string,
       secret: string,
     ): Promise<T> => {
       const account = authorization.startsWith("Bearer ");
@@ -78,14 +81,13 @@ export function client(authorization: string, onUnauthorized: () => void) {
               "X-AVOPS-Request": "1",
               ...(account
                 ? {
-                    "X-AVOPS-Restart-Key-ID": keyID,
-                    "X-AVOPS-Restart-Key-Secret": secret,
+                    "X-AVOPS-Restart-Token": secret,
                   }
                 : {}),
             },
             body: JSON.stringify(body),
           },
-          account ? authorization : basic(keyID, secret),
+          account ? authorization : "Bearer " + secret,
         )
       ).json();
     },

@@ -6,7 +6,7 @@ info:
     面向客户监控平台与可运行 Demo 的 RTC 首期目标接口契约，RTM 后续接入。
     业务节点异常时状态查询仍返回 HTTP 200，由响应体中的状态字段表达异常。
     PRD V0.15 包含 PostgreSQL、账号会话/RBAC、Agent/机器凭证、轮询/通知、Docker/React/YAML 基线及可靠受控重启。
-    鉴权格式为 Authorization: Basic Base64(接入ID:密钥)，使用本系统自有配置凭证。
+    账号采用 Bearer 会话；重启机器接口采用有到期时间的 Bearer Token，Agent WSS 继续使用独立 Basic 凭证。
     本机 Mock 尚无容器发现、启动配置、基线保存接口，也不提供正式鉴权和可靠持久化。
     monitor 为真实 V1.0 实现，Mock 保持独立；验收结论以实际记录为准。
 servers:
@@ -16,9 +16,10 @@ servers:
 security:
   - BasicAuth: []
   - AccountSession: []
+  - RestartToken: []
 
 x-outbound-notification:
-  description: 中心按声网 Webhook 接收协议向唯一 HTTPS 接收地址发送运维状态 JSON；签名协议一致，事件内容为本系统定义。
+  description: 中心按声网 Webhook 接收协议向按事件分类选择的 HTTPS 接收地址发送运维状态 JSON；签名协议一致，事件内容为本系统定义。
   method: POST
   target: notifications.url
   contentType: application/json
@@ -39,10 +40,34 @@ tags:
     description: 容器发现、脱敏启动配置与持久基线
 
 paths:
+  /api/v1/nodes/resource-history:
+    get:
+      summary: 查询已纳管容器的资源趋势（monitor 实现）
+      description: 需要 monitor.read。PostgreSQL 保存7天历史，每30秒桶保留最新实际采样；长时间范围按显示间隔选取实际样本，不做平均。容器重建、重启及缺失采样应断线；共享网络不归属单容器。此接口不属于独立 Mock。
+      parameters:
+        - in: query
+          name: node_id
+          required: true
+          schema: {type: string}
+        - in: query
+          name: range
+          schema: {type: string, enum: [15m, 1h, 6h, 24h], default: 1h}
+      responses:
+        "200":
+          description: node_id、from、to、range、step_seconds、retention_days、samples；samples 含 at、container_id、started_at、cpu/cpu_user/cpu_system（核）、memory/rss/memory_usage（字节）、disk_status、disks（分设备速率及IOPS）、network_scope、rx/tx（字节每秒）。缺失值为 null，不能替换为0。
+          content:
+            application/json:
+              schema: {type: object}
+        "400":
+          description: 时间范围不受支持
+        "404":
+          description: 节点不在当前基准
+        "503":
+          description: 历史存储暂不可用
   /api/v1/nodes/startup:
     get:
-      summary: 通过 WSS 实时读取已纳管节点启动参数
-      description: 需要 monitor.read，仅限当前基准成员；中心向对应Agent发送startup_request，按精确容器ID现场inspect，响应直接返回不落库。中心等待8秒、Agent读取5秒；离线/超时不回退旧缓存。
+      summary: 查询 Agent 最后一次主动上报的启动参数
+      description: 需要 monitor.read，仅限当前基准成员。Agent随完整采集快照主动上报原值参数，中心按Agent与容器名保存最后有效记录，在PostgreSQL中加密持久化。查询不下发WSS获取指令；离线、停止、容器缺失或同名重建尚未上报有效参数时返回历史记录并标记stale，container_id始终标识该记录原容器，不能用于批准重启。
       parameters:
         - in: query
           name: node_id
@@ -50,16 +75,12 @@ paths:
           schema: {type: string}
       responses:
         "200":
-          description: startup（实际原值参数）、stale=false；仅当前请求使用
+          description: startup（最后有效原值参数，尚未上报时为null）、reported_at（中心接收时间）、container_id（记录对应容器ID）、source=agent_report、stale（现场状态不可确认或记录过期）。startup.collected_at为Agent采集时间。
           content:
             application/json:
               schema: {type: object}
         "404":
-          description: 节点未纳管或容器当前不可见
-        "503":
-          description: Agent离线或实际读取失败
-        "504":
-          description: Agent未在期限内返回
+          description: 节点未纳管
   /api/v1/storage/status:
     get:
       summary: 数据库容量、数据盘余量和会话维护状态
@@ -183,7 +204,7 @@ paths:
         '403': {description: 权限不足}
   /api/v1/users/{user_id}:
     post:
-      summary: 开通/停用或分配角色，校验版本及最后 Agora 账号
+      summary: 开通/停用或分配角色，校验版本及最后 管理者账号
       parameters: [{in: path, name: user_id, required: true, schema: {type: string}}]
       requestBody:
         required: true
@@ -222,8 +243,8 @@ paths:
   /api/v1/access-keys:
     get:
       tags: [System]
-      summary: Agora 账号查看已签发重启安全 Key
-      description: 重启安全 Key 不可用于页面登录；响应不含 Secret 或哈希。
+      summary: 管理者账号查看已签发重启安全 Key
+      description: 重启安全 Key 不可用于页面登录；响应不含 Token 明文或哈希。
       responses:
         '200':
           description: 已签发密钥列表
@@ -236,11 +257,11 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/AccessKey'}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {description: 需要 Agora 账号}
+        '403': {description: 需要 管理者账号}
     post:
       tags: [System]
-      summary: Agora 账号签发机器密钥
-      description: 已登录Agora账号签发Key，后端自动绑定当前账号，不接受指定其他owner。不需要签发依据或节点范围，Secret只返回一次。
+      summary: 管理者账号签发机器密钥
+      description: 已登录管理者账号签发Key，后端自动绑定当前账号，不接受指定其他owner。不需要签发依据或节点范围，Token只返回一次，有效期1～720小时，默认24小时。
       requestBody:
         required: true
         content:
@@ -252,24 +273,25 @@ paths:
               properties:
                 name: {type: string, maxLength: 128}
                 purpose: {type: string, enum: [RESTART]}
+                expires_hours: {type: integer, minimum: 1, maximum: 720, default: 24}
       responses:
         '201':
-          description: 已持久化签发；仅此响应含 Secret，需安全交付
+          description: 已持久化签发；仅此响应含 Token，需安全交付
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   key: {$ref: '#/components/schemas/AccessKey'}
-                  secret: {type: string, description: 仅签发响应返回一次}
+                  token: {type: string, description: 仅签发响应返回一次，使用 Authorization Bearer}
         '400': {description: 名称/用途/所属账号/无效或持久化失败}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {description: 需要 Agora 账号}
+        '403': {description: 需要 管理者账号}
         '404': {description: 授权节点不在基线中}
   /api/v1/access-keys/{key_id}/revoke:
     post:
       tags: [System]
-      summary: Agora 账号停用密钥
+      summary: 管理者账号停用密钥
       description: 持久化后后续认证拒绝；不取消已受理操作。轮换采用新签发再停用旧 Key。
       parameters:
         - in: path
@@ -280,7 +302,7 @@ paths:
         '200': {description: 已停用}
         '400': {description: 密钥不存在或持久化失败}
         '401': {$ref: '#/components/responses/Unauthorized'}
-        '403': {description: 需要 Agora 账号}
+        '403': {description: 需要 管理者账号}
   /api/v1/agents:
     get:
       tags: [Inventory]
@@ -316,9 +338,13 @@ paths:
     get:
       tags: [Inventory]
       summary: 分页查询所有已接入 Agent 的发现容器
-      description: 包含未纳管和已停止容器；不改变基线。页面默认用 runtime_status=running 查询。
+      description: 默认包含全部发现容器；不改变基线。容器发现页面使用 selectable_only=true，只显示未纳管、Agent在线且数据有效的可选容器；先筛选再计算分页。
       operationId: listContainers
       parameters:
+        - name: selectable_only
+          in: query
+          description: 仅未纳管、Agent在线且未过期的容器；可叠加运行态筛选，已停止不等于不存在
+          schema: {type: boolean, default: false}
         - name: agent_id
           in: query
           schema: {type: string}
@@ -772,7 +798,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
     post:
       tags: [System]
-      summary: 保存 HTTPS Webhook 地址和签名密钥
+      summary: 保存通知接收配置列表
       operationId: updateNotificationConfig
       description: 启用或更换地址/密钥必须先通过签名健康检查；更换目标不得沿用原密钥，检查失败保留旧配置。旧配置的待发事件停止重试，停用不影响查询。
       requestBody:
@@ -782,9 +808,11 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [expected_revision, enabled, url, tls_server_name, auth_mode]
+              required: [expected_revision, endpoints]
               properties:
                 expected_revision: {type: string}
+                endpoints: {type: array, maxItems: 20, items: {$ref: "#/components/schemas/NotificationEndpointInput"}, description: 完整配置列表，空数组表示删除所有配置；同一事件允许多个目标}
+                routes: {type: array, minItems: 3, maxItems: 3, items: {$ref: "#/components/schemas/NotificationRoute"}, description: 按容器异常、采集异常、恢复正常排序}
                 enabled: {type: boolean}
                 url: {type: string, description: '完整 https:// 地址，可在停用时为空'}
                 tls_server_name: {type: string}
@@ -861,20 +889,19 @@ paths:
   /api/v1/operations/restart:
     post:
       tags: [Operations]
+      security:
+        - RestartToken: []
+        - AccountSession: []
       summary: 异步重启一个已纳管容器
       description: |
         仅允许重启 services.yaml 中 restart_enabled=true 的节点。
-        必须使用已注册、启用且覆盖目标节点的独立 RESTART Key；普通机器凭证不得直接重启。
+        必须使用已注册、启用、未过期且绑定有权限账号的独立 RESTART Token；旧 ID/Secret 认证不再支持。
         中心/Agent 精确规则、现场状态、身份、互斥和冷却仍独立核验。
-        账号请求需 restart.execute 权限及独立重启 Key；发起人由实际账号/Key确定，不填写说明人。
+        账号请求需 restart.execute 权限及属于本人的独立重启 Token；发起人由实际账号/Key确定，不填写说明人。
       parameters:
         - in: header
-          name: X-AVOPS-Restart-Key-ID
-          description: 账号 Bearer 请求额外提供的重启 Key ID；机器调用仍可用 Basic
-          schema: {type: string}
-        - in: header
-          name: X-AVOPS-Restart-Key-Secret
-          description: 独立安全 Key，必须通过 HTTPS，不记录或转发
+          name: X-AVOPS-Restart-Token
+          description: 页面账号会话额外提供本人重启 Token；机器直接使用 Authorization Bearer Token
           schema: {type: string}
       operationId: createRestartOperation
       requestBody:
@@ -956,7 +983,11 @@ components:
     AccountSession:
       type: http
       scheme: bearer
-      description: 账号登录返回的随机可撤销 token，数据库只保存哈希；API 后端按角色检查权限
+      description: 账号登录返回的随机可撤销 token，新登录使同账号旧会话失效并返回 SESSION_REPLACED；API 后端按角色检查权限
+    RestartToken:
+      type: http
+      scheme: bearer
+      description: 独立重启Token，默认24小时到期，可撤销，数据库只保存哈希；所属账号停用或权限不足时拒绝
     BasicAuth:
       type: http
       scheme: basic
@@ -1004,12 +1035,47 @@ components:
         purpose: {type: string, enum: [RESTART]}
         enabled: {type: boolean}
         created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, description: 旧凭证可能无到期字段，必须重新签发Token}
+        owner_id: {type: string}
         created_by: {type: string}
         request_id: {type: string}
+    NotificationRoute:
+      type: object
+      additionalProperties: false
+      required: [category, enabled, url, tls_server_name]
+      properties:
+        category: {type: string, enum: [CONTAINER_ABNORMAL, COLLECTION_ABNORMAL, RECOVERED]}
+        enabled: {type: boolean}
+        url: {type: string, description: 专属HTTPS地址，空时使用默认接收地址}
+        tls_server_name: {type: string}
+    NotificationEndpoint:
+      type: object
+      required: [id, enabled, url, tls_server_name, events, auth_configured]
+      properties:
+        id: {type: string}
+        enabled: {type: boolean}
+        url: {type: string, description: 完整HTTPS接收地址}
+        tls_server_name: {type: string}
+        events: {type: array, minItems: 1, uniqueItems: true, items: {type: string, enum: [NORMAL, CONTAINER_ABNORMAL, COLLECTION_ABNORMAL, RECOVERED]}, description: NORMAL首次启用同步正常状态并接收后续恢复；与RECOVERED同时订阅时不重复投递}
+        auth_configured: {type: boolean, readOnly: true}
+    NotificationEndpointInput:
+      type: object
+      additionalProperties: false
+      required: [enabled, url, events, auth_mode]
+      properties:
+        id: {type: string, description: 新配置留空，已有配置保持原ID}
+        enabled: {type: boolean}
+        url: {type: string}
+        tls_server_name: {type: string}
+        events: {type: array, minItems: 1, uniqueItems: true, items: {type: string, enum: [NORMAL, CONTAINER_ABNORMAL, COLLECTION_ABNORMAL, RECOVERED]}, description: NORMAL首次启用同步正常状态并接收后续恢复；与RECOVERED同时订阅时不重复投递}
+        auth_mode: {type: string, enum: [retain, set], description: 新增或更换地址必须set；只调整事件时retain}
+        secret: {type: string, writeOnly: true, maxLength: 4096}
     NotificationSettings:
       type: object
-      required: [revision, enabled, url, tls_server_name, auth_configured, storage_available]
+      required: [revision, endpoints, storage_available]
       properties:
+        endpoints: {type: array, maxItems: 20, items: {$ref: "#/components/schemas/NotificationEndpoint"}}
+        routes: {type: array, deprecated: true, minItems: 3, maxItems: 3, items: {$ref: "#/components/schemas/NotificationRoute"}}
         auth_scheme: {type: string, enum: [webhook_hmac]}
         response_seconds: {type: integer, enum: [10]}
         max_retries: {type: integer, enum: [3]}
@@ -1271,8 +1337,8 @@ components:
         agent_id: {type: string, minLength: 1}
         container_id: {type: string, minLength: 1}
         snapshot_id: {type: string, minLength: 1}
-        cluster_code: {type: string, minLength: 1}
-        cluster_name: {type: string, minLength: 1}
+        cluster_code: {type: string, minLength: 1, description: 稳定分组标识，页面自动生成或复用}
+        cluster_name: {type: string, minLength: 1, description: 页面分组名，支持中文}
         service_code: {type: string, minLength: 1}
         service_name: {type: string, minLength: 1}
         checks:
@@ -1378,7 +1444,11 @@ components:
           description: 同一状态变化及其重试的唯一 ID，供接收方去重。
         event_type:
           type: string
-          enum: [STATUS_CHANGED, WEBHOOK_TEST]
+          enum: [STATUS_CHANGED, STATUS_SNAPSHOT, WEBHOOK_TEST]
+        event_category:
+          type: string
+          enum: [NORMAL, CONTAINER_ABNORMAL, COLLECTION_ABNORMAL, RECOVERED]
+          description: NORMAL为首次启用时的正常状态快照，使用STATUS_SNAPSHOT；恢复使用RECOVERED和STATUS_CHANGED。Agent离线及数据过期归采集异常；健康检查可不提供
         occurred_at:
           type: string
           format: date-time
@@ -1512,6 +1582,9 @@ components:
         - unknown_node_count
         - nodes
       properties:
+        group_name:
+          type: string
+          description: 分组显示名称，稳定标识仍使用cluster_code
         service_code:
           type: string
         service_name:

@@ -32,6 +32,8 @@ func accountFixture(next http.Handler) http.Handler {
 			return
 		}
 		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			write(200, map[string]any{"user": user})
 		case "/version":
 			write(200, map[string]any{"credential_purpose": "ACCOUNT", "can_manage_keys": true, "user": user, "permissions": user.Permissions})
 		case "/api/v1/auth/logout":
@@ -39,7 +41,7 @@ func accountFixture(next http.Handler) http.Handler {
 		case "/api/v1/access-keys/owners", "/api/v1/users":
 			write(200, map[string]any{"users": []identity.User{user}, "total": 1})
 		case "/api/v1/roles":
-			write(200, map[string]any{"roles": []identity.Role{{ID: identity.AgoraRole, Name: "Agora 人员", Builtin: true}, {ID: identity.CustomerRole, Name: "客户运维", Builtin: true}}})
+			write(200, map[string]any{"roles": []identity.Role{{ID: identity.AgoraRole, Name: "管理者", Builtin: true}, {ID: identity.CustomerRole, Name: "使用者", Builtin: true}}})
 		case "/api/v1/audit/system":
 			write(200, map[string]any{"records": []any{}, "total": 0})
 		default:

@@ -16,12 +16,16 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
 
 //go:embed schema.sql
 var schema string
+
+//go:embed resource_history.sql
+var resourceHistorySchema string
 
 type DB struct {
 	Pool        *sql.DB
@@ -63,7 +67,7 @@ func Open(dsn string, key []byte, migrate bool) (*DB, error) {
 			pool.Close()
 			return nil, e
 		}
-		if _, e = tx.ExecContext(ctx, schema); e == nil {
+		if _, e = tx.ExecContext(ctx, schema+"\n"+resourceHistorySchema); e == nil {
 			e = tx.Commit()
 		} else {
 			tx.Rollback()
@@ -181,7 +185,7 @@ func (d *DB) saveDocument(ctx context.Context, tx *sql.Tx, name string, data []b
 	}
 	var body any = string(data)
 	var encrypted any
-	if name == "notification_settings" {
+	if name == "notification_settings" || strings.HasPrefix(name, "startup/") {
 		b, err := d.seal(name, data)
 		if err != nil {
 			return err

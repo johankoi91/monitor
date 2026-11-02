@@ -65,7 +65,7 @@ export function Register({ onClose }: { onClose: () => void }) {
       setPassword("");
       setConfirm("");
       setDone(true);
-      setNotice("注册申请已提交，待 Agora 人员开通并分配角色后即可登录。");
+      setNotice("注册申请已提交，待 管理者开通并分配角色后即可登录。");
     } catch (e) {
       setNotice(errorText(e));
     } finally {
@@ -75,7 +75,7 @@ export function Register({ onClose }: { onClose: () => void }) {
   return (
     <Card title="注册账号" className="page-card login-panel">
       <Typography.Paragraph>
-        注册不会自动获得权限，默认申请客户运维，由 Agora 人员核实开通。
+        注册不会自动获得权限，默认申请使用者，由 管理者核实开通。
       </Typography.Paragraph>
       {!done && (
         <Form layout="vertical" onSubmitCapture={submit}>
@@ -280,9 +280,8 @@ export default function Accounts({
     <section>
       <Typography.Title level={2}>账号与角色权限</Typography.Title>
       <p>
-        固定两类角色：Agora
-        人员管理台账、操作、审计、密钥和账号授权；客户运维查看服务状态与资源并配置通知。重启仍须独立
-        Key 和节点白名单。
+        固定两类角色：管理者管理台账、操作、审计、密钥和账号授权；使用者查看服务状态与资源、配置通知并执行受控重启。重启仍须独立
+        Token 和节点白名单。
       </p>
       {notice && (
         <Alert showIcon type="info" message={notice} className="page-alert" />
@@ -391,9 +390,9 @@ export default function Accounts({
             <Card className="page-card" title={`管理 ${selected.username}`}>
               <Form layout="vertical" onSubmitCapture={saveUser}>
                 <p>
-                  账号只能选择一个角色。当前系统必须保留至少一名 Agora
-                  人员；如果 admin 是最后一名 Agora 人员，请先开通另一名 Agora
-                  人员，再将 admin 改为客户运维。
+                  账号只能选择一个角色。当前系统必须保留至少一名 管理者；如果
+                  admin 是最后一名 管理者，请先开通另一名 管理者，再将 admin
+                  改为使用者。
                 </p>
                 <Form.Item label="状态" htmlFor="accounts-field-8">
                   <Select

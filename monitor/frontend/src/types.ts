@@ -144,11 +144,20 @@ export interface Addition {
   container_id: string;
   snapshot_id: string;
   cluster_code: string;
+  cluster_name?: string;
   checks: Check[];
   container_name: string;
   host_address: string;
 }
+export interface NotificationRoute {
+  category: string;
+  enabled: boolean;
+  url: string;
+  tls_server_name: string;
+}
 export interface NotificationSettings {
+  endpoints: NotificationEndpoint[];
+  routes?: NotificationRoute[];
   auth_scheme?: string;
   response_seconds?: number;
   max_retries?: number;
@@ -179,8 +188,17 @@ export interface NodeStatus {
   resources?: ResourceMetrics | null;
   lifecycle?: ContainerLifecycle | null;
 }
+export interface NotificationEndpoint {
+  id: string;
+  enabled: boolean;
+  url: string;
+  tls_server_name: string;
+  events: string[];
+  auth_configured: boolean;
+}
 export interface ServiceStatus {
   cluster_code: string;
+  group_name?: string;
   service_code: string;
   service_name: string;
   status: string;
@@ -213,6 +231,7 @@ export interface Delivery {
   event: {
     event_id: string;
     event_type?: string;
+    event_category?: string;
     occurred_at: string;
     node_id?: string;
     service_code: string;

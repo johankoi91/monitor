@@ -125,6 +125,7 @@ type ResolveRequest struct {
 type Notification struct {
 	ID             string     `json:"event_id"`
 	Type           string     `json:"event_type"`
+	Category       string     `json:"event_category,omitempty"`
 	OccurredAt     time.Time  `json:"occurred_at"`
 	Product        string     `json:"product"`
 	Cluster        string     `json:"cluster"`

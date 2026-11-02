@@ -13,8 +13,8 @@ func fixedRoles(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	roles := []Role{
-		{ID: AgoraRole, Name: "Agora 人员", Description: "全部模块；负责台账、受控重启、审计、密钥和账号授权"},
-		{ID: CustomerRole, Name: "客户运维", Description: "查看状态与资源、配置通知、使用独立 Key 受控重启并查看自己的结果"},
+		{ID: AgoraRole, Name: "管理者", Description: "全部模块；负责台账、受控重启、审计、密钥和账号授权"},
+		{ID: CustomerRole, Name: "使用者", Description: "查看状态与资源、配置通知、使用独立 Key 受控重启并查看自己的结果"},
 	}
 	for _, r := range roles {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO avops.roles(role_id,name,description,builtin) VALUES($1,$2,$3,true) ON CONFLICT(role_id) DO UPDATE SET name=excluded.name,description=excluded.description,builtin=true", r.ID, r.Name, r.Description); err != nil {

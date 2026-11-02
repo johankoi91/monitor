@@ -9,12 +9,12 @@
 | 方法 | 路径 | 行为 |
 |---|---|---|
 | GET | / | 接收记录页面，分页、自动刷新、完整 JSON/原始文本、复制 |
-| POST | /api/v1/notifications | 先验签，再校验 STATUS_CHANGED / WEBHOOK_TEST JSON，可靠写入后返回 200 JSON |
+| POST | /api/v1/notifications | 先验签，再校验 STATUS_CHANGED / STATUS_SNAPSHOT / WEBHOOK_TEST JSON，可靠写入后返回 200 JSON |
 | GET | /api/v1/notifications/recent?limit=50&offset=0 | 倒序分页，limit 为 1–200，offset 非负；返回总数、完整事件及可用的 raw_body |
 | GET | /health/live | 进程响应及记录数量 |
 | GET | /health/ready | 存储状态，存储写失败后返回 503 |
 
-载荷与中心 OpenAPI 的 NotificationPayload 对齐：event_id、event_type、occurred_at、product=RTC、cluster、service_code、可选 node_id、previous_status、current_status、reason_code、reason、collected_at（可空）、stale。
+载荷与中心 OpenAPI 的 NotificationPayload 对齐：event_id、event_type、event_category、occurred_at、product=RTC、cluster、service_code、可选 node_id、previous_status、current_status、reason_code、reason、collected_at（可空）、stale。event_category 区分 NORMAL（首次正常状态同步）、CONTAINER_ABNORMAL（容器异常）、COLLECTION_ABNORMAL（Agent 离线/数据过期）、RECOVERED（恢复正常）；为兼容旧消息及健康检查允许省略。首次正常同步使用 STATUS_SNAPSHOT，状态变化使用 STATUS_CHANGED，通道测试使用 WEBHOOK_TEST。
 
 - 首次受理：`{"code":"OK","duplicate":false,"persisted":true,"event_id":"..."}`。
 - 相同事件重试：仍为 200，duplicate=true，不重复存储。

@@ -1,8 +1,8 @@
 """Install the extracted bundle into a fresh, isolated Docker fixture.
 No production config/database is imported. Private TLS inputs stay outside bundle.
 """
-import argparse, base64, http.client, json, os, pathlib, secrets, shutil
-import socket, ssl, subprocess, time, urllib.parse
+import argparse, http.client, json, os, pathlib, secrets, shutil
+import socket, ssl, subprocess, time, urllib.parse, base64, hashlib, hmac
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--bundle", required=True)
@@ -57,7 +57,7 @@ def sql(q):
     return docker("exec",prefix+"-pg","psql","-U","avops_owner","-d","avops_monitor","-Atc",q).decode().strip()
 
 try:
-    for port in [25433,29444,28085]:
+    for port in [25433,29444,28085,28089,28443]:
         s=socket.socket();s.bind(("127.0.0.1",port));s.close()
     version=(bundle/"VERSION").read_text().strip()
     run("sha256sum","--check","--quiet",str(bundle/"SHA256SUMS")) if pathlib.Path.cwd()==bundle else subprocess.check_call(["sha256sum","--check","--quiet","SHA256SUMS"],cwd=bundle)
@@ -99,6 +99,32 @@ try:
     token="Bearer "+login["token"]
     assert login["user"]["username"]=="admin"
     mark("fresh account bootstrap and verified HTTPS login passed")
+    docker_root=json.loads(docker('info','--format','{{json .DockerRootDir}}'))
+    launch(prefix+'-cadvisor','--privileged','--device','/dev/kmsg','--network','bridge','-p','127.0.0.1:28089:8080','-v','/:/rootfs:ro','-v','/var/run:/var/run:ro','-v','/sys:/sys:ro','-v',docker_root+':'+docker_root+':ro','--memory','256m','--cpus','0.5','avops-cadvisor:'+version,'--docker_only=true','--housekeeping_interval=5s','--allow_dynamic_housekeeping=false','--store_container_labels=false','--enable_metrics=cpu,memory,network,disk,diskIO,oom_event')
+    def cadvisor_ready():
+        c=http.client.HTTPConnection('127.0.0.1',28089,timeout=5);c.request('GET','/api/v2.0/stats/?type=docker&count=2&recursive=true');r=c.getresponse();body=r.read();c.close()
+        return r.status==200 and bool(json.loads(body))
+    wait(cadvisor_ready)
+    with (config/'agent.env').open('a') as f:f.write('AVOPS_CADVISOR_URL=http://127.0.0.1:28089\n')
+    mark('offline cAdvisor image serves real Docker resource samples on loopback')
+    receiver_secret,webhook_secret=secrets.token_hex(32),secrets.token_hex(32)
+    write_env(config/'receiver.env',{'AVOPS_RECEIVER_ID':'offline-receiver','AVOPS_RECEIVER_SECRET':receiver_secret,'AVOPS_WEBHOOK_SECRET':webhook_secret,'AVOPS_RECEIVER_ADDR':'127.0.0.1:28443','AVOPS_RECEIVER_ALLOWED_IPS':'127.0.0.1'})
+    receiver_name=prefix+'-receiver';containers.append(receiver_name)
+    run('bash',installer,'receiver',str(config),str(work/'receiver-data'),receiver_name)
+    def receiver_request(method,path,body=None,headers=None):
+        c=Center(args.tls_name,28443,timeout=12)
+        # Center.connect pins the center port; use the receiver port here.
+        c.sock=ssl.create_default_context().wrap_socket(socket.create_connection(('127.0.0.1',28443),timeout=10),server_hostname=args.tls_name)
+        c.request(method,path,body,headers or {});r=c.getresponse();body=r.read();code=r.status;c.close()
+        return code,json.loads(body) if body else {}
+    diagnostic={'Authorization':'Basic '+base64.b64encode(('offline-receiver:'+receiver_secret).encode()).decode()}
+    wait(lambda:receiver_request('GET','/health/ready',headers=diagnostic)[0]==200)
+    payload=json.dumps({'event_id':prefix+'-notification','event_type':'STATUS_SNAPSHOT','event_category':'NORMAL','occurred_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'product':'RTC','cluster':'offline','service_code':'offline-canary','node_id':'127.0.0.1-'+canary,'previous_status':'UNKNOWN','current_status':'HEALTHY','reason_code':'OK','reason':'isolated offline verification','collected_at':None,'stale':False}).encode()
+    signatures={'Content-Type':'application/json','Agora-Signature':hmac.new(webhook_secret.encode(),payload,hashlib.sha1).hexdigest(),'Agora-Signature-V2':hmac.new(webhook_secret.encode(),payload,hashlib.sha256).hexdigest()}
+    code,accepted_event=receiver_request('POST','/api/v1/notifications',payload,signatures)
+    assert code==200 and accepted_event.get('persisted'),(code,accepted_event)
+    assert receiver_request('POST','/api/v1/notifications',payload,signatures)[1].get('duplicate')
+    mark('offline receiver Docker image, verified HTTPS, HMAC and duplicate handling passed')
     run("bash",installer,"agent",str(config),str(work/"agent-data"),agent_name)
     def candidate():
         code,d=api("GET","/api/v1/containers",auth=token)
@@ -114,23 +140,40 @@ try:
     mark("new baseline defaults to restart denied; only isolated canary explicitly enabled")
     wait(lambda:any(n.get("restart_allowed") for s in api("GET","/api/v1/services/status",auth=token)[1].get("services",[]) for n in s["nodes"]))
     startup=api("GET","/api/v1/nodes/startup?node_id="+urllib.parse.quote("offline-agent/"+canary,safe=""),auth=token)
-    assert startup[0]==200 and startup[1]["startup"]
+    assert startup[0]==200 and startup[1]["startup"] and startup[1]['source']=='agent_report' and startup[1]['reported_at']
     assert sql("SELECT count(*) FROM avops.containers WHERE payload ? 'startup'")=="0"
-    mark("Agent WSS discovery, YAML baseline and on-demand non-persisted startup passed")
+    assert sql("SELECT count(*) FROM avops.documents WHERE name='startup/offline-agent' AND payload IS NULL AND encrypted_payload IS NOT NULL")=="1"
+    mark("Agent WSS discovery, YAML baseline and encrypted reported startup passed")
+    def history_ready():
+        code,d=api('GET','/api/v1/nodes/resource-history?node_id='+urllib.parse.quote(node_id,safe='')+'&range=15m',auth=token)
+        return code==200 and len([s for s in d.get('samples',[]) if s.get('cpu') is not None])>=2
+    wait(history_ready,90)
+    docker('stop',agent_name)
+    cached=api('GET','/api/v1/nodes/startup?node_id='+urllib.parse.quote(node_id,safe=''),auth=token)
+    assert cached[0]==200 and cached[1]['startup'] and cached[1]['stale'] and cached[1]['reported_at']
+    docker('start',agent_name)
+    wait(lambda:any(n.get('restart_allowed') for s in api('GET','/api/v1/services/status',auth=token)[1].get('services',[]) for n in s['nodes']))
+    mark('real cAdvisor history and startup cache while Agent offline passed')
     status,key=api("POST","/api/v1/access-keys",{"name":"Offline QA Key","purpose":"RESTART"},token)
     assert status==201 and key["key"]["owner_id"]==login["user"]["user_id"]
-    basic="Basic "+base64.b64encode((key["key"]["key_id"]+":"+key["secret"]).encode()).decode()
+    assert key["token"].startswith("rt_") and key["key"]["expires_at"] and "secret" not in key
+    restart_auth="Bearer "+key["token"]
     body={"node_id":"127.0.0.1-"+canary,"reason":"isolated clean install restart","request_key":prefix+"-once"}
-    status,accepted=api("POST","/api/v1/operations/restart",body,basic);assert status==202
+    status,accepted=api("POST","/api/v1/operations/restart",body,restart_auth);assert status==202
     operation=accepted["operation"]["operation_id"]
-    assert api("POST","/api/v1/operations/restart",body,basic)[1]["operation"]["operation_id"]==operation
-    wait(lambda:api("GET","/api/v1/operations/"+operation,auth=basic)[1].get("operation",{}).get("status")=="SUCCESS",90)
+    assert api("POST","/api/v1/operations/restart",body,restart_auth)[1]["operation"]["operation_id"]==operation
+    wait(lambda:api("GET","/api/v1/operations/"+operation,auth=restart_auth)[1].get("operation",{}).get("status")=="SUCCESS",90)
     assert len(api("GET","/api/v1/operations/"+operation+"/audit",auth=token)[1]["records"])>=3
-    mark("self-owned Key, Basic REST restart, idempotency and stage audit passed")
+    mark("self-owned expiring Token, Bearer REST restart, idempotency and stage audit passed")
     docker("restart",center_name);time.sleep(2)
     wait(lambda:api("POST","/api/v1/auth/login",{"username":"admin","password":runtime["AVOPS_BOOTSTRAP_PASSWORD"]})[0]==200)
-    assert api("POST","/api/v1/operations/restart",body,basic)[1]["operation"]["operation_id"]==operation
+    assert api("POST","/api/v1/operations/restart",body,restart_auth)[1]["operation"]["operation_id"]==operation
     assert sql("SELECT count(*) FROM avops.nodes WHERE active")=="1"
+    status,login=api('POST','/api/v1/auth/login',{'username':'admin','password':runtime['AVOPS_BOOTSTRAP_PASSWORD']})
+    token='Bearer '+login['token']
+    assert api('GET','/api/v1/nodes/startup?node_id='+urllib.parse.quote(node_id,safe=''),auth=token)[1]['startup']
+    assert len(api('GET','/api/v1/nodes/resource-history?node_id='+urllib.parse.quote(node_id,safe='')+'&range=15m',auth=token)[1]['samples'])>=2
+    mark('startup and resource history survive center restart')
     actual_version=sql("SHOW server_version")
     assert actual_version.split()[0]=="17.11", "PostgreSQL minor version mismatch"
     proof["postgresql_version"]=actual_version

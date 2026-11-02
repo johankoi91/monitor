@@ -70,9 +70,6 @@ func main() {
 			log.Fatal(e)
 		}
 		defer db.Close()
-		if e = db.PurgeStartupSnapshots(); e != nil {
-			log.Fatal("cannot remove cached startup parameters")
-		}
 		if e = db.CompactOperations(); e != nil {
 			log.Fatal("cannot compact operation records")
 		}
@@ -157,8 +154,11 @@ func main() {
 	defer stop()
 	runtimeCtx, stopRuntime := context.WithCancel(ctx)
 	var workers sync.WaitGroup
-	workers.Add(2)
+	workers.Add(3)
+	go func() { defer workers.Done(); store.RunResourceHistory(runtimeCtx) }()
 	if database != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); database.RunResourceCleanup(runtimeCtx) }()
 		workers.Add(1)
 		go func() { defer workers.Done(); database.RunMaintenance(runtimeCtx) }()
 	}

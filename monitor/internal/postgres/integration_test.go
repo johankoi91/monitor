@@ -9,11 +9,13 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/johankoi91/monitor/runtime/internal/access"
 	"github.com/johankoi91/monitor/runtime/internal/center"
+	"github.com/johankoi91/monitor/runtime/internal/history"
 	"github.com/johankoi91/monitor/runtime/internal/identity"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/notify"
@@ -118,6 +120,14 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if store.Baseline().Revision != baseline.Revision {
 		t.Fatal("baseline version changed during migration")
 	}
+	pushSession := store.Connect("qa")
+	if e = store.Receive("qa", pushSession, report); e != nil {
+		t.Fatal(e)
+	}
+	var startupPlaintext bool
+	if e = pool.QueryRow("SELECT payload IS NOT NULL FROM avops.documents WHERE name='startup/qa'").Scan(&startupPlaintext); e != nil || startupPlaintext {
+		t.Fatal("startup cache is not encrypted", e)
+	}
 	replay, e := store.CreateRestart(request, "old-key", "127.0.0.1")
 	if e != nil || replay.OperationID != op.OperationID {
 		t.Fatal("old idempotency lost")
@@ -206,6 +216,48 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	previousSession := token
+	token, _, _, e = accounts.Login("viewer", "strong-viewer-password", "second-location")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, err := accounts.Authenticate(previousSession); err == nil {
+		t.Fatal("old login survived replacement")
+	} else if p, ok := err.(*identity.Problem); !ok || p.Code != "SESSION_REPLACED" {
+		t.Fatalf("wrong replacement error: %v", err)
+	}
+	if _, err := accounts.Authenticate(token); err != nil {
+		t.Fatal("new session invalid", err)
+	}
+	var activeSessions int
+	var logins sync.WaitGroup
+	concurrentTokens := make([]string, 4)
+	for i := range concurrentTokens {
+		logins.Add(1)
+		go func(i int) {
+			defer logins.Done()
+			v, _, _, err := accounts.Login("viewer", "strong-viewer-password", "concurrent-login")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			concurrentTokens[i] = v
+		}(i)
+	}
+	logins.Wait()
+	survivors := 0
+	for _, v := range concurrentTokens {
+		if _, err := accounts.Authenticate(v); err == nil {
+			token = v
+			survivors++
+		}
+	}
+	if survivors != 1 {
+		t.Fatal("concurrent login left multiple/no sessions", survivors)
+	}
+	if err := pool.QueryRow("SELECT count(*) FROM avops.sessions WHERE user_id=$1 AND NOT revoked AND expires_at>now()", user.ID).Scan(&activeSessions); err != nil || activeSessions != 1 {
+		t.Fatal("single session invariant violated")
+	}
 	handler := (&center.Server{Store: store, Access: registry, Accounts: accounts, Database: db, Notifier: notifier, AdminID: "bootstrap", AdminSecret: strings.Repeat("b", 32)}).Handler()
 	post := func(path string, body any, auth string, k access.Issued) *httptest.ResponseRecorder {
 		b, _ := json.Marshal(body)
@@ -215,8 +267,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer "+auth)
 		}
 		if k.Key.ID != "" {
-			r.Header.Set("X-AVOPS-Restart-Key-ID", k.Key.ID)
-			r.Header.Set("X-AVOPS-Restart-Key-Secret", k.Secret)
+			r.Header.Set("X-AVOPS-Restart-Token", k.Token)
 		}
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
@@ -272,6 +323,39 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 			t.Fatalf("customer allowed endpoint %s: %d %s", path, w.Code, w.Body.String())
 		}
 	}
+	// Resource history is scoped to saved nodes, preserves real zero/null and
+	// container incarnations, and is readable with the existing operator role.
+	historyAt := time.Now().UTC().Add(-5 * time.Minute).Truncate(30 * time.Second)
+	zeroCPU := float64(0)
+	zeroMemory := uint64(0)
+	resourceCPUUsage := float64(0.25)
+	resourcePoints := []history.Sample{
+		{NodeID: "qa/canary", At: historyAt.Add(time.Second), ContainerID: "old", StartedAt: "first", CPU: &zeroCPU, Memory: &zeroMemory},
+		{NodeID: "qa/canary", At: historyAt.Add(31 * time.Second), ContainerID: "old", StartedAt: "first"},
+		{NodeID: "qa/canary", At: historyAt.Add(32 * time.Second), ContainerID: "new", StartedAt: "second", CPU: &resourceCPUUsage},
+		{NodeID: "qa/canary", At: time.Now().Add(-8 * 24 * time.Hour), ContainerID: "expired", CPU: &resourceCPUUsage},
+		{NodeID: "other/private", At: historyAt, ContainerID: "private", CPU: &resourceCPUUsage},
+	}
+	if err := db.SaveResources(context.Background(), resourcePoints); err != nil {
+		t.Fatal(err)
+	}
+	gotHistory, err := db.ResourceSamples(context.Background(), "qa/canary", historyAt, time.Now(), 30*time.Second)
+	if err != nil || len(gotHistory) != 3 || gotHistory[0].CPU == nil || *gotHistory[0].CPU != 0 || gotHistory[1].CPU != nil {
+		t.Fatal("history zero/null/identity incorrect", err)
+	}
+	if w := get("/api/v1/nodes/resource-history?node_id=qa/canary&range=15m", token); w.Code != 200 {
+		t.Fatal("customer history denied", w.Code)
+	}
+	if w := get("/api/v1/nodes/resource-history?node_id=other/private&range=15m", token); w.Code != 404 {
+		t.Fatal("unmanaged history exposed", w.Code)
+	}
+	if err := db.CleanupResourceHistory(); err != nil {
+		t.Fatal(err)
+	}
+	var expiredResources int
+	if err := pool.QueryRow("SELECT count(*) FROM avops.resource_samples WHERE container_id='expired'").Scan(&expiredResources); err != nil || expiredResources != 0 {
+		t.Fatal("history retention failed", err)
+	}
 	for _, path := range []string{"/api/v1/access-key-requests", "/api/v1/users/" + user.ID, "/api/v1/roles"} {
 		if w := post(path, map[string]any{}, token, access.Issued{}); w.Code != 403 {
 			t.Fatalf("customer permission escalation %s: %d", path, w.Code)
@@ -322,22 +406,6 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	}
 	originalHandler := handler
 	handler = (&center.Server{Store: customerStore, Access: registry, Accounts: accounts, Database: db, Notifier: notifier}).Handler()
-	startupCtx, stopStartup := context.WithCancel(context.Background())
-	defer stopStartup()
-	go func() {
-		ticker := time.NewTicker(time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-startupCtx.Done():
-				return
-			case <-ticker.C:
-				for _, r := range customerStore.StartupCommands("qa", customerSession) {
-					customerStore.ReceiveStartup("qa", customerSession, model.StartupResult{Type: "startup_result", RequestID: r.RequestID, ContainerID: r.ContainerID, ContainerName: r.ContainerName, Startup: &model.Startup{CollectedAt: time.Now(), Config: model.StartupConfig{Image: "canary:test"}}})
-				}
-			}
-		}
-	}()
 	if w := get("/api/v1/nodes/startup?node_id=qa%2Fcanary", token); w.Code != 200 || !strings.Contains(w.Body.String(), "startup") {
 		t.Fatalf("customer managed startup denied: %d", w.Code)
 	}
@@ -452,7 +520,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	r := httptest.NewRequest("POST", "http://center/api/v1/operations/restart", strings.NewReader(`{}`))
-	r.SetBasicAuth(owned.Key.ID, owned.Secret)
+	r.Header.Set("Authorization", "Bearer "+owned.Token)
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
@@ -460,6 +528,63 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal("disabled owner key retained access")
 	}
 	export := t.TempDir() + "/export"
+	// Two destinations share the external event ID but must keep separate
+	// relational rows, retry state and recovered in-memory deliveries.
+	notificationLog, err := db.OpenLog("notifications", 64<<20, func(json.RawMessage) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedEvent := model.Notification{ID: "fanout-pg-test", Type: "STATUS_CHANGED", Category: notify.ContainerAbnormal, OccurredAt: time.Now().UTC(), Node: "127.0.0.1-canary", Service: "canary"}
+	firstDelivery := notify.Delivery{EndpointID: "receiver-a", Event: sharedEvent, Status: "PENDING", NextAt: time.Now().UTC(), SettingsRevision: notifier.Settings().Revision}
+	secondDelivery := firstDelivery
+	secondDelivery.EndpointID = "receiver-b"
+	if err = notificationLog.Append(map[string]any{"deliveries": []notify.Delivery{firstDelivery, secondDelivery}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	firstDelivery.Status = "DELIVERED"
+	firstDelivery.Attempts = 1
+	if err = notificationLog.Append(map[string]any{"deliveries": []notify.Delivery{firstDelivery}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	var fanoutRows, pendingRows int
+	if err = pool.QueryRow("SELECT count(*),count(*) FILTER(WHERE status='PENDING') FROM avops.notification_events WHERE payload->'event'->>'event_id'='fanout-pg-test'").Scan(&fanoutRows, &pendingRows); err != nil || fanoutRows != 2 || pendingRows != 1 {
+		t.Fatal("fanout projection overwrote delivery state", err)
+	}
+	recoveredNotifier, err := notify.New(t.TempDir(), notify.Config{}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredNotifier.Summary().(map[string]any)["pending"] != 1 {
+		t.Fatal("fanout state lost during PostgreSQL recovery")
+	}
+	recoveredNotifier.Close()
+	notificationLog.Close()
+	// Persist a normal subscription and its initialization receipt. Reopening
+	// the notifier on PostgreSQL must not queue the same current state again.
+	normalConfig := notify.Config{AuthScheme: "webhook_hmac", EndpointMode: true, Enabled: true, Endpoints: [20]notify.Endpoint{{ID: "normal-pg", Enabled: true, URL: "https://example.com/events", Secret: "normal-pg-independent", NormalEpoch: "pg-activation", Events: [4]bool{false, false, false, true}}}}
+	normalSettings, _ := json.Marshal(map[string]any{"version": 1, "revision": "pg-normal-settings", "config": normalConfig})
+	if err = db.SaveDocument("notification_settings", normalSettings); err != nil {
+		t.Fatal(err)
+	}
+	normalNotifier, err := notify.New(t.TempDir(), notify.Config{}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := time.Now().UTC()
+	normalFacts := []notify.Fact{{Key: "node/normal-pg", Cluster: "pgqa", Service: "canary", Node: "127.0.0.1-normal", Status: "HEALTHY", ReasonCode: "OK", CollectedAt: &observed}}
+	normalNotifier.Observe("normal-baseline", normalFacts)
+	normalNotifier.Close()
+	normalNotifier, err = notify.New(t.TempDir(), notify.Config{}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed = time.Now().UTC()
+	normalNotifier.Observe("normal-baseline", normalFacts)
+	normalNotifier.Close()
+	var normalSnapshots int
+	if err = pool.QueryRow("SELECT count(*) FROM avops.notification_events WHERE payload->>'endpoint_id'='normal-pg' AND payload->>'normal_epoch'='pg-activation' AND payload->'event'->>'event_type'='STATUS_SNAPSHOT'").Scan(&normalSnapshots); err != nil || normalSnapshots != 1 {
+		t.Fatal("normal initialization repeated after PostgreSQL recovery", err)
+	}
 	if e = db.ExportLegacy(export); e != nil {
 		t.Fatal(e)
 	}
@@ -509,13 +634,6 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal("existing key not recovered after scope cleanup")
 	}
 	freshKeys.Close()
-	if e = db.PurgeStartupSnapshots(); e != nil {
-		t.Fatal(e)
-	}
-	var cachedStartup int
-	if e = pool.QueryRow("SELECT count(*) FROM avops.containers WHERE payload ? 'startup'").Scan(&cachedStartup); e != nil || cachedStartup != 0 {
-		t.Fatal("startup parameters persisted")
-	}
 	if e = db.CompactOperations(); e != nil {
 		t.Fatal(e)
 	}
@@ -581,8 +699,20 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer copy.Close()
+	startupView, e := copy.NodeStartup(context.Background(), "qa/canary")
+	if e != nil {
+		t.Fatal(e)
+	}
+	startupCache := startupView.(map[string]any)
+	if startupCache["startup"] == nil || startupCache["stale"] != true || startupCache["container_id"] != strings.Repeat("a", 64) {
+		t.Fatal("offline startup cache did not survive reopening")
+	}
 	result, e := copy.Operation(op.OperationID)
 	if e != nil || !result.NodeLocked {
 		t.Fatal("unknown/active operation lock not recovered")
+	}
+	resourceHistoryView, e := copy.ResourceHistory(context.Background(), "qa/canary", "15m")
+	if e != nil || len(resourceHistoryView.(map[string]any)["samples"].([]history.Sample)) != 3 {
+		t.Fatal("resource history did not survive center/database reopening", e)
 	}
 }

@@ -252,7 +252,7 @@ func (s *Store) statusesLocked(serviceFilter, statusFilter string, now time.Time
 				if statusFilter != "" && statusFilter != status {
 					continue
 				}
-				services = append(services, map[string]any{"cluster_code": cluster.Code, "service_code": service.Code, "service_name": service.Name, "status": status, "expected_node_count": len(nodes), "discovered_node_count": discovered, "healthy_node_count": healthy, "unhealthy_node_count": unhealthy, "unknown_node_count": unknown, "nodes": nodes})
+				services = append(services, map[string]any{"cluster_code": cluster.Code, "group_name": cluster.Name, "service_code": service.Code, "service_name": service.Name, "status": status, "expected_node_count": len(nodes), "discovered_node_count": discovered, "healthy_node_count": healthy, "unhealthy_node_count": unhealthy, "unknown_node_count": unknown, "nodes": nodes})
 			}
 		}
 	}

@@ -8,7 +8,9 @@ import type {
   ContainerLifecycle,
   HostFilesystem,
 } from "./types";
-import { MetricIcon, MetricRow, MetricPanel, Meter } from "./MetricUI";
+import { MetricIcon } from "./MetricUI";
+import ResourceTrends from "./ResourceTrends";
+import type { API } from "./api";
 
 const reasons: Record<string, string> = {
   CADVISOR_UNAVAILABLE: "采集器暂时不可用",
@@ -29,6 +31,18 @@ const percent = (v: number | null | undefined) =>
   v == null ? "—" : `${(v * 100).toFixed(1)}%`;
 const date = (v: string | null | undefined) =>
   v ? new Date(v).toLocaleString("zh-CN", { hour12: false }) : "—";
+function updateTime(value: string | null | undefined, full = false) {
+  if (!value) return "—";
+  const at = new Date(value);
+  if (!Number.isFinite(at.getTime())) return "—";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const clock = `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`;
+  if (full)
+    return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${clock}`;
+  return at.toDateString() === new Date().toDateString()
+    ? clock
+    : `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${clock}`;
+}
 function bytes(v: number | null | undefined) {
   if (v == null) return "—";
   for (const [unit, size] of [
@@ -208,200 +222,27 @@ function Filesystem({
     </div>
   );
 }
-function ResourcePanels({ value }: { value: ResourceMetrics }) {
-  const io = !!value.disk_devices?.length;
-  return (
-    <div className="metric-panel-grid">
-      <MetricPanel
-        title="CPU"
-        icon="cpu"
-        note="1 核表示一个逻辑核。节流率是受限调度周期的比例。"
-      >
-        <div className="metric-list">
-          <MetricRow label="使用核数" value={cores(value.cpu_usage_cores)} />
-          <MetricRow
-            label="用户态 / 内核态"
-            value={`${cores(value.cpu_user_usage_cores)} / ${cores(value.cpu_system_usage_cores)}`}
-          />
-          <MetricRow
-            label="配额"
-            value={
-              value.cpu_quota_cores == null
-                ? value.limits_known
-                  ? "未设置"
-                  : "未知"
-                : cores(value.cpu_quota_cores)
-            }
-            muted={value.cpu_quota_cores == null}
-          />
-          <MetricRow
-            label="节流率"
-            value={
-              value.cpu_quota_cores == null
-                ? value.limits_known
-                  ? "未设置配额"
-                  : "配额未知"
-                : percent(value.cpu_throttled_ratio)
-            }
-            muted={value.cpu_quota_cores == null}
-          />
-          <MetricRow
-            label="节流时间增长"
-            value={
-              value.cpu_throttled_seconds_per_second == null
-                ? "—"
-                : `${number(value.cpu_throttled_seconds_per_second, 3)} 秒/秒`
-            }
-          />
-        </div>
-      </MetricPanel>
-      <MetricPanel
-        title="内存"
-        icon="memory"
-        note="工作集用于计算限额占比；分配失败次数不等于 OOM 次数。"
-      >
-        <div className="metric-list">
-          <MetricRow
-            label="工作集"
-            value={bytes(value.memory_working_set_bytes)}
-          />
-          <MetricRow
-            label="限额 / 占比"
-            value={
-              value.memory_limit_bytes
-                ? `${bytes(value.memory_limit_bytes)} / ${percent(value.memory_working_set_ratio)}`
-                : value.limits_known
-                  ? "未设置限额"
-                  : "限额未知"
-            }
-            muted={!value.memory_limit_bytes}
-          />
-          <MetricRow
-            label="使用量 / RSS"
-            value={`${bytes(value.memory_usage_bytes)} / ${bytes(value.memory_rss_bytes)}`}
-          />
-          <MetricRow
-            label="缓存 / Swap"
-            value={`${bytes(value.memory_cache_bytes)} / ${bytes(value.memory_swap_bytes)}`}
-          />
-          <MetricRow label="峰值" value={bytes(value.memory_peak_bytes)} />
-          <MetricRow
-            label="分配失败 / OOM 事件"
-            value={`${number(value.memory_failures_total, 0)} / ${number(value.oom_events_total, 0)}`}
-          />
-        </div>
-        <div className="metric-inline-note">
-          OOM 事件从采集器启动以来累计，重启后重新计数。
-        </div>
-      </MetricPanel>
-      <MetricPanel
-        title="磁盘 I/O"
-        icon="disk"
-        tag={io ? "按设备" : "暂无有效样本"}
-        note={
-          io
-            ? "逻辑盘与底层设备可能记录同一笔 I/O，分别展示，避免重复求和。"
-            : "未取得有效计数时留空，不用 0 代替未知。"
-        }
-      >
-        {io ? (
-          <div className="device-list">
-            {value.disk_devices!.map((d) => (
-              <div className="device-metrics" key={`${d.major}:${d.minor}`}>
-                <div className="device-heading">
-                  <strong>{d.device}</strong>
-                  <span>
-                    {d.major}:{d.minor}
-                  </span>
-                </div>
-                <div className="metric-list">
-                  <MetricRow
-                    label="读取 / 写入"
-                    value={`${rate(d.read_bytes_per_second)} / ${rate(d.write_bytes_per_second)}`}
-                  />
-                  <MetricRow
-                    label="读取 / 写入 IOPS"
-                    value={`${number(d.read_operations_per_second)} / ${number(d.write_operations_per_second)}`}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : value.disk_io_status === "AVAILABLE" ? (
-          <div className="metric-list">
-            <MetricRow
-              label="读取 / 写入"
-              value={`${rate(value.disk_read_bytes_per_second)} / ${rate(value.disk_write_bytes_per_second)}`}
-            />
-            <MetricRow
-              label="IOPS"
-              value={`${number(value.disk_read_operations_per_second)} / ${number(value.disk_write_operations_per_second)}`}
-            />
-          </div>
-        ) : (
-          <div className="metric-empty compact-empty">
-            <MetricIcon name="disk" />
-            <strong>
-              {value.disk_io_status === "UNSUPPORTED"
-                ? "当前环境未提供 I/O 指标"
-                : "等待有效 I/O 采样"}
-            </strong>
-          </div>
-        )}
-      </MetricPanel>
-      <MetricPanel
-        title="网络"
-        icon="network"
-        tag={value.network_scope === "HOST_SHARED" ? "主机共享" : "容器网络"}
-        note={
-          value.network_scope === "HOST_SHARED"
-            ? "host/container 模式共享网络命名空间，不能把主机流量归属到单个容器。"
-            : "接口丢包不等于 RTC 媒体丢包率。"
-        }
-      >
-        {value.network_scope === "HOST_SHARED" ? (
-          <div className="metric-empty compact-empty">
-            <MetricIcon name="network" />
-            <strong>共享主机网络</strong>
-            <p>不展示无法单独归属的流量、丢包和错误。</p>
-          </div>
-        ) : (
-          <div className="metric-list">
-            <MetricRow
-              label="接收 / 发送"
-              value={`${rate(value.network_receive_bytes_per_second)} / ${rate(value.network_transmit_bytes_per_second)}`}
-            />
-            <MetricRow
-              label="收包 / 发包"
-              value={`${number(value.network_receive_packets_per_second)} / ${number(value.network_transmit_packets_per_second)} 包/秒`}
-            />
-            <MetricRow
-              label="接收 / 发送丢包"
-              value={`${number(value.network_receive_dropped_per_second)} / ${number(value.network_transmit_dropped_per_second)} 包/秒`}
-            />
-            <MetricRow
-              label="接收 / 发送错误"
-              value={`${number(value.network_receive_errors_per_second)} / ${number(value.network_transmit_errors_per_second)} 次/秒`}
-            />
-          </div>
-        )}
-      </MetricPanel>
-    </div>
-  );
-}
 export default function Resources({
+  api,
+  nodeID,
   value,
   compact = false,
   lifecycle,
   runtime,
+  updatedAt,
+  dataStale = false,
   startup,
   detailsOpen,
   onDetailsOpenChange,
 }: {
+  api: API;
+  nodeID: string;
   value?: ResourceMetrics | null;
   compact?: boolean;
   lifecycle?: ContainerLifecycle | null;
   runtime?: string;
+  updatedAt?: string | null;
+  dataStale?: boolean;
   startup?: ReactNode;
   detailsOpen?: boolean;
   onDetailsOpenChange?: (open: boolean) => void;
@@ -421,53 +262,65 @@ export default function Resources({
       : "—";
   return (
     <div className={`resource-view ${compact ? "resource-view-compact" : ""}`}>
-      {current && value ? (
-        <div className="resource-overview">
-          <OverviewItem
-            icon="cpu"
-            label="CPU 使用"
-            value={cores(value.cpu_usage_cores)}
-            note={
-              value.cpu_quota_cores == null
+      <div className="resource-overview">
+        <OverviewItem
+          icon="cpu"
+          label="CPU 使用"
+          value={current && value ? cores(value.cpu_usage_cores) : "—"}
+          note={
+            !current || !value
+              ? "暂无有效资源采样"
+              : value.cpu_quota_cores == null
                 ? value.limits_known
                   ? "未设置配额"
                   : "配额未知"
                 : `配额 ${cores(value.cpu_quota_cores)} · 节流 ${percent(value.cpu_throttled_ratio)}`
-            }
-          />
-          <OverviewItem
-            icon="memory"
-            label="内存工作集"
-            value={bytes(value.memory_working_set_bytes)}
-            note={
-              value.memory_limit_bytes
+          }
+        />
+        <OverviewItem
+          icon="memory"
+          label="内存工作集"
+          value={current && value ? bytes(value.memory_working_set_bytes) : "—"}
+          note={
+            !current || !value
+              ? "暂无有效资源采样"
+              : value.memory_limit_bytes
                 ? `限额 ${bytes(value.memory_limit_bytes)} · ${percent(value.memory_working_set_ratio)}`
                 : value.limits_known
                   ? "未设置内存限额"
                   : "限额未知"
-            }
-            ratio={value.memory_working_set_ratio}
-          />
+          }
+          ratio={current ? value?.memory_working_set_ratio : undefined}
+        />
+        <OverviewItem
+          icon="clock"
+          label="数据更新时间"
+          value={
+            <span className={dataStale ? "metric-update-stale" : undefined}>
+              {updateTime(updatedAt)}
+              {dataStale && <small> · 已过期</small>}
+            </span>
+          }
+          note={
+            updatedAt
+              ? `${updateTime(updatedAt, true)}${dataStale ? " · 数据已过期" : ""}`
+              : "暂无有效采集时间"
+          }
+        />
+        {!compact && (
           <OverviewItem
-            icon="disk"
-            label="容器文件系统"
-            value={bytes(value.filesystem_usage_bytes)}
-            note="不代表全部挂载卷占用"
+            icon="clock"
+            label="本次运行"
+            value={liveDuration}
+            note={
+              lifecycle?.stale
+                ? "生命周期已过期"
+                : `自动重启 ${number(lifecycle?.restart_count, 0)} 次`
+            }
           />
-          {!compact && (
-            <OverviewItem
-              icon="clock"
-              label="本次运行"
-              value={liveDuration}
-              note={
-                lifecycle?.stale
-                  ? "生命周期已过期"
-                  : `自动重启 ${number(lifecycle?.restart_count, 0)} 次`
-              }
-            />
-          )}
-        </div>
-      ) : (
+        )}
+      </div>
+      {!current && (
         <div className="resource-unavailable">
           <span className="status-dot" />
           <div>
@@ -491,35 +344,26 @@ export default function Resources({
             activeKey={tab}
             onChange={setTab}
             items={[
-                  ...(startup
-                    ? [{ key: "startup", label: "启动参数", children: startup }]
-                    : []),
-                  {
-                    key: "resources",
-                    label: "资源详情",
-                    children:
-                      current && value ? (
-                        <>
-                          <ResourcePanels value={value} />
-                          <Typography.Paragraph type="secondary">
-                            实际采样窗口 {number(value.sample_window_seconds)}{" "}
-                            秒 · {date(value.sampled_at)}
-                          </Typography.Paragraph>
-                        </>
-                      ) : (
-                        <Empty description="等待新的采样；缺失数据不会显示为 0" />
-                      ),
-                  },
-                  {
-                    key: "filesystem",
-                    label: "文件系统",
-                    children: <Filesystem value={f} current={storageCurrent} />,
-                  },
-                  {
-                    key: "lifecycle",
-                    label: "生命周期",
-                    children: <Lifecycle value={lifecycle} runtime={runtime} />,
-                  },
+              ...(startup
+                ? [{ key: "startup", label: "启动参数", children: startup }]
+                : []),
+              {
+                key: "resources",
+                label: "资源详情",
+                children: (
+                  <ResourceTrends api={api} nodeID={nodeID} value={value} />
+                ),
+              },
+              {
+                key: "filesystem",
+                label: "文件系统",
+                children: <Filesystem value={f} current={storageCurrent} />,
+              },
+              {
+                key: "lifecycle",
+                label: "生命周期",
+                children: <Lifecycle value={lifecycle} runtime={runtime} />,
+              },
             ]}
           />
         </div>

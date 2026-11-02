@@ -37,6 +37,28 @@ func request(h http.Handler, body []byte, secret string) *httptest.ResponseRecor
 	return w
 }
 
+func TestNormalSnapshotAcceptanceAndDeduplication(t *testing.T) {
+	s, err := openStore(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.file.Close()
+	h := handler(s, "receiver", "view-secret", "webhook-secret")
+	e := sampleEvent("normal-initial")
+	e.Type = "STATUS_SNAPSHOT"
+	e.Category = "NORMAL"
+	b, _ := json.Marshal(e)
+	for attempt := 0; attempt < 2; attempt++ {
+		w := request(h, b, "webhook-secret")
+		if w.Code != 200 {
+			t.Fatalf("normal snapshot rejected: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if len(s.records) != 1 {
+		t.Fatal("normal snapshot retry duplicated receiver record")
+	}
+}
+
 func TestAuthenticationAndPayloadValidation(t *testing.T) {
 	s, err := openStore(t.TempDir(), 1<<20)
 	if err != nil {

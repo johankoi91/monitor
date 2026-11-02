@@ -46,25 +46,46 @@ export default function StartupParameters({
   const [data, setData] = useState<{
       startup: Startup | null;
       stale: boolean;
+      reported_at?: string;
+      container_id?: string;
     } | null>(null),
     [error, setError] = useState("");
   const [requestVersion, setRequestVersion] = useState(0);
   useEffect(() => {
-    let active = true;
+    let active = true,
+      loading = false;
     setData(null);
     setError("");
-    api
-      .get<{ startup: Startup | null; stale: boolean }>(
-        `/api/v1/nodes/startup?node_id=${encodeURIComponent(nodeID)}`,
-      )
-      .then((d) => {
-        if (active) setData(d);
-      })
-      .catch((e) => {
-        if (active)
-          setError(e instanceof Error ? e.message : "启动参数读取失败");
-      });
+    async function load() {
+      if (loading) return;
+      loading = true;
+      await api
+        .get<{
+          startup: Startup | null;
+          stale: boolean;
+          reported_at?: string;
+          container_id?: string;
+        }>(`/api/v1/nodes/startup?node_id=${encodeURIComponent(nodeID)}`)
+        .then((d) => {
+          if (active) {
+            setData(d);
+            setError("");
+          }
+        })
+        .catch((e) => {
+          if (active)
+            setError(e instanceof Error ? e.message : "启动参数读取失败");
+        })
+        .finally(() => {
+          loading = false;
+        });
+    }
+    void load();
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void load();
+    }, 15000);
     return () => {
+      window.clearInterval(timer);
       active = false;
     };
   }, [api, nodeID, requestVersion]);
@@ -85,7 +106,7 @@ export default function StartupParameters({
   if (!data.startup)
     return (
       <Empty
-        description="尚未采集启动参数"
+        description="等待 Agent 首次上报启动参数"
         image={Empty.PRESENTED_IMAGE_SIMPLE}
       />
     );
@@ -182,12 +203,15 @@ export default function StartupParameters({
     <div className="startup-parameters startup-unified">
       <div className="startup-toolbar">
         <Typography.Text type="secondary">
-          实时读取 ·{" "}
-          {new Date(s.collected_at).toLocaleString("zh-CN", { hour12: false })}{" "}
+          最新上报 ·{" "}
+          {new Date(data.reported_at || s.collected_at).toLocaleString(
+            "zh-CN",
+            { hour12: false },
+          )}{" "}
           · {rows.length} 项
         </Typography.Text>
         <Button size="small" onClick={() => setRequestVersion((v) => v + 1)}>
-          重新获取
+          刷新记录
         </Button>
       </div>
       {(data.stale || s.incomplete || s.truncated) && (
@@ -196,9 +220,19 @@ export default function StartupParameters({
           type="warning"
           showIcon
           message={
-            data.stale ? "数据已过期，请重新获取" : "部分启动配置未完整读取"
+            data.stale
+              ? "最后一次有效上报记录；容器未运行、离线或记录已过期"
+              : "部分启动配置未完整读取"
           }
         />
+      )}
+      {data.stale && data.container_id && (
+        <Typography.Paragraph
+          type="secondary"
+          style={{ fontSize: 12, marginBottom: 8 }}
+        >
+          记录对应容器 ID：{data.container_id}
+        </Typography.Paragraph>
       )}
       <Table<Row>
         size="small"

@@ -140,6 +140,7 @@ func projectNotifications(ctx context.Context, tx *sql.Tx, b []byte) error {
 	}
 	for _, raw := range r.Deliveries {
 		var d struct {
+			EndpointID       string             `json:"endpoint_id"`
 			Event            model.Notification `json:"event"`
 			Status           string             `json:"status"`
 			Attempts         int                `json:"attempts"`
@@ -149,7 +150,11 @@ func projectNotifications(ctx context.Context, tx *sql.Tx, b []byte) error {
 		if json.Unmarshal(raw, &d) != nil || d.Event.ID == "" {
 			return errors.New("invalid notification delivery")
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO avops.notification_events(event_id,occurred_at,node_id,service_code,status,attempts,next_at,settings_revision,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(event_id) DO UPDATE SET status=excluded.status,attempts=excluded.attempts,next_at=excluded.next_at,payload=excluded.payload", d.Event.ID, d.Event.OccurredAt, d.Event.Node, d.Event.Service, d.Status, d.Attempts, d.NextAt, d.SettingsRevision, string(raw)); err != nil {
+		id := d.Event.ID
+		if d.EndpointID != "" {
+			id += "/" + d.EndpointID
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO avops.notification_events(event_id,occurred_at,node_id,service_code,status,attempts,next_at,settings_revision,payload) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(event_id) DO UPDATE SET status=excluded.status,attempts=excluded.attempts,next_at=excluded.next_at,payload=excluded.payload", id, d.Event.OccurredAt, d.Event.Node, d.Event.Service, d.Status, d.Attempts, d.NextAt, d.SettingsRevision, string(raw)); err != nil {
 			return err
 		}
 	}

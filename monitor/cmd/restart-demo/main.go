@@ -35,6 +35,7 @@ type state struct {
 }
 type api struct {
 	ID, Secret string
+	Token      string
 	Client     *http.Client
 }
 
@@ -45,7 +46,9 @@ func (a api) call(method, path string, body any, target any) (int, error) {
 		reader = bytes.NewReader(b)
 	}
 	r, _ := http.NewRequest(method, "http://127.0.0.1:18084"+path, reader)
-	if a.ID != "" {
+	if a.Token != "" {
+		r.Header.Set("Authorization", "Bearer "+a.Token)
+	} else if a.ID != "" {
 		r.SetBasicAuth(a.ID, a.Secret)
 	}
 	if body != nil {
@@ -90,6 +93,7 @@ func main() {
 		}
 	}
 	admin := api{ID: vars["AVOPS_ADMIN_ID"], Secret: vars["AVOPS_ADMIN_SECRET"], Client: &http.Client{Timeout: 5 * time.Second}}
+	admin.Token = os.Getenv("AVOPS_ACCOUNT_SESSION")
 	proofPath := "/var/lib/avops-monitor/restart-demo-proof-20261006.json"
 	keyPath := "/etc/avops-monitor/restart-demo-private.json"
 	p := state{Results: map[string]any{}}
@@ -100,7 +104,7 @@ func main() {
 	if b, e := os.ReadFile(keyPath); e == nil {
 		json.Unmarshal(b, &keys)
 	}
-	client := func(k access.Issued) api { return api{ID: k.Key.ID, Secret: k.Secret, Client: admin.Client} }
+	client := func(k access.Issued) api { return api{Token: k.Token, Client: admin.Client} }
 	request := func(key string) model.RestartRequest {
 		return model.RestartRequest{NodeID: nodeID, Operator: "重启权限演练", Reason: "只操作新建演练容器，验证注册 Key 与双端白名单", RequestKey: key}
 	}
@@ -179,7 +183,7 @@ func main() {
 		check(api{Client: admin.Client}, request("unauth"), 401, "UNAUTHORIZED")
 		check(api{ID: "invalid", Secret: "invalid", Client: admin.Client}, request("bad"), 401, "UNAUTHORIZED")
 		check(admin, request("bootstrap"), 403, "RESTART_KEY_REQUIRED")
-		check(client(keys.Revoked), request("revoked"), 401, "UNAUTHORIZED")
+		check(client(keys.Revoked), request("revoked"), 401, "TOKEN_EXPIRED_OR_INVALID")
 	case "node-deny":
 		check(client(keys.Restart), request("demo-white-denied-20261006"), 409, "NODE_NOT_RESTARTABLE")
 	case "center-rule", "agent-rule":

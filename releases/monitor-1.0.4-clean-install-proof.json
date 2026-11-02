@@ -1,0 +1,19 @@
+{
+  "fixture": "avops-offline-15f016cd",
+  "steps": [
+    "offline image load and all-file checksums passed",
+    "fresh PostgreSQL data directory, restricted runtime and owner migrations passed",
+    "fresh account bootstrap and verified HTTPS login passed",
+    "offline cAdvisor image serves real Docker resource samples on loopback",
+    "offline receiver Docker image, verified HTTPS, HMAC and duplicate handling passed",
+    "new baseline defaults to restart denied; only isolated canary explicitly enabled",
+    "Agent WSS discovery, YAML baseline and encrypted reported startup passed",
+    "real cAdvisor history and startup cache while Agent offline passed",
+    "self-owned expiring Token, Bearer REST restart, idempotency and stage audit passed",
+    "startup and resource history survive center restart",
+    "center container restart recovered baseline, Key and original idempotency",
+    "embedded Web HTML and local bundled JS/CSS served over verified HTTPS"
+  ],
+  "postgresql_version": "17.11 (Debian 17.11-1.pgdg13+2)",
+  "passed": true
+}

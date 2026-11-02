@@ -276,7 +276,7 @@ func (c *Client) Enrich(ctx context.Context, report *model.Report) {
 					m.NetworkReceiveDroppedPerSecond, m.NetworkTransmitDroppedPerSecond = interfaceRates(previous.Network.Interfaces, last.Network.Interfaces, seconds, func(i iface) (*uint64, *uint64) { return i.RXDropped, i.TXDropped })
 					m.NetworkReceiveErrorsPerSecond, m.NetworkTransmitErrorsPerSecond = interfaceRates(previous.Network.Interfaces, last.Network.Interfaces, seconds, func(i iface) (*uint64, *uint64) { return i.RXErrors, i.TXErrors })
 				}
-				if last.DiskIO != nil && previous.DiskIO != nil && (last.HasDiskIO == nil || *last.HasDiskIO) {
+				if last.DiskIO != nil && previous.DiskIO != nil && (last.HasDiskIO == nil || *last.HasDiskIO) && (previous.HasDiskIO == nil || *previous.HasDiskIO) {
 					m.DiskDevices = diskDevices(previous.DiskIO.Bytes, last.DiskIO.Bytes, previous.DiskIO.Operations, last.DiskIO.Operations, seconds)
 					if len(m.DiskDevices) > 0 {
 						m.DiskIOStatus = "AVAILABLE"

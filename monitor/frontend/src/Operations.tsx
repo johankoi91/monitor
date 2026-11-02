@@ -196,7 +196,7 @@ export default function Operations({
           showIcon
           type="warning"
           message="存在结果未知的操作"
-          description="相关节点保持锁定，需现场核实执行情况。请联系 Agora 人员处理。"
+          description="相关节点保持锁定，需现场核实执行情况。请联系 管理者处理。"
         />
       )}
       <Card className="page-card operation-table-card">

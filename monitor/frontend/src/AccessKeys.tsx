@@ -3,6 +3,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import Alert from "antd/es/alert";
 import Button from "antd/es/button";
 import Card from "antd/es/card";
+import InputNumber from "antd/es/input-number";
 import Input from "antd/es/input";
 import Space from "antd/es/space";
 import Typography from "antd/es/typography";
@@ -18,6 +19,7 @@ type Key = {
   purpose: string;
   enabled: boolean;
   created_at: string;
+  expires_at?: string;
 };
 export default function AccessKeys({
   api,
@@ -30,7 +32,8 @@ export default function AccessKeys({
       keys: [],
     }),
     [name, setName] = useState(""),
-    [issued, setIssued] = useState<{ key: Key; secret: string } | null>(null),
+    [hours, setHours] = useState(24),
+    [issued, setIssued] = useState<{ key: Key; token: string } | null>(null),
     [notice, setNotice] = useState(""),
     [busy, setBusy] = useState(false);
   const [currentAccount, setCurrentAccount] = useState("");
@@ -56,15 +59,16 @@ export default function AccessKeys({
     if (busy) return;
     setBusy(true);
     try {
-      const result = await api.post<{ key: Key; secret: string }>(
+      const result = await api.post<{ key: Key; token: string }>(
         "/api/v1/access-keys",
         {
           name,
           purpose: "RESTART",
+          expires_hours: hours,
         },
       );
       setIssued(result);
-      setNotice("密钥已签发，密钥值仅本次显示。");
+      setNotice("Token已签发，Token值仅本次显示。");
       await load();
     } catch (e) {
       setNotice(text(e));
@@ -75,7 +79,7 @@ export default function AccessKeys({
   async function revoke(key: Key) {
     try {
       await api.post(`/api/v1/access-keys/${key.key_id}/revoke`, {});
-      setNotice("密钥已停用");
+      setNotice("Token已停用");
       await load();
     } catch (e) {
       setNotice(text(e));
@@ -84,32 +88,33 @@ export default function AccessKeys({
   async function copySecret() {
     if (!issued) return;
     try {
-      await navigator.clipboard.writeText(issued.secret);
-      setNotice("密钥已复制到剪贴板，请妥善保存。");
+      await navigator.clipboard.writeText(issued.token);
+      setNotice("Token已复制到剪贴板，请妥善保存。");
     } catch {
-      setNotice("浏览器未允许自动复制，请手动复制下方密钥。");
+      setNotice("浏览器未允许自动复制，请手动复制下方Token。");
     }
   }
   async function rotate(key: Key) {
     if (busy) return;
     setBusy(true);
     try {
-      const result = await api.post<{ key: Key; secret: string }>(
+      const result = await api.post<{ key: Key; token: string }>(
         "/api/v1/access-keys",
         {
           name: key.name,
           purpose: "RESTART",
+          expires_hours: hours,
         },
       );
       setIssued(result);
       try {
-        await navigator.clipboard.writeText(result.secret);
-        setNotice("新密钥已签发并复制到剪贴板，正在停用旧 Key。");
+        await navigator.clipboard.writeText(result.token);
+        setNotice("新Token已签发并复制到剪贴板，正在停用旧 Token。");
       } catch {
-        setNotice("新密钥已签发，浏览器未允许自动复制，请手动复制。");
+        setNotice("新Token已签发，浏览器未允许自动复制，请手动复制。");
       }
       await api.post(`/api/v1/access-keys/${key.key_id}/revoke`, {});
-      setNotice("新 Key 已签发，旧 Key 已停用。请保存本次显示的密钥。");
+      setNotice("新 Token 已签发，旧 Token 已停用。请保存本次显示的Token。");
       await load();
     } catch (e) {
       setNotice(text(e));
@@ -120,24 +125,24 @@ export default function AccessKeys({
   if (!canManage)
     return (
       <section>
-        <Typography.Title level={3}>接入密钥</Typography.Title>
+        <Typography.Title level={3}>接入Token</Typography.Title>
         <p>
-          这里只直接签发和管理重启安全 Key。仅 Agora
-          人员可操作，页面账号密码不通过 Key 登录。
+          这里只直接签发和管理重启 Token。仅 管理者可操作，页面账号密码不通过
+          Token 登录。
         </p>
       </section>
     );
   return (
     <section>
-      <Typography.Title level={2}>重启安全 Key 签发与管理</Typography.Title>
-      <p>重启安全 Key 仍须同时满足中心/Agent 的节点白名单和现场状态规则。</p>
+      <Typography.Title level={2}>重启 Token 签发与管理</Typography.Title>
       {notice && <Alert message={notice} type="info" showIcon />}
       <Card className="page-card">
         <Form layout="vertical" onSubmitCapture={issue}>
-          <Form.Item label="所属账号">
-            <Input value={currentAccount || "当前登录账号"} readOnly />
-          </Form.Item>
-          <Form.Item label="密钥名称" htmlFor="accesskeys-field-2">
+          <Typography.Paragraph>
+            <Typography.Text type="secondary">所属账号：</Typography.Text>
+            {currentAccount || "当前登录账号"}
+          </Typography.Paragraph>
+          <Form.Item label="Token名称" htmlFor="accesskeys-field-2">
             <Input
               id="accesskeys-field-2"
               required
@@ -145,21 +150,30 @@ export default function AccessKeys({
               onChange={(e) => setName(e.target.value)}
             />
           </Form.Item>
+          <Form.Item label="有效期（小时，1～720）">
+            <InputNumber
+              min={1}
+              max={720}
+              value={hours}
+              onChange={(v) => setHours(v || 24)}
+            />
+          </Form.Item>
           <Button type="primary" htmlType="submit" disabled={busy}>
-            签发密钥
+            签发Token
           </Button>
         </Form>
       </Card>
       {issued && (
         <Card title="本次签发结果" className="page-card">
           <Typography.Paragraph>
-            密钥值仅显示一次，请妥善保存并独立交付给接入方。
+            Token值仅显示一次，请妥善保存并独立交付给接入方。
           </Typography.Paragraph>
           <pre>
             {JSON.stringify(
               {
                 key_id: issued.key.key_id,
-                secret: issued.secret,
+                token: issued.token,
+                expires_at: issued.key.expires_at,
                 purpose: issued.key.purpose,
               },
               null,
@@ -167,15 +181,17 @@ export default function AccessKeys({
             )}
           </pre>
           <Space>
-            <Button onClick={() => void copySecret()}>复制密钥</Button>
-            <Button onClick={() => setIssued(null)}>已保存，隐藏密钥</Button>
+            <Button onClick={() => void copySecret()}>复制Token</Button>
+            <Button onClick={() => setIssued(null)}>已保存，隐藏Token</Button>
           </Space>
         </Card>
       )}
-      <Card title="已签发密钥" className="page-card">
+      <Card title="已签发Token" className="page-card">
         <Table<Key>
           rowKey="key_id"
-          dataSource={data.keys}
+          dataSource={[...data.keys].sort(
+            (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+          )}
           scroll={{ x: 850 }}
           pagination={{ pageSize: 10, showSizeChanger: false }}
           columns={[
@@ -190,7 +206,7 @@ export default function AccessKeys({
               defaultSortOrder: "descend",
             },
             {
-              title: "密钥",
+              title: "Token",
               key: "identity",
               render: (_, k) => (
                 <>
@@ -204,12 +220,25 @@ export default function AccessKeys({
               ),
             },
             {
+              title: "到期时间",
+              render: (_, k) =>
+                k.expires_at
+                  ? new Date(k.expires_at).toLocaleString("zh-CN")
+                  : "旧凭证，请重新签发",
+            },
+            {
               title: "状态",
               key: "status",
               width: 100,
               render: (_, k) => (
                 <Tag color={k.enabled ? "success" : "default"}>
-                  {k.enabled ? "有效" : "已停用"}
+                  {!k.enabled
+                    ? "已停用"
+                    : !k.expires_at
+                      ? "旧凭证"
+                      : Date.parse(k.expires_at) <= Date.now()
+                        ? "已过期"
+                        : "有效"}
                 </Tag>
               ),
             },
@@ -220,17 +249,17 @@ export default function AccessKeys({
               render: (_, k) => (
                 <Space>
                   <Popconfirm
-                    title="轮换此 Key？"
-                    description="生成新 Key 并停用旧 Key，原接入方需更新凭证。"
+                    title="轮换此 Token？"
+                    description="生成新 Token 并停用旧 Token，原接入方需更新凭证。"
                     onConfirm={() => rotate(k)}
                   >
                     <Button type="link" disabled={!k.enabled || busy}>
-                      轮换并复制新密钥
+                      轮换并复制新Token
                     </Button>
                   </Popconfirm>
                   <Popconfirm
                     title="确认停用？"
-                    description="此 Key 的后续请求将被拒绝。"
+                    description="此 Token 的后续请求将被拒绝。"
                     onConfirm={() => revoke(k)}
                   >
                     <Button type="link" danger disabled={!k.enabled || busy}>

@@ -94,7 +94,7 @@ func (s *Store) findNodeLocked(id string) (model.Node, string, *model.Observatio
 						}
 						return n, v.Code, found
 					}
-					if a := s.agents[n.AgentID]; a != nil && len(a.Report.Containers) > 0 && a.Report.Containers[0].Container.HostAddress+"-"+n.ContainerName == id {
+					if a := s.agents[n.AgentID]; a != nil && n.HostAddress+"-"+n.ContainerName == id {
 						var found *model.Observation
 						for i := range a.Report.Containers {
 							if a.Report.Containers[i].Container.ContainerName == n.ContainerName {

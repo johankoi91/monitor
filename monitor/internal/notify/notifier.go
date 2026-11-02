@@ -18,15 +18,19 @@ import (
 )
 
 type Config struct {
-	AuthScheme     string `yaml:"auth_scheme"`
-	Enabled        bool   `yaml:"enabled"`
-	URL            string `yaml:"url"`
-	TLSServerName  string `yaml:"tls_server_name"`
-	ID             string `yaml:"id"`
-	Secret         string `yaml:"secret"`
-	TimeoutSeconds int    `yaml:"timeout_seconds"`
-	MaxAttempts    int    `yaml:"max_attempts"`
-	MaxPending     int    `yaml:"max_pending"`
+	EndpointMode     bool                   `yaml:"endpoint_mode"`
+	Endpoints        [maxEndpoints]Endpoint `yaml:"endpoints"`
+	Routes           [3]Route               `yaml:"routes"`
+	RoutesConfigured bool                   `yaml:"routes_configured"`
+	AuthScheme       string                 `yaml:"auth_scheme"`
+	Enabled          bool                   `yaml:"enabled"`
+	URL              string                 `yaml:"url"`
+	TLSServerName    string                 `yaml:"tls_server_name"`
+	ID               string                 `yaml:"id"`
+	Secret           string                 `yaml:"secret"`
+	TimeoutSeconds   int                    `yaml:"timeout_seconds"`
+	MaxAttempts      int                    `yaml:"max_attempts"`
+	MaxPending       int                    `yaml:"max_pending"`
 }
 type Fact struct {
 	Key         string     `json:"key"`
@@ -40,6 +44,8 @@ type Fact struct {
 	Stale       bool       `json:"stale"`
 }
 type Delivery struct {
+	NormalEpoch      string             `json:"normal_epoch,omitempty"`
+	EndpointID       string             `json:"endpoint_id,omitempty"`
 	Event            model.Notification `json:"event"`
 	Status           string             `json:"status"`
 	SettingsRevision string             `json:"settings_revision,omitempty"`
@@ -56,6 +62,7 @@ type record struct {
 	Dropped     int        `json:"dropped,omitempty"`
 }
 type Notifier struct {
+	normalQueued     map[string]bool
 	mu               sync.Mutex
 	config           Config
 	client           *http.Client
@@ -105,10 +112,17 @@ func New(dir string, c Config, backends ...storage.Backend) (*Notifier, error) {
 	legacy := c.AuthScheme != "webhook_hmac"
 	c.AuthScheme = "webhook_hmac"
 	c.ID = "" // A Webhook uses a signing secret, not a Basic username.
+	if !c.RoutesConfigured {
+		c.Routes = defaultRoutes()
+		c.RoutesConfigured = true
+	}
+	if err := validateRoutes(c); err != nil {
+		return nil, err
+	}
 	if err := validSettings(c); err != nil {
 		return nil, err
 	}
-	if c.Enabled && c.Secret == "" {
+	if c.Enabled && c.Secret == "" && !c.EndpointMode {
 		return nil, errors.New("Webhook signing secret required")
 	}
 	if found && legacy {
@@ -127,7 +141,7 @@ func New(dir string, c Config, backends ...storage.Backend) (*Notifier, error) {
 			return nil, e
 		}
 	}
-	n := &Notifier{config: c, facts: map[string]Fact{}, deliveries: map[string]Delivery{}, client: webhookClient(c)}
+	n := &Notifier{config: c, facts: map[string]Fact{}, deliveries: map[string]Delivery{}, normalQueued: map[string]bool{}, client: webhookClient(c)}
 	n.newClient = webhookClient
 	n.settingsPath = filepath.Join(dir, "notification-settings.json")
 	n.settingsRevision = revision
@@ -169,6 +183,7 @@ func New(dir string, c Config, backends ...storage.Backend) (*Notifier, error) {
 	}
 	n.journal = j
 	n.cancelOldDeliveries()
+	n.refreshNormalQueued()
 	return n, nil
 }
 func (n *Notifier) apply(r record) {
@@ -179,7 +194,10 @@ func (n *Notifier) apply(r record) {
 		delete(n.facts, key)
 	}
 	for _, d := range r.Deliveries {
-		n.deliveries[d.Event.ID] = d
+		n.deliveries[deliveryKey(d)] = d
+		if d.NormalEpoch != "" && d.Event.CurrentStatus == "HEALTHY" && d.LastError != "CONFIGURATION_CHANGED" && d.Status != "CANCELLED" {
+			n.normalQueued[normalKey(d.EndpointID, d.NormalEpoch, d.Event.Cluster, d.Event.Node)] = true
+		}
 	}
 	if r.RevisionSet {
 		n.revision = r.Revision
@@ -223,7 +241,7 @@ func (n *Notifier) Observe(revision string, facts []Fact) {
 	configChanged := revision != n.revision
 	batch := record{}
 	flush := func() bool {
-		if len(batch.Changes)+len(batch.Removed) == 0 {
+		if len(batch.Changes)+len(batch.Removed)+len(batch.Deliveries) == 0 {
 			return true
 		}
 		ok := n.persist(batch)
@@ -234,16 +252,29 @@ func (n *Notifier) Observe(revision string, facts []Fact) {
 	for _, f := range facts {
 		current[f.Key] = true
 		previous, known := n.facts[f.Key]
-		if known && previous.Status == f.Status && previous.Cluster == f.Cluster && previous.Service == f.Service {
+		// A newly enabled normal subscription receives fresh current facts once.
+		// Read the incoming observation, not the older persisted change record.
+		if !known || previous.Status == f.Status && category(previous) == category(f) {
+			initial := n.normalSnapshots(f, known, n.pending()+len(batch.Deliveries))
+			batch.Deliveries = append(batch.Deliveries, initial...)
+		}
+		if len(batch.Deliveries) >= 32 && !flush() {
+			return
+		}
+		if known && previous.Status == f.Status && category(previous) == category(f) && previous.Cluster == f.Cluster && previous.Service == f.Service {
 			continue
 		}
 		batch.Changes = append(batch.Changes, f)
-		if n.config.Enabled && known && previous.Status != f.Status && previous.Cluster == f.Cluster && previous.Service == f.Service && !(configChanged && f.Node == "") {
-			if n.pending()+len(batch.Deliveries) >= n.config.MaxPending {
-				batch.Dropped++
-			} else {
-				e := model.Notification{ID: eventID(), Type: "STATUS_CHANGED", OccurredAt: time.Now().UTC(), Product: "RTC", Cluster: f.Cluster, Service: f.Service, Node: f.Node, PreviousStatus: previous.Status, CurrentStatus: f.Status, ReasonCode: f.ReasonCode, Reason: f.Reason, CollectedAt: f.CollectedAt, Stale: f.Stale}
-				batch.Deliveries = append(batch.Deliveries, Delivery{Event: e, Status: "PENDING", NextAt: time.Now().UTC(), SettingsRevision: n.settingsRevision})
+		targets := destinations(n.config, category(f))
+		selected := len(targets) > 0
+		if n.config.Enabled && selected && known && (previous.Status != f.Status || category(previous) != category(f)) && previous.Cluster == f.Cluster && previous.Service == f.Service && !(configChanged && f.Node == "") {
+			e := model.Notification{ID: eventID(), Type: "STATUS_CHANGED", Category: category(f), OccurredAt: time.Now().UTC(), Product: "RTC", Cluster: f.Cluster, Service: f.Service, Node: f.Node, PreviousStatus: previous.Status, CurrentStatus: f.Status, ReasonCode: f.ReasonCode, Reason: f.Reason, CollectedAt: f.CollectedAt, Stale: f.Stale}
+			for _, target := range targets {
+				if n.pending()+len(batch.Deliveries) >= n.config.MaxPending {
+					batch.Dropped++
+				} else {
+					batch.Deliveries = append(batch.Deliveries, Delivery{EndpointID: target.ID, NormalEpoch: target.NormalEpoch, Event: e, Status: "PENDING", NextAt: time.Now().UTC(), SettingsRevision: n.settingsRevision})
+				}
 			}
 		}
 		if len(batch.Changes) >= 32 && !flush() {
@@ -276,7 +307,7 @@ func (n *Notifier) sendOne(ctx context.Context, retryID string) {
 	}
 	var chosen *Delivery
 	for _, d := range n.deliveries {
-		if retryID != "" && d.Event.ID != retryID {
+		if retryID != "" && deliveryKey(d) != retryID {
 			continue
 		}
 		if (d.Status == "PENDING" || d.Status == "INFLIGHT") && !time.Now().Before(d.NextAt) {
@@ -292,6 +323,18 @@ func (n *Notifier) sendOne(ctx context.Context, retryID string) {
 	}
 	d := *chosen
 	cfg, client, settingsRevision := n.config, n.client, n.settingsRevision
+	cfg, selected := deliveryConfig(cfg, d)
+	if !selected {
+		d.Status = "CANCELLED"
+		d.LastError = "CATEGORY_DISABLED"
+		n.persist(record{Deliveries: []Delivery{d}})
+		n.mu.Unlock()
+		return
+	}
+	if d.EndpointID != "" || cfg.URL != n.config.URL || cfg.TLSServerName != n.config.TLSServerName {
+		client = n.newClient(cfg)
+		defer client.CloseIdleConnections()
+	}
 	if d.Attempts >= n.config.MaxAttempts {
 		d.Status = "FAILED"
 		d.LastError = "RETRY_EXHAUSTED"
@@ -343,7 +386,7 @@ func (n *Notifier) sendOne(ctx context.Context, retryID string) {
 	n.mu.Unlock()
 	if persisted && !success && d.Attempts == 1 && ctx.Err() == nil {
 		// Retry this exact event now, rather than waiting for the scheduler.
-		n.sendOne(ctx, d.Event.ID)
+		n.sendOne(ctx, deliveryKey(d))
 	}
 }
 func (n *Notifier) Run(ctx context.Context) {

@@ -123,6 +123,7 @@ func main() {
 				}
 			}
 			store.TickOperations(at)
+			_ = store.CaptureResourceHistory(ctx)
 			select {
 			case <-ctx.Done():
 				return

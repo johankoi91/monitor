@@ -60,6 +60,20 @@ func (d *DB) CleanupSessions() error {
 	return err
 }
 
+func (d *DB) RunResourceCleanup(ctx context.Context) {
+	_ = d.CleanupResourceHistory()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = d.CleanupResourceHistory()
+		}
+	}
+}
+
 func (d *DB) RunMaintenance(ctx context.Context) {
 	_ = d.CleanupSessions()
 	ticker := time.NewTicker(time.Hour)

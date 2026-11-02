@@ -22,6 +22,7 @@ import (
 
 type checker struct {
 	url, id, secret, path string
+	restartToken          string
 	client                *http.Client
 }
 type proof struct {
@@ -44,6 +45,12 @@ func (c checker) request(method, path string, body any, target any) error {
 		return err
 	}
 	r.SetBasicAuth(c.id, c.secret)
+	if method == "POST" && path == "/api/v1/operations/restart" {
+		if c.restartToken == "" {
+			return fmt.Errorf("AVOPS_RESTART_TOKEN required")
+		}
+		r.Header.Set("Authorization", "Bearer "+c.restartToken)
+	}
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
@@ -108,6 +115,7 @@ func main() {
 		}
 	}
 	c := checker{url: *base, id: values["AVOPS_ADMIN_ID"], secret: values["AVOPS_ADMIN_SECRET"], path: *statePath, client: &http.Client{Timeout: 5 * time.Second}}
+	c.restartToken = os.Getenv("AVOPS_RESTART_TOKEN")
 	if c.id == "" || c.secret == "" {
 		log.Fatal("private credentials unavailable")
 	}

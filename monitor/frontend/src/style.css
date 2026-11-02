@@ -213,13 +213,6 @@ body {
   margin: 8px 0;
   overflow-wrap: anywhere;
 }
-.node-host {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #8c8c8c;
-  font-size: 12px;
-}
 .node-service-row {
   display: flex;
   align-items: center;
@@ -247,11 +240,108 @@ body {
   background: #fafafa;
   white-space: nowrap;
 }
-.node-host-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #1677ff;
+.host-group + .host-group {
+  margin-top: 22px;
+}
+.host-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px 10px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+.host-group-header .anticon {
+  color: #60758d;
+  font-size: 15px;
+}
+.host-group-address {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.host-group-header > .ant-typography:last-child {
+  margin-left: 2px;
+}
+.metric-update-stale {
+  color: #d46b08;
+}
+.metric-update-stale small {
+  font-size: 11px;
+  font-weight: 400;
+}
+.resource-trends-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.resource-trends-toolbar > .ant-typography {
+  font-size: 12px;
+}
+.resource-trend-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.resource-trend-grid > .ant-card {
+  min-width: 0;
+}
+.resource-trend-grid .ant-card-head {
+  min-height: 42px;
+}
+.resource-trend-grid .ant-card-head-title {
+  font-size: 13px;
+}
+.resource-trend-grid .ant-card-extra {
+  font-size: 12px;
+}
+.resource-trend-grid .ant-card-body {
+  padding: 10px 12px;
+}
+.resource-trend-plot {
+  position: relative;
+}
+.resource-trend-canvas {
+  width: 100%;
+  height: 220px;
+}
+.resource-trend-empty {
+  position: absolute;
+  inset: 45% 12% auto;
+  text-align: center;
+  font-size: 12px;
+  color: #8c8c8c;
+  pointer-events: none;
+}
+.resource-trend-note,
+.resource-trend-footnote.ant-typography {
+  font-size: 11px;
+  color: #8c8c8c;
+  margin: 6px 0 0;
+}
+.resource-trend-footnote.ant-typography {
+  margin: 12px 0;
+}
+.resource-trend-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 3px;
+}
+.resource-trend-controls .ant-select {
+  min-width: 105px;
+  max-width: 220px;
+}
+@media (max-width: 760px) {
+  .resource-trend-grid {
+    grid-template-columns: 1fr;
+  }
+  .resource-trend-canvas {
+    height: 210px;
+  }
 }
 .node-layer {
   border-left: 1px solid #f0f0f0;
@@ -424,6 +514,9 @@ pre {
   }
 }
 @media (max-width: 600px) {
+  .metric-update-stale small {
+    display: block;
+  }
   .app-header.ant-layout-header {
     padding: 12px;
     gap: 8px;
@@ -681,6 +774,10 @@ pre {
   font-size: 12px;
   margin-top: 4px;
 }
+.service-counts .service-count-danger {
+  color: #cf1322;
+  font-weight: 600;
+}
 .service-panel .service-counts {
   color: #7a8698;
   font-size: 12px;
@@ -928,4 +1025,171 @@ pre {
 .filesystem-unified .ant-table-tbody .ant-table-cell:last-child,
 .lifecycle-unified .ant-table-tbody .ant-table-cell:last-child {
   font-variant-numeric: tabular-nums;
+}
+.inventory-heading .ant-typography {
+  margin-bottom: 0;
+}
+.inventory-mobile-jump {
+  display: none;
+}
+.inventory-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 350px;
+  gap: 20px;
+  align-items: start;
+}
+.inventory-main {
+  min-width: 0;
+}
+.inventory-main > .ant-card-body {
+  padding: 12px 20px 20px;
+}
+.inventory-main .table-footer {
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+}
+.inventory-main .table-footer > .ant-typography {
+  font-size: 12px;
+}
+.inventory-workbench {
+  position: sticky;
+  top: 16px;
+}
+.inventory-workbench > .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: min(560px, max(435px, calc(100vh - 350px)));
+  padding: 18px;
+}
+.inventory-assignment {
+  flex-shrink: 0;
+}
+.inventory-idle > .ant-card-body {
+  height: auto;
+}
+.inventory-idle .inventory-pending-list {
+  flex: none;
+}
+.inventory-assignment .ant-form-item {
+  margin-bottom: 14px;
+}
+.inventory-chosen {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 0 0 10px;
+}
+.inventory-pending-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 2px;
+}
+.inventory-pending-list {
+  flex: 1;
+  min-height: 90px;
+  overflow-y: auto;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.inventory-pending-list .ant-empty {
+  margin: 22px 8px;
+}
+.inventory-pending-list .ant-empty-description {
+  color: #8c8c8c;
+  font-size: 12px;
+}
+.inventory-pending-item {
+  padding: 9px 12px;
+  border-bottom: 1px solid #f0f0f0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.inventory-pending-item:last-child {
+  border-bottom: none;
+}
+.inventory-pending-item > .ant-typography {
+  font-size: 12px;
+}
+.inventory-pending-identity {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.inventory-pending-identity > .ant-typography {
+  flex: 1;
+  min-width: 0;
+}
+.inventory-pending-identity > .ant-btn {
+  flex-shrink: 0;
+  color: #8c8c8c;
+}
+.inventory-save-actions {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.inventory-save-hint {
+  font-size: 12px;
+}
+.inventory-main .ant-table-cell .ant-typography {
+  max-width: 100%;
+}
+.inventory-baseline > p {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+@media (max-width: 1050px) {
+  .inventory-layout {
+    grid-template-columns: minmax(0, 1fr) 310px;
+    gap: 12px;
+  }
+  .inventory-main > .ant-card-body {
+    padding: 12px;
+  }
+}
+@media (max-width: 760px) {
+  .inventory-screen {
+    padding-bottom: 76px;
+  }
+  .inventory-mobile-jump {
+    display: block;
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    width: calc(100% - 32px);
+    height: 42px;
+    z-index: 30;
+    box-shadow: 0 4px 16px #1677ff30;
+  }
+  .inventory-layout {
+    display: flex;
+    flex-direction: column;
+  }
+  .inventory-main,
+  .inventory-workbench {
+    width: 100%;
+  }
+  .inventory-workbench {
+    position: static;
+  }
+  .inventory-workbench > .ant-card-body {
+    height: auto;
+  }
+  .inventory-pending-list {
+    max-height: 240px;
+  }
+  .inventory-heading {
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .inventory-heading > .ant-typography:first-child {
+    font-size: 20px;
+  }
 }

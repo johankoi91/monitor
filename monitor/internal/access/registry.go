@@ -29,17 +29,19 @@ type Request struct {
 	KeyID       string    `json:"key_id,omitempty"`
 }
 type Key struct {
-	Kind      string    `json:"kind,omitempty"`
-	OwnerID   string    `json:"owner_id,omitempty"`
-	ID        string    `json:"key_id"`
-	Name      string    `json:"name"`
-	Purpose   string    `json:"purpose"`
-	CreatedAt time.Time `json:"created_at"`
-	CreatedBy string    `json:"created_by"`
-	Enabled   bool      `json:"enabled"`
-	RequestID string    `json:"request_id,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Kind      string     `json:"kind,omitempty"`
+	OwnerID   string     `json:"owner_id,omitempty"`
+	ID        string     `json:"key_id"`
+	Name      string     `json:"name"`
+	Purpose   string     `json:"purpose"`
+	CreatedAt time.Time  `json:"created_at"`
+	CreatedBy string     `json:"created_by"`
+	Enabled   bool       `json:"enabled"`
+	RequestID string     `json:"request_id,omitempty"`
 }
 type IssueRequest struct {
+	ExpiresHours   int    `json:"expires_hours,omitempty"`
 	OwnerID        string `json:"-"`
 	RequestID      string `json:"request_id,omitempty"`
 	Name           string `json:"name"`
@@ -49,6 +51,7 @@ type IssueRequest struct {
 type Issued struct {
 	Key    Key    `json:"key"`
 	Secret string `json:"secret"`
+	Token  string `json:"token,omitempty"`
 }
 type record struct {
 	At         time.Time `json:"at"`
@@ -157,8 +160,16 @@ func (r *Registry) Issue(input IssueRequest, source string) (Issued, error) {
 		return Issued{}, errors.New("仅支持签发重启安全 Key，请填写名称")
 	}
 	secret := random()
+	if input.ExpiresHours == 0 {
+		input.ExpiresHours = 24
+	}
+	if input.ExpiresHours < 1 || input.ExpiresHours > 720 {
+		return Issued{}, errors.New("Token有效期须为1至720小时")
+	}
+	expires := time.Now().UTC().Add(time.Duration(input.ExpiresHours) * time.Hour)
 	key := Key{Kind: string(credential.KindRestart), ID: "KEY-" + random()[:24], Name: input.Name, Purpose: input.Purpose, CreatedAt: time.Now().UTC(), CreatedBy: source, Enabled: true, RequestID: input.RequestID}
 	key.OwnerID = input.OwnerID
+	key.ExpiresAt = &expires
 	if request != nil {
 		request.Status = "ISSUED"
 		request.KeyID = key.ID
@@ -166,7 +177,7 @@ func (r *Registry) Issue(input IssueRequest, source string) (Issued, error) {
 	if err := r.persist(record{At: time.Now().UTC(), Kind: "ISSUE", Source: source, Key: &key, SecretHash: hash(secret), Request: request}); err != nil {
 		return Issued{}, err
 	}
-	return Issued{Key: key, Secret: secret}, nil
+	return Issued{Key: key, Secret: secret, Token: "rt_" + key.ID + "." + secret}, nil
 }
 func (r *Registry) Authenticate(id, secret string) (Key, bool) {
 	r.mu.Lock()
@@ -175,7 +186,18 @@ func (r *Registry) Authenticate(id, secret string) (Key, bool) {
 	actual := hash(secret)
 	expected := r.hashes[id]
 	valid := subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) == 1
-	return key, ok && key.Kind == string(credential.KindRestart) && key.Purpose == "RESTART" && key.Enabled && valid
+	return key, ok && key.Kind == string(credential.KindRestart) && key.Purpose == "RESTART" && key.Enabled && valid && (key.ExpiresAt == nil || time.Now().Before(*key.ExpiresAt))
+}
+func (r *Registry) AuthenticateToken(token string) (Key, bool) {
+	if !strings.HasPrefix(token, "rt_") {
+		return Key{}, false
+	}
+	id, secret, ok := strings.Cut(strings.TrimPrefix(token, "rt_"), ".")
+	if !ok {
+		return Key{}, false
+	}
+	k, valid := r.Authenticate(id, secret)
+	return k, valid && k.ExpiresAt != nil
 }
 func (r *Registry) Revoke(id, source string) error {
 	r.mu.Lock()

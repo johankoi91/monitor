@@ -113,8 +113,19 @@ func (s *Server) Handler() http.Handler {
 		valid := ok && equal(id, s.AdminID) && equal(secret, s.AdminSecret)
 		purpose := "ADMIN"
 		var account *identity.User
-		canManageKeys := valid
-		if s.Accounts != nil && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		var accessKey access.Key
+		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer rt_") && s.Access != nil {
+			accessKey, valid = s.Access.AuthenticateToken(bearer)
+			purpose = "RESTART"
+			id = accessKey.ID
+			if !valid {
+				failure(w, 401, "TOKEN_EXPIRED_OR_INVALID", "重启Token已过期、停用或无效")
+				return
+			}
+		}
+		canManageKeys := valid && purpose == "ADMIN"
+		if s.Accounts != nil && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") && !strings.HasPrefix(bearer, "rt_") {
 			u, e := s.Accounts.Authenticate(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 			if e != nil {
 				identityProblem(w, e)
@@ -126,11 +137,14 @@ func (s *Server) Handler() http.Handler {
 			id = "user:" + u.ID
 			canManageKeys = identity.Has(u, "keys.manage")
 		}
-		var accessKey access.Key
 		limitedKeyOwner := false
 		if !valid && s.Access != nil && ok {
 			accessKey, valid = s.Access.Authenticate(id, secret)
 			purpose = accessKey.Purpose
+			if valid {
+				failure(w, 401, "TOKEN_REQUIRED", "重启REST接口请使用Bearer Token")
+				return
+			}
 		}
 		if r.URL.Path == "/api/v1/agent/connect" {
 			a, exists := s.Store.Agent(id)
@@ -158,7 +172,7 @@ func (s *Server) Handler() http.Handler {
 				p := routePermission(path, r.Method)
 				customer := identity.User{Permissions: []string{"monitor.read", "notifications.write"}}
 				if p != "" && !identity.Has(customer, p) {
-					failure(w, 403, "KEY_OWNER_REQUIRED", "此模块仅 Agora 人员可访问；机器 Key 须绑定有权限的 Agora 账号")
+					failure(w, 403, "KEY_OWNER_REQUIRED", "此模块仅 管理者可访问；机器 Key 须绑定有权限的 管理者账号")
 					return
 				}
 			}
@@ -203,9 +217,9 @@ func (s *Server) Handler() http.Handler {
 			restartWrite := r.Method == "POST" && (path == "/api/v1/operations/restart" || strings.HasSuffix(path, "/resolve"))
 			if restartWrite && account != nil {
 				var keyValid bool
-				accessKey, keyValid = s.Access.Authenticate(r.Header.Get("X-AVOPS-Restart-Key-ID"), r.Header.Get("X-AVOPS-Restart-Key-Secret"))
+				accessKey, keyValid = s.Access.AuthenticateToken(r.Header.Get("X-AVOPS-Restart-Token"))
 				if !keyValid || accessKey.Purpose != "RESTART" {
-					failure(w, 403, "RESTART_KEY_REQUIRED", "角色权限之外仍须独立重启安全 Key")
+					failure(w, 403, "RESTART_KEY_REQUIRED", "请提供有效且未过期的重启Token")
 					return
 				}
 				if accessKey.OwnerID != "" && accessKey.OwnerID != account.ID {
@@ -224,7 +238,7 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			if strings.HasPrefix(path, "/api/v1/access-keys") && !canManageKeys {
-				failure(w, 403, "KEY_MANAGEMENT_DENIED", "仅 Agora 人员账号可以签发或停用密钥")
+				failure(w, 403, "KEY_MANAGEMENT_DENIED", "仅 管理者账号可以签发或停用密钥")
 				return
 			}
 			if purpose == "RESTART" && account == nil && !(path == "/version" || path == "/api/v1/operations/restart" || strings.HasPrefix(path, "/api/v1/operations/")) {
@@ -306,7 +320,7 @@ func (s *Server) Handler() http.Handler {
 				failure(w, 400, "KEY_ISSUE_REJECTED", err.Error())
 				return
 			}
-			send(w, 201, issued)
+			send(w, 201, map[string]any{"key": issued.Key, "token": issued.Token})
 		case strings.HasPrefix(path, "/api/v1/access-keys/") && strings.HasSuffix(path, "/revoke"):
 			if r.Method != "POST" {
 				method(w)
@@ -443,7 +457,7 @@ func (s *Server) Handler() http.Handler {
 				failure(w, 503, "NOTIFIER_UNAVAILABLE", "通知服务不可用")
 				return
 			}
-			result, err := s.Notifier.Probe(r.Context(), s.Store.config.Site.Code)
+			result, err := s.Notifier.ProbeEndpoint(r.Context(), s.Store.config.Site.Code, r.URL.Query().Get("target_id"))
 			if err != nil {
 				failure(w, 400, "WEBHOOK_TEST_FAILED", err.Error())
 				return
@@ -616,13 +630,18 @@ func (s *Server) Handler() http.Handler {
 				writeProblem(w, err)
 				return
 			}
-			startup, err := s.Store.RequestStartup(r.Context(), parts[0], parts[1])
+			send(w, 200, detail)
+		case path == "/api/v1/nodes/resource-history":
+			if r.Method != "GET" {
+				method(w)
+				return
+			}
+			view, err := s.Store.ResourceHistory(r.Context(), r.URL.Query().Get("node_id"), r.URL.Query().Get("range"))
 			if err != nil {
 				writeProblem(w, err)
 				return
 			}
-			detail.(map[string]any)["startup"] = startup.(map[string]any)["startup"]
-			send(w, 200, detail)
+			send(w, 200, view)
 		case path == "/api/v1/nodes/startup":
 			if r.Method != "GET" {
 				method(w)
@@ -770,7 +789,15 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	filtered := []model.Container{}
+	selectable := q.Get("selectable_only")
+	if selectable != "" && selectable != "true" && selectable != "false" {
+		failure(w, 400, "INVALID_FILTER", "可选择状态筛选不合法")
+		return
+	}
 	for _, c := range s.Store.Containers() {
+		if selectable == "true" && (c.Managed || !c.AgentOnline || c.Stale) {
+			continue
+		}
 		if q.Get("agent_id") != "" && q.Get("agent_id") != c.AgentID {
 			continue
 		}
@@ -827,13 +854,6 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request, id string) {
 					}
 					revision = plan.Revision
 				}
-				for _, request := range s.Store.StartupCommands(id, session) {
-					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-					if conn.WriteJSON(request) != nil {
-						conn.Close()
-						return
-					}
-				}
 				tasks, acks := s.Store.Commands(id, session)
 				for _, task := range tasks {
 					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -884,12 +904,6 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request, id string) {
 			if s.Store.Receive(id, session, report) != nil {
 				return
 			}
-		case "startup_result":
-			var result model.StartupResult
-			if dec.Decode(&result) != nil || dec.Decode(&struct{}{}) != io.EOF {
-				return
-			}
-			s.Store.ReceiveStartup(id, session, result)
 		case "task_result":
 			var result model.TaskResult
 			if dec.Decode(&result) != nil || dec.Decode(&struct{}{}) != io.EOF {

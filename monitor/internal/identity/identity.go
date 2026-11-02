@@ -294,6 +294,17 @@ func (s *Service) Login(username, password, ip string) (string, User, time.Time,
 		return "", User{}, time.Time{}, e
 	}
 	defer tx.Rollback()
+	// Serialize logins for one account: only the last committed token survives.
+	var currentStatus string
+	if e = tx.QueryRowContext(context, "SELECT status FROM avops.users WHERE user_id=$1 FOR UPDATE", uid).Scan(&currentStatus); e != nil {
+		return "", User{}, time.Time{}, e
+	}
+	if currentStatus != "ACTIVE" {
+		return "", User{}, time.Time{}, problem(403, "ACCOUNT_INACTIVE", "账号状态已变化")
+	}
+	if _, e = tx.ExecContext(context, "UPDATE avops.sessions SET revoked=true WHERE user_id=$1 AND NOT revoked", uid); e != nil {
+		return "", User{}, time.Time{}, e
+	}
 	result, e := tx.ExecContext(context, "INSERT INTO avops.sessions(token_hash,user_id,expires_at) SELECT $1,user_id,$2 FROM avops.users WHERE user_id=$3 AND status='ACTIVE'", tokenHash(token), expires, uid)
 	if e != nil {
 		return "", User{}, time.Time{}, e
@@ -315,6 +326,11 @@ func (s *Service) Authenticate(token string) (User, error) {
 	var uid string
 	err := s.db.QueryRowContext(context, "SELECT s.user_id FROM avops.sessions s JOIN avops.users u USING(user_id) WHERE s.token_hash=$1 AND NOT s.revoked AND s.expires_at>now() AND u.status='ACTIVE'", tokenHash(token)).Scan(&uid)
 	if err == sql.ErrNoRows {
+		var replaced bool
+		_ = s.db.QueryRowContext(context, "SELECT EXISTS(SELECT 1 FROM avops.sessions s WHERE token_hash=$1 AND revoked AND expires_at>now() AND EXISTS(SELECT 1 FROM avops.sessions n WHERE n.user_id=s.user_id AND NOT n.revoked AND n.expires_at>now()))", tokenHash(token)).Scan(&replaced)
+		if replaced {
+			return User{}, problem(401, "SESSION_REPLACED", "账号已在其他位置登录，请重新登录")
+		}
 		return User{}, problem(401, "SESSION_EXPIRED", "会话失效，请重新登录")
 	}
 	if err != nil {
