@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import Tabs from "antd/es/tabs";
 import Typography from "antd/es/typography";
 import Table from "antd/es/table";
@@ -10,7 +10,6 @@ import type {
 import { MetricIcon } from "./MetricUI";
 import ResourceTrends from "./ResourceTrends";
 import type { API } from "./api";
-import { useViewParam } from "./viewState";
 
 const reasons: Record<string, string> = {
   CADVISOR_UNAVAILABLE: "采集器暂时不可用",
@@ -239,17 +238,15 @@ export default function Resources({
   startup?: ReactNode;
   detailsOpen: boolean;
 }) {
-  const [tab, setTab] = useViewParam("resourceTab", "resources");
-  const current =
-    !dataStale && !!value && !value.stale && value.status !== "UNAVAILABLE";
+  const [tab, setTab] = useState("resources");
+  const current = !!value && !value.stale && value.status !== "UNAVAILABLE";
   const f = value?.host_filesystem;
   const storageCurrent =
-    !dataStale &&
     !!f &&
     Date.now() - Date.parse(f.collected_at) <= 45000 &&
     Date.parse(f.collected_at) <= Date.now() + 5000;
   const liveDuration =
-    !dataStale && runtime === "running" && lifecycle && !lifecycle.stale
+    runtime === "running" && lifecycle && !lifecycle.stale
       ? duration(lifecycle.started_at)
       : "—";
   return (

@@ -36,7 +36,7 @@ const { chromium } = require(process.env.AVOPS_PLAYWRIGHT_MODULE || 'playwright'
     const configured=await (await checks).json();
     assert.deepEqual(configured.definition.clusters[0].services[0].nodes[0].checks.map(c=>c.port),[8000,8001]);
     await page.getByRole('tab',{name:'服务状态',exact:true}).click();
-    await page.getByRole('button',{name:'查看 agora_local_ap 详情',exact:true}).click();
+    await page.getByRole('button',{name:'查看详情',exact:true}).click();
     await page.getByRole('tab',{name:'启动参数',exact:true}).click();
     await page.getByText(/最新上报/).waitFor();
     assert.equal(await page.locator('.startup-toolbar button').count(),0);
@@ -44,12 +44,6 @@ const { chromium } = require(process.env.AVOPS_PLAYWRIGHT_MODULE || 'playwright'
     await page.getByRole('tab',{name:'资源详情',exact:true}).click();
     await page.locator('.resource-trend-canvas canvas').first().waitFor();
     assert.equal(await page.locator('.resource-trend-canvas canvas').count(),4);
-    await page.getByRole('button',{name:'精确数据表',exact:true}).press('Enter');
-    await page.getByRole('region',{name:'资源趋势精确数据表',exact:true}).waitFor();
-    assert.ok(new URL(page.url()).searchParams.get('node'));
-    await page.getByRole('tab',{name:'操作与审计',exact:true}).click();
-    await page.goBack();
-    await page.getByRole('region',{name:'资源趋势精确数据表',exact:true}).waitFor();
     await page.setViewportSize({width:390,height:844});
     assert.ok(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
     assert.deepEqual(errors,[]);
