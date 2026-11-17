@@ -28,18 +28,18 @@ import Typography from "antd/es/typography";
 import Dropdown from "antd/es/dropdown";
 import Tabs from "antd/es/tabs";
 import Layout from "antd/es/layout";
-import { DownOutlined, CloudServerOutlined } from "@ant-design/icons";
+import { DownOutlined } from "@ant-design/icons";
+import Grid from "antd/es/grid";
+import ServiceStatusPanel from "./ServiceStatusPanel";
+import { useViewParam, useFreshness } from "./viewState";
 import { client, type API } from "./api";
 import { checksForPorts } from "./checks";
 import { resolveGroup } from "./groups";
 import NotificationSettingsForm from "./NotificationSettings";
 import StorageStatus from "./StorageStatus";
 import RTCProbes from "./RTCProbes";
-import RTCOverview from "./RTCOverview";
 import AccessKeys from "./AccessKeys";
-import Resources from "./Resources";
 import Operations, { OperationDetails } from "./Operations";
-import StartupParameters from "./StartupParameters";
 import Accounts, {
   Register,
   PasswordChange,
@@ -90,11 +90,6 @@ function Badge({ value, label }: { value: string; label?: string }) {
     <Tag color={colors[value] || "default"}>
       {label || operationLabels[value] || value}
     </Tag>
-  );
-}
-function Empty({ children }: { children: ReactNode }) {
-  return (
-    <AntEmpty image={AntEmpty.PRESENTED_IMAGE_SIMPLE} description={children} />
   );
 }
 function Modal({
@@ -306,7 +301,7 @@ export default function App() {
           </div>
         )}
       </Layout.Header>
-      <Layout.Content className="app-content">
+      <Layout.Content className="app-content" tabIndex={-1}>
         {restoring ? (
           <Card className="page-card login-panel">登录状态恢复中…</Card>
         ) : authorization ? (
@@ -358,21 +353,44 @@ function Workspace({
   permissions: string[];
 }) {
   const can = (p: string) => permissions.includes(p);
-  const [tab, setTab] = useState(
-      can("monitor.read")
-        ? "status"
-        : can("users.manage") || can("roles.manage")
-          ? "accounts"
-          : "access",
-    ),
-    [notice, setNotice] = useState(""),
+  const defaultTab = can("monitor.read")
+    ? "status"
+    : can("users.manage") || can("roles.manage")
+      ? "accounts"
+      : "access";
+  const [tabValue, setTab] = useViewParam("view", defaultTab, "push");
+  const tab = [
+    "status",
+    "rtc",
+    "notifications",
+    "inventory",
+    "operations",
+    "access",
+    "accounts",
+  ].includes(tabValue)
+    ? tabValue
+    : defaultTab;
+  const screens = Grid.useBreakpoint();
+  const [readStates, setReadStates] = useState<
+    Record<string, { loading: boolean; loadedAt: number; error: string }>
+  >({});
+  const readState = readStates[tab] || {
+    loading: true,
+    loadedAt: 0,
+    error: "",
+  };
+  const stale = useFreshness(readState.loadedAt, readState.error);
+  useEffect(() => {
+    document
+      .querySelector<HTMLElement>(".app-content")
+      ?.focus({ preventScroll: true });
+  }, [tab]);
+  const [notice, setNotice] = useState(""),
     [noticeType, setNoticeType] = useState<"info" | "error">("info"),
     [baseline, setBaseline] = useState<Baseline | null>(null),
     [agents, setAgents] = useState<Agent[]>([]),
     [status, setStatus] = useState<ServiceStatus[]>([]),
-    [statusGroup, setStatusGroup] = useState(""),
     [notificationCategory, setNotificationCategory] = useState(""),
-    [statusHost, setStatusHost] = useState(""),
     [operations, setOperations] = useState<Operation[]>([]),
     [notifications, setNotifications] = useState<Notifications>({
       enabled: false,
@@ -380,6 +398,8 @@ function Workspace({
   const [filters, setFilters] = useState({
       agent_id: "",
       runtime_status: "running",
+      name: "",
+      image: "",
     }),
     [query, setQuery] = useState(filters),
     [page, setPage] = useState(1),
@@ -388,12 +408,12 @@ function Workspace({
   const [chosen, setChosen] = useState<Map<string, Container>>(new Map()),
     [additions, setAdditions] = useState<Map<string, Addition>>(new Map()),
     [removals, setRemovals] = useState<Set<string>>(new Set()),
-    [expandedStatusDetails, setExpandedStatusDetails] = useState<Set<string>>(
-      new Set(),
-    ),
     [saving, setSaving] = useState(false);
   const [groupName, setGroupName] = useState("");
-  const [inventoryPane, setInventoryPane] = useState("discovery");
+  const [inventoryPane, setInventoryPane] = useViewParam(
+    "inventoryPane",
+    "discovery",
+  );
   const [tcpPort, setTCPPort] = useState("");
   const [detail, setDetail] = useState<unknown>(null),
     [portsNode, setPortsNode] = useState<Node | null>(null),
@@ -439,6 +459,10 @@ function Workspace({
   const reload = useCallback(async () => {
     if (!permissions.includes("monitor.read")) return;
     const generation = ++requestGeneration.current;
+    setReadStates((old) => ({
+      ...old,
+      [tab]: { ...(old[tab] || { loadedAt: 0, error: "" }), loading: true },
+    }));
     try {
       const params = new URLSearchParams({
         ...query,
@@ -490,8 +514,20 @@ function Workspace({
       if (a) setAgents(a.agents);
       if (s) setStatus(s.services);
       if (n) setNotifications(n);
+      setReadStates((old) => ({
+        ...old,
+        [tab]: { loading: false, loadedAt: Date.now(), error: "" },
+      }));
     } catch (e) {
-      showNotice(message(e), "error");
+      if (generation === requestGeneration.current)
+        setReadStates((old) => ({
+          ...old,
+          [tab]: {
+            loadedAt: old[tab]?.loadedAt || 0,
+            loading: false,
+            error: message(e),
+          },
+        }));
     }
   }, [api, query, page, permissions, tab, loadOperations]);
   useEffect(() => {
@@ -529,60 +565,6 @@ function Workspace({
   const memberGroups = new Map(
     members.map((n) => [n.id, n.cluster.name || n.cluster.code]),
   );
-  const statusGroups = [
-    ...status
-      .reduce((groups, service) => {
-        const group = groups.get(service.cluster_code);
-        if (group) group.nodes.push(...service.nodes);
-        else
-          groups.set(service.cluster_code, {
-            ...service,
-            nodes: [...service.nodes],
-          });
-        return groups;
-      }, new Map<string, ServiceStatus>())
-      .values(),
-  ].filter((group) => group.nodes.length > 0);
-  const statusHosts = [
-    ...new Set(status.flatMap((s) => s.nodes.map((n) => n.host_address))),
-  ].sort();
-  const visibleStatus = statusGroups
-    .filter((s) => !statusGroup || s.cluster_code === statusGroup)
-    .map((s) => {
-      const nodes = s.nodes.filter(
-        (n) => !statusHost || n.host_address === statusHost,
-      );
-      const healthy = nodes.filter((n) => n.status === "HEALTHY").length;
-      const unhealthy = nodes.filter((n) => n.status === "UNHEALTHY").length;
-      const visibleHealth =
-        nodes.length && healthy === nodes.length
-          ? "HEALTHY"
-          : healthy > 0
-            ? "DEGRADED"
-            : unhealthy > 0
-              ? "UNHEALTHY"
-              : "UNKNOWN";
-      const hosts = [
-        ...nodes
-          .reduce((map, node) => {
-            const list = map.get(node.host_address) || [];
-            list.push(node);
-            map.set(node.host_address, list);
-            return map;
-          }, new Map<string, NodeStatus[]>())
-          .entries(),
-      ].map(([address, nodes]) => ({ address, nodes }));
-      return {
-        ...s,
-        hosts,
-        nodes,
-        status: visibleHealth,
-        healthy_node_count: healthy,
-        unhealthy_node_count: unhealthy,
-        unknown_node_count: nodes.filter((n) => n.status === "UNKNOWN").length,
-      };
-    })
-    .filter((s) => s.nodes.length > 0);
   const eligible = (c: Container) => c.agent_online && !c.stale && !c.managed;
   function select(c: Container, checked: boolean) {
     setChosen((previous) => {
@@ -756,176 +738,38 @@ function Workspace({
           className="page-alert"
         />
       )}
+      {tab !== "status" && readState.error && (
+        <Alert
+          className="page-alert"
+          type="warning"
+          showIcon
+          message={readState.error}
+          description={
+            readState.loadedAt
+              ? "当前保留最后成功快照，状态待确认。"
+              : "尚未获取有效数据，请重试。"
+          }
+          action={
+            <Button loading={readState.loading} onClick={() => void reload()}>
+              重试
+            </Button>
+          }
+        />
+      )}
       {tab === "status" && (
-        <section>
-          <Typography.Title level={2}>服务状态</Typography.Title>
-          <Typography.Paragraph type="secondary">
-            容器与就绪检查
-          </Typography.Paragraph>
-          {can("monitor.read") && <RTCOverview api={api} onOpen={() => setTab("rtc")} />}
-          <Form layout="vertical" className="filters status-filters">
-            <Form.Item label="主机 IP">
-              <Select
-                style={{ minWidth: 200 }}
-                value={statusHost}
-                onChange={setStatusHost}
-                options={[
-                  { value: "", label: "全部主机" },
-                  ...statusHosts.map((value) => ({ value, label: value })),
-                ]}
-              />
-            </Form.Item>
-            <Form.Item label="分组名" htmlFor="app-field-status-group">
-              <Select
-                id="app-field-status-group"
-                style={{ minWidth: 240, width: "100%" }}
-                value={statusGroup}
-                onChange={setStatusGroup}
-              >
-                <Select.Option value="">全部分组</Select.Option>
-                {statusGroups.map((group) => (
-                  <Select.Option
-                    key={group.cluster_code}
-                    value={group.cluster_code}
-                  >
-                    {group.group_name || group.cluster_code}
-                  </Select.Option>
-                ))}
-              </Select>
-            </Form.Item>
-          </Form>
-          {!status.length && (
-            <Empty>尚未保存基准。进入“容器与基准台账”选择要监控的容器。</Empty>
-          )}
-          {status.length > 0 && !visibleStatus.length && (
-            <Empty>没有匹配的分组状态。</Empty>
-          )}
-          {visibleStatus.map((s) => (
-            <Card className="page-card service-panel" key={s.cluster_code}>
-              <div className="section-title">
-                <Typography.Title level={3}>
-                  {s.group_name || s.cluster_code}
-                </Typography.Title>
-              </div>
-              <p className="service-counts">
-                {s.nodes.length} 个容器 · 正常 {s.healthy_node_count} · 异常{" "}
-                <span
-                  className={
-                    s.unhealthy_node_count > 0
-                      ? "service-count-danger"
-                      : undefined
-                  }
-                >
-                  {s.unhealthy_node_count}
-                </span>{" "}
-                · 未知{" "}
-                <span
-                  className={
-                    s.unknown_node_count > 0
-                      ? "service-count-danger"
-                      : undefined
-                  }
-                >
-                  {s.unknown_node_count}
-                </span>
-              </p>
-              {s.hosts.map((host) => (
-                <section
-                  className="host-group"
-                  key={host.address}
-                  aria-label={`主机 ${host.address}`}
-                >
-                  <div className="host-group-header">
-                    <CloudServerOutlined />
-                    <Typography.Text strong className="host-group-address">
-                      {host.address}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
-                      {host.nodes.length} 个容器
-                    </Typography.Text>
-                  </div>
-                  {host.nodes.map((n) => (
-                    <div className="node-card" key={n.node_id}>
-                      <div className="node-card-header">
-                        <div className="node-identity">
-                          <div className="node-service-row">
-                            <div className="node-service-info">
-                              <Typography.Title level={4}>
-                                {n.container_name}
-                              </Typography.Title>
-                            </div>
-                            <div className="node-actions node-action-group">
-                              <Badge
-                                value={n.status}
-                                label={
-                                  {
-                                    HEALTHY: "正常",
-                                    UNHEALTHY: "异常",
-                                    DEGRADED: "部分异常",
-                                    UNKNOWN: "未知",
-                                  }[n.status] || n.status
-                                }
-                              />
-                              {can("restart.execute") && (
-                                <Button
-                                  className="node-restart-button"
-                                  disabled={
-                                    !n.restart_enabled ||
-                                    !can("restart.execute")
-                                  }
-                                  title={
-                                    !can("restart.execute")
-                                      ? "当前角色无重启权限"
-                                      : !n.restart_enabled
-                                        ? "当前基准未开放重启"
-                                        : n.restart_allowed
-                                          ? "需要独立重启 Token"
-                                          : n.restart_block_reason ||
-                                            "当前暂不可重启"
-                                  }
-                                  onClick={() => setRestart(n)}
-                                >
-                                  重启
-                                </Button>
-                              )}
-                              <Button
-                                onClick={() =>
-                                  setExpandedStatusDetails((previous) => {
-                                    const next = new Set(previous);
-                                    if (next.has(n.node_id))
-                                      next.delete(n.node_id);
-                                    else next.add(n.node_id);
-                                    return next;
-                                  })
-                                }
-                              >
-                                查看详情
-                              </Button>
-                            </div>
-                          </div>
-                          {n.status !== "HEALTHY" && (
-                            <div className="node-observation">{n.reason}</div>
-                          )}
-                        </div>
-                      </div>
-                      <Resources
-                        api={api}
-                        nodeID={n.node_id}
-                        value={n.resources}
-                        lifecycle={n.lifecycle}
-                        runtime={n.runtime_status}
-                        updatedAt={n.collected_at}
-                        dataStale={n.stale}
-                        startup={<StartupParameters data={n.startup_record} />}
-                        detailsOpen={expandedStatusDetails.has(n.node_id)}
-                      />
-                    </div>
-                  ))}
-                </section>
-              ))}
-            </Card>
-          ))}
-        </section>
+        <ServiceStatusPanel
+          api={api}
+          services={status}
+          loading={readState.loading}
+          loadedAt={readState.loadedAt}
+          error={readState.error}
+          stale={stale}
+          onRefresh={() => void reload()}
+          onInventory={() => setTab("inventory")}
+          onRTC={() => setTab("rtc")}
+          canRestart={can("restart.execute")}
+          onRestart={setRestart}
+        />
       )}
       {tab === "rtc" && can("monitor.read") && (
         <RTCProbes
@@ -1009,16 +853,43 @@ function Workspace({
                               ))}
                             </Select>
                           </Form.Item>
-                          <Button htmlType="submit">筛选</Button>
+                          <Form.Item label="容器名称" htmlFor="inventory-name">
+                            <Input
+                              id="inventory-name"
+                              allowClear
+                              value={filters.name}
+                              onChange={(e) =>
+                                setFilters({ ...filters, name: e.target.value })
+                              }
+                            />
+                          </Form.Item>
+                          <Form.Item label="镜像" htmlFor="inventory-image">
+                            <Input
+                              id="inventory-image"
+                              allowClear
+                              value={filters.image}
+                              onChange={(e) =>
+                                setFilters({
+                                  ...filters,
+                                  image: e.target.value,
+                                })
+                              }
+                            />
+                          </Form.Item>
+                          <Button htmlType="submit" loading={readState.loading}>
+                            筛选
+                          </Button>
                         </Form>
                         <Table<Container>
                           rowKey={key}
+                          loading={readState.loading && !readState.loadedAt}
+                          tableLayout="fixed"
                           dataSource={containers}
                           locale={{ emptyText: "暂无符合筛选条件的未纳管容器" }}
                           pagination={false}
                           size="small"
                           scroll={{
-                            x: 840,
+                            x: screens.md ? 840 : undefined,
                             y: "max(220px, calc(100vh - 410px))",
                           }}
                           rowSelection={{
@@ -1034,15 +905,9 @@ function Workspace({
                           }}
                           columns={[
                             {
-                              title: "主机 IP",
-                              dataIndex: "host_address",
-                              width: 160,
-                            },
-                            {
                               title: "容器 / 镜像",
                               key: "container",
-                              width: 260,
-                              ellipsis: true,
+                              width: screens.md ? 260 : undefined,
                               render: (_, c) => (
                                 <>
                                   <Typography.Text strong>
@@ -1050,16 +915,22 @@ function Workspace({
                                   </Typography.Text>
                                   <div>
                                     <Typography.Text type="secondary">
-                                      {c.image}
+                                      {screens.md ? c.image : c.host_address}
                                     </Typography.Text>
                                   </div>
                                 </>
                               ),
                             },
                             {
+                              title: "主机 IP",
+                              dataIndex: "host_address",
+                              width: 160,
+                              responsive: ["md"],
+                            },
+                            {
                               title: "运行态",
                               key: "state",
-                              width: 120,
+                              width: screens.md ? 120 : 80,
                               render: (_, c) => (
                                 <>
                                   <Badge
@@ -1086,12 +957,14 @@ function Workspace({
                               title: "采集时间",
                               dataIndex: "collected_at",
                               width: 180,
+                              responsive: ["lg"],
                               render: stamp,
                             },
                             {
                               title: "操作",
                               key: "actions",
-                              width: 90,
+                              width: screens.md ? 90 : 60,
+                              fixed: screens.md ? "right" : undefined,
                               render: (_, c) => (
                                 <Button
                                   type="link"

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Alert from "antd/es/alert";
+import { useViewParam, useFreshness } from "./viewState";
 import Button from "antd/es/button";
 import Card from "antd/es/card";
 import Descriptions from "antd/es/descriptions";
@@ -270,19 +271,29 @@ export default function RTCProbes({
     [error, setError] = useState(""),
     [disabled, setDisabled] = useState(false),
     [busy, setBusy] = useState(""),
-    [selected, setSelected] = useState<string | null>(null),
-    [edit, setEdit] = useState<Edit | null>(null),
-    [pane, setPane] = useState("tasks");
+    [edit, setEdit] = useState<Edit | null>(null);
+  const [pane, setPane] = useViewParam("rtcPane", "tasks");
+  const [selectedValue, selectRun] = useViewParam("rtcRun");
+  const selected = selectedValue || null;
+  const setSelected = (value: string | null) => selectRun(value || "");
+  const [historyPageValue, setHistoryPageValue] = useViewParam("rtcPage", "1");
+  const historyPage = Math.max(1, Number(historyPageValue) || 1);
+  const setHistoryPage = (value: number) => setHistoryPageValue(String(value));
+  const [refreshing, setRefreshing] = useState(true);
+  const [loadedAt, setLoadedAt] = useState(0);
+  const [refreshError, setRefreshError] = useState("");
+  const stale = useFreshness(loadedAt, refreshError);
+  const [pendingProbe, setPendingProbe] = useState<Probe | null>(null);
   const [registerProbe, setRegisterProbe] = useState(false);
  const [nativeTask,setNativeTask]=useState<string|null>(null);
   const [history, setHistory] = useState<Run[]>([]),
-    [historyTotal, setHistoryTotal] = useState(0),
-    [historyPage, setHistoryPage] = useState(1);
+    [historyTotal, setHistoryTotal] = useState(0);
   const active = useRef(true),
     fetching = useRef(false);
   const refresh = useCallback(async () => {
     if (fetching.current) return;
     fetching.current = true;
+    setRefreshing(true);
     try {
       const result = await api.get<Snapshot>("/api/v1/rtc/status");
       if (active.current) {
@@ -294,15 +305,19 @@ export default function RTCProbes({
           runs: result.runs || [],
         });
         setError("");
+        setLoadedAt(Date.now());
+        setRefreshError("");
         setDisabled(false);
       }
     } catch (e) {
       if (active.current) {
         setDisabled(e instanceof APIError && e.code === "RTC_PROBE_DISABLED");
         setError(errorText(e));
+        setRefreshError(errorText(e));
       }
     } finally {
       fetching.current = false;
+      if (active.current) setRefreshing(false);
     }
   }, [api]);
   useEffect(() => {
@@ -323,8 +338,10 @@ export default function RTCProbes({
     try {
       await api.post(path, body);
       await refresh();
+      return true;
     } catch (e) {
       setError(errorText(e));
+      return false;
     } finally {
       setBusy("");
     }
@@ -373,6 +390,7 @@ export default function RTCProbes({
         <div>
           <Typography.Title level={2}>RTC 业务探测</Typography.Title>
         </div>
+        <Space wrap><Typography.Text type="secondary">{loadedAt ? `最后成功读取 ${time(new Date(loadedAt).toISOString())}${stale ? " · 历史快照，当前状态待确认" : ""}` : "正在读取状态…"}</Typography.Text><Button onClick={() => void refresh()} loading={refreshing}>刷新</Button></Space>
       </div>
       {disabled ? (
         <Card>
@@ -389,6 +407,8 @@ export default function RTCProbes({
               type="error"
               showIcon
               message={error}
+              description={data ? stale ? "以下为最后成功快照，当前业务状态与探针在线状态待确认。" : "操作未完成，请核对原因后重试。" : "尚未获取有效数据，请重试。"}
+              action={<Button onClick={() => void refresh()} loading={refreshing}>重试</Button>}
             />
           )}
           {data?.storage_available === false && (
@@ -405,21 +425,21 @@ export default function RTCProbes({
                 整体服务业务状态
               </Typography.Text>
               <div className="rtc-summary-value">
-                {data?.rtc_service_status === "HEALTHY"
+                {!data ? "读取中…" : stale ? "状态待确认" : !data.targets.length ? "未配置" : !data.tasks.length ? "待创建任务" : data?.rtc_service_status === "HEALTHY"
                   ? "已配置路径正常"
                   : data?.rtc_service_status === "UNHEALTHY"
                     ? "存在异常路径"
                     : "待有效证据"}
               </div>
               <Typography.Text type="secondary">
-                {data?.targets.length || 0} 个目标服务
+                {data ? data.targets.length : "—"} 个目标服务
               </Typography.Text>
             </Card>
             <Card size="small">
               <Typography.Text type="secondary">在线探针</Typography.Text>
               <div className="rtc-summary-value">
-                {data?.probes.filter((p) => p.online).length || 0}
-                <small> / {data?.probes.length || 0}</small>
+                {!data || stale ? "—" : data.probes.filter((p) => p.online).length}
+                <small> / {data ? data.probes.length : "—"}{stale ? "（快照）" : ""}</small>
               </div>
               <Typography.Text type="secondary">
                 连接在线与业务状态分别显示
@@ -428,10 +448,10 @@ export default function RTCProbes({
             <Card size="small">
               <Typography.Text type="secondary">已启用任务</Typography.Text>
               <div className="rtc-summary-value">
-                {data?.tasks.filter((t) => t.enabled).length || 0}
+                {!data || stale ? "—" : data.tasks.filter((t) => t.enabled).length}
               </div>
               <Typography.Text type="secondary">
-                {data?.runs.filter((r) => !r.parent_run_id && !terminal(r.status)).length || 0}{" "}
+                {!data || stale ? "—" : data.runs.filter((r) => !r.parent_run_id && !terminal(r.status)).length}{" "}
                 轮执行中
               </Typography.Text>
             </Card>
@@ -473,11 +493,12 @@ export default function RTCProbes({
                       <Table<Task>
                         rowKey="task_id"
                         dataSource={data?.tasks || []}
+                        loading={!data && refreshing}
                         scroll={{ x: 1000 }}
                         size="small"
                         pagination={false}
                         locale={{
-                          emptyText: "暂无探测任务，请先登记探针并创建目标服务",
+                          emptyText: !data ? "正在读取任务…" : <Space direction="vertical"><Typography.Text>{!data.probes.some(p => p.driver === "agora") ? "尚未登记支持 RTC 的探针" : !data.targets.length ? "探针已登记，还需创建目标服务" : "暂无探测任务"}</Typography.Text>{canManage && <Button disabled={stale} onClick={() => !data.probes.some(p => p.driver === "agora") ? setRegisterProbe(true) : !data.targets.length ? setEdit({ kind: "target" }) : setEdit({ kind: "task" })}>{!data.probes.some(p => p.driver === "agora") ? "去登记探针" : !data.targets.length ? "去创建目标服务" : "去创建任务"}</Button>}</Space>,
                         }}
                         columns={[
                           {
@@ -517,6 +538,7 @@ export default function RTCProbes({
                             width: 170,
                             render: (_, t) => {
                               const h = data?.task_health?.[t.task_id];
+                              if (stale) return <Tag color="warning">当前状态待确认</Tag>;
                               return h ? (
                                 <>
                                   <Tag
@@ -559,9 +581,9 @@ export default function RTCProbes({
                               return <Space wrap>
                                 <Button size="small" disabled={!latest && !targetRTC(t)?.native_coverage} onClick={()=>targetRTC(t)?.native_coverage?setNativeTask(t.task_id):latest && setSelected(latest)}>详情</Button>
                                 {canManage && <>
-                                  <Button size="small" type="primary" disabled={!t.enabled || !!busy || !!data?.runs.some(r=>r.task_id===t.task_id && !terminal(r.status))} loading={busy===t.task_id} onClick={()=>void operate(t.task_id,`/api/v1/rtc/tasks/${t.task_id}/run`)}>立即探测</Button>
+                                  <Button size="small" type="primary" disabled={stale || !t.enabled || !!busy || !!data?.runs.some(r=>r.task_id===t.task_id && !terminal(r.status))} loading={busy===t.task_id} onClick={()=>void operate(t.task_id,`/api/v1/rtc/tasks/${t.task_id}/run`)}>立即探测</Button>
                                   <Button size="small" disabled={!!busy} onClick={()=>setEdit({kind:"task",value:t})}>编辑</Button>
-                                  <Button size="small" disabled={!!busy} onClick={()=>void operate(t.task_id,`/api/v1/rtc/tasks/${t.task_id}/enabled`,{enabled:!t.enabled})}>{t.enabled?"停用":"启用"}</Button>
+                                  <Button size="small" disabled={stale || !!busy} onClick={()=>void operate(t.task_id,`/api/v1/rtc/tasks/${t.task_id}/enabled`,{enabled:!t.enabled})}>{t.enabled?"停用":"启用"}</Button>
                                 </>}
                               </Space>;
                             },
@@ -592,6 +614,7 @@ export default function RTCProbes({
                       <Table<Target>
                         rowKey="target_id"
                         dataSource={data?.targets || []}
+                        loading={!data && refreshing}
                         pagination={false}
                         scroll={{ x: 650 }}
                         columns={[
@@ -645,6 +668,7 @@ export default function RTCProbes({
                       <Table<Probe>
                         rowKey="probe_id"
                         dataSource={data?.probes || []}
+                        loading={!data && refreshing}
                         pagination={false}
                         scroll={{ x: 850 }}
                         columns={[
@@ -658,13 +682,9 @@ export default function RTCProbes({
                               <Switch
                                 aria-label={`启用探针 ${p.probe_id}`}
                                 checked={p.enabled !== false}
-                                disabled={!canManage || !!busy}
+                                disabled={!canManage || !!busy || stale}
                                 onChange={(v) =>
-                                  void operate(
-                                    p.probe_id,
-                                    `/api/v1/rtc/probes/${p.probe_id}/enabled`,
-                                    { enabled: v },
-                                  )
+                                  v ? void operate(p.probe_id, `/api/v1/rtc/probes/${p.probe_id}/enabled`, { enabled: true }) : (setError(""), setPendingProbe(p))
                                 }
                               />
                             ),
@@ -679,8 +699,8 @@ export default function RTCProbes({
                             title: "连接",
                             key: "online",
                             render: (_, p) => (
-                              <Tag color={p.online ? "success" : "default"}>
-                                {p.online ? "在线" : "离线"}
+                              <Tag color={stale ? "warning" : p.online ? "success" : "default"}>
+                                {stale ? "待确认" : p.online ? "在线" : "离线"}
                               </Tag>
                             ),
                           },
@@ -791,6 +811,16 @@ export default function RTCProbes({
           </Card>
         </>
       )}
+      <Modal open={!!pendingProbe} title={`停用探针 ${pendingProbe?.probe_id || ""}？`} okText="确认停用" cancelText="取消" okButtonProps={{ danger: true, disabled: stale }} confirmLoading={!!busy} onCancel={() => setPendingProbe(null)} onOk={() => {
+        if (!pendingProbe || busy) return;
+        const id = pendingProbe.probe_id;
+        void operate(id, `/api/v1/rtc/probes/${id}/enabled`, { enabled: false }).then(ok => { if (ok) setPendingProbe(null); });
+      }}>
+        {error && <Alert type="error" showIcon message={error} />}
+        <Typography.Paragraph>将停止分配新任务，并清理正在执行的轮次。</Typography.Paragraph>
+        <Typography.Paragraph>关联任务 {(data?.tasks || []).filter(t => t.probe_id === pendingProbe?.probe_id).length} 条 · 执行中 {(data?.runs || []).filter(r => !terminal(r.status) && Object.values(r.endpoints || {}).some(e => e.job.probe_id === pendingProbe?.probe_id)).length} 轮</Typography.Paragraph>
+        <Alert type="warning" showIcon message="相关业务状态需要新的有效探测证据确认。" />
+      </Modal>
       <Drawer
         open={!!selected}
         onClose={() => setSelected(null)}

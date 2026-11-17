@@ -11,6 +11,7 @@ import {
   GridComponent,
   TooltipComponent,
   LegendComponent,
+  AriaComponent,
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 import Alert from "antd/es/alert";
@@ -18,6 +19,10 @@ import Card from "antd/es/card";
 import Segmented from "antd/es/segmented";
 import Select from "antd/es/select";
 import Typography from "antd/es/typography";
+import Button from "antd/es/button";
+import Table from "antd/es/table";
+import Skeleton from "antd/es/skeleton";
+import { useViewParam } from "./viewState";
 import type { API } from "./api";
 import type { ResourceMetrics } from "./types";
 type DiskDeviceMetrics = NonNullable<ResourceMetrics["disk_devices"]>[number];
@@ -27,6 +32,7 @@ useECharts([
   GridComponent,
   TooltipComponent,
   LegendComponent,
+  AriaComponent,
   CanvasRenderer,
 ]);
 type Sample = {
@@ -108,6 +114,7 @@ function TrendChart({
   group,
   format,
   empty,
+  label,
 }: {
   lines: Line[];
   from: number;
@@ -115,6 +122,7 @@ function TrendChart({
   group: string;
   format: (v: number) => string;
   empty: string;
+  label: string;
 }) {
   const ref = useRef<HTMLDivElement>(null),
     instance = useRef<ECharts | null>(null);
@@ -136,13 +144,14 @@ function TrendChart({
     instance.current?.setOption(
       {
         animation: false,
-        color: ["#1677ff", "#19a984", "#e9a23b"],
+        aria: { enabled: true, label: { description: label } },
+        color: ["#0958d9", "#166534", "#9a5b00"],
         grid: { left: 14, right: 18, top: 43, bottom: 12, containLabel: true },
         legend: {
           top: 2,
           itemWidth: 14,
           itemHeight: 5,
-          textStyle: { fontSize: 11, color: "#66788a" },
+          textStyle: { fontSize: 12, color: "#475569" },
         },
         tooltip: {
           trigger: "axis",
@@ -160,7 +169,7 @@ function TrendChart({
           min: from,
           max: to,
           axisLine: { lineStyle: { color: "#dce3eb" } },
-          axisLabel: { fontSize: 10, color: "#8a97a6", hideOverlap: true },
+          axisLabel: { fontSize: 12, color: "#475569", hideOverlap: true },
           splitLine: { show: false },
         },
         yAxis: {
@@ -168,13 +177,13 @@ function TrendChart({
           min: 0,
           splitNumber: 3,
           axisLabel: {
-            fontSize: 10,
-            color: "#8a97a6",
+            fontSize: 12,
+            color: "#475569",
             formatter: (v: number) => format(v),
           },
           splitLine: { lineStyle: { color: "#edf1f6", type: "dashed" } },
         },
-        series: lines.map((line) => ({
+        series: lines.map((line, index) => ({
           name: line.name,
           type: "line",
           data: line.data,
@@ -182,13 +191,16 @@ function TrendChart({
           smooth: false,
           showSymbol: true,
           symbolSize: 3,
-          lineStyle: { width: 2 },
+          lineStyle: {
+            width: 2,
+            type: (["solid", "dashed", "dotted"] as const)[index % 3],
+          },
           emphasis: { focus: "series" },
         })),
       },
       { replaceMerge: ["series"] },
     );
-  }, [lines, from, to, format]);
+  }, [lines, from, to, format, label]);
   const hasData = lines.some((line) => line.data.some(([, v]) => v != null));
   return (
     <div className="resource-trend-plot">
@@ -196,7 +208,7 @@ function TrendChart({
         ref={ref}
         className="resource-trend-canvas"
         role="img"
-        aria-label="资源指标时间趋势图"
+        aria-label={label}
       />
       {!hasData && <div className="resource-trend-empty">{empty}</div>}
     </div>
@@ -212,8 +224,11 @@ export default function ResourceTrends({
   nodeID: string;
   value?: ResourceMetrics | null;
 }) {
-  const [window, setWindow] = useState("1h"),
-    [data, setData] = useState<History | null>(null),
+  const [window, setWindow] = useViewParam("range", "1h");
+  const [showDataValue, setShowData] = useViewParam("metricData");
+  const showData = showDataValue === "1";
+  const [retry, setRetry] = useState(0);
+  const [data, setData] = useState<History | null>(null),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(false),
     [device, setDevice] = useState("total"),
@@ -252,7 +267,7 @@ export default function ResourceTrends({
       closed = true;
       clearInterval(timer);
     };
-  }, [api, nodeID, window]);
+  }, [api, nodeID, window, retry]);
   const samples = useMemo(
     () =>
       [...(data?.samples || [])].sort(
@@ -342,6 +357,14 @@ export default function ResourceTrends({
           value={window}
           onChange={(v) => setWindow(String(v))}
         />
+        <Button
+          size="small"
+          aria-expanded={showData}
+          aria-controls="resource-history-table"
+          onClick={() => setShowData(showData ? "" : "1")}
+        >
+          {showData ? "收起数据表" : "精确数据表"}
+        </Button>
         <Typography.Text type="secondary">
           {loading
             ? "更新中…"
@@ -352,107 +375,191 @@ export default function ResourceTrends({
         <Alert
           type="warning"
           message={error}
+          action={<Button onClick={() => setRetry((v) => v + 1)}>重试</Button>}
           showIcon
           style={{ marginBottom: 12 }}
         />
       )}
-      <div className="resource-trend-grid">
-        <Card
-          size="small"
-          title="CPU"
-          extra={
-            <Typography.Text type="secondary">
-              当前 {cores(current?.cpu_usage_cores)}
-            </Typography.Text>
-          }
-        >
-          <TrendChart
-            lines={cpu}
-            from={from}
-            to={to}
-            group={group}
-            format={cores}
-            empty={empty}
-          />
-          <p className="resource-trend-note">1 核表示一个逻辑核</p>
-        </Card>
-        <Card
-          size="small"
-          title="内存"
-          extra={
-            <Typography.Text type="secondary">
-              工作集 {bytes(current?.memory_working_set_bytes)}
-            </Typography.Text>
-          }
-        >
-          <TrendChart
-            lines={memory}
-            from={from}
-            to={to}
-            group={group}
-            format={bytes}
-            empty={empty}
-          />
-          <p className="resource-trend-note">工作集、RSS 和总使用分别展示</p>
-        </Card>
-        <Card size="small" title="磁盘 I/O">
-          <div className="resource-trend-controls">
-            <Select
-              aria-label="I/O 指标"
-              size="small"
-              value={ioMetric}
-              onChange={setIOMetric}
-              options={[
-                { value: "rate", label: "读写速率" },
-                { value: "iops", label: "IOPS" },
-              ]}
-            />
-            {!!devices.length && (
-              <Select
-                aria-label="磁盘设备"
-                size="small"
-                value={chosenDevice}
-                onChange={setDevice}
-                options={devices}
-              />
-            )}
-          </div>
-          <TrendChart
-            lines={io}
-            from={from}
-            to={to}
-            group={group}
-            format={ioFormat}
-            empty={
-              value?.disk_io_status === "UNSUPPORTED"
-                ? "当前环境不支持 I/O 采集"
-                : empty
+      {loading && !data ? (
+        <div aria-busy="true">
+          <Skeleton active={false} paragraph={{ rows: 5 }} />
+        </div>
+      ) : (
+        <div className="resource-trend-grid">
+          <Card
+            size="small"
+            title="CPU"
+            extra={
+              <Typography.Text type="secondary">
+                当前 {cores(current?.cpu_usage_cores)}
+              </Typography.Text>
             }
-          />
-          <p className="resource-trend-note">
-            按设备查看，逻辑盘和底层设备不重复累加
-          </p>
-        </Card>
-        <Card
-          size="small"
-          title="网络"
-          extra={
-            netShared ? (
-              <Typography.Text type="secondary">共享主机网络</Typography.Text>
-            ) : null
-          }
+          >
+            <TrendChart
+              lines={cpu}
+              label="CPU 时间趋势，单位为核；精确数值可通过精确数据表查看"
+              from={from}
+              to={to}
+              group={group}
+              format={cores}
+              empty={empty}
+            />
+            <p className="resource-trend-note">1 核表示一个逻辑核</p>
+          </Card>
+          <Card
+            size="small"
+            title="内存"
+            extra={
+              <Typography.Text type="secondary">
+                工作集 {bytes(current?.memory_working_set_bytes)}
+              </Typography.Text>
+            }
+          >
+            <TrendChart
+              lines={memory}
+              label="内存工作集、RSS 和总使用时间趋势；精确数值可通过精确数据表查看"
+              from={from}
+              to={to}
+              group={group}
+              format={bytes}
+              empty={empty}
+            />
+            <p className="resource-trend-note">工作集、RSS 和总使用分别展示</p>
+          </Card>
+          <Card size="small" title="磁盘 I/O">
+            <div className="resource-trend-controls">
+              <Select
+                aria-label="I/O 指标"
+                size="small"
+                value={ioMetric}
+                onChange={setIOMetric}
+                options={[
+                  { value: "rate", label: "读写速率" },
+                  { value: "iops", label: "IOPS" },
+                ]}
+              />
+              {!!devices.length && (
+                <Select
+                  aria-label="磁盘设备"
+                  size="small"
+                  value={chosenDevice}
+                  onChange={setDevice}
+                  options={devices}
+                />
+              )}
+            </div>
+            <TrendChart
+              lines={io}
+              label="磁盘 I/O 时间趋势；精确数值可通过精确数据表查看"
+              from={from}
+              to={to}
+              group={group}
+              format={ioFormat}
+              empty={
+                value?.disk_io_status === "UNSUPPORTED"
+                  ? "当前环境不支持 I/O 采集"
+                  : empty
+              }
+            />
+            <p className="resource-trend-note">
+              按设备查看，逻辑盘和底层设备不重复累加
+            </p>
+          </Card>
+          <Card
+            size="small"
+            title="网络"
+            extra={
+              netShared ? (
+                <Typography.Text type="secondary">共享主机网络</Typography.Text>
+              ) : null
+            }
+          >
+            <TrendChart
+              lines={network}
+              label="网络接收与发送速率时间趋势；精确数值可通过精确数据表查看"
+              from={from}
+              to={to}
+              group={group}
+              format={rate}
+              empty={netShared ? "共享网络无法归属到单容器" : empty}
+            />
+            <p className="resource-trend-note">共享网络时段不展示单容器流量</p>
+          </Card>
+        </div>
+      )}
+      {showData && (
+        <div
+          id="resource-history-table"
+          className="resource-history-table"
+          role="region"
+          aria-label="资源趋势精确数据表"
+          tabIndex={0}
         >
-          <TrendChart
-            lines={network}
-            from={from}
-            to={to}
-            group={group}
-            format={rate}
-            empty={netShared ? "共享网络无法归属到单容器" : empty}
+          <Table<Sample>
+            size="small"
+            rowKey="at"
+            dataSource={samples}
+            scroll={{ x: 1250 }}
+            pagination={{ pageSize: 10, showSizeChanger: false }}
+            locale={{
+              emptyText: loading
+                ? "正在读取历史采样…"
+                : error
+                  ? "历史采样读取失败，请重试"
+                  : "该时段无有效采样",
+            }}
+            columns={[
+              {
+                title: "采样时间",
+                dataIndex: "at",
+                width: 180,
+                render: (value) =>
+                  new Date(value).toLocaleString("zh-CN", { hour12: false }),
+                sorter: (a, b) => Date.parse(a.at) - Date.parse(b.at),
+                defaultSortOrder: "descend",
+              },
+              { title: "CPU 总使用", dataIndex: "cpu", render: cores },
+              { title: "CPU 用户态", dataIndex: "cpu_user", render: cores },
+              { title: "CPU 内核态", dataIndex: "cpu_system", render: cores },
+              { title: "内存工作集", dataIndex: "memory", render: bytes },
+              { title: "内存 RSS", dataIndex: "rss", render: bytes },
+              { title: "内存总使用", dataIndex: "memory_usage", render: bytes },
+              {
+                title: "磁盘读取",
+                key: "read",
+                render: (_, s) => {
+                  const value = disk(s, false);
+                  return value == null ? "—" : ioFormat(value);
+                },
+              },
+              {
+                title: "磁盘写入",
+                key: "write",
+                render: (_, s) => {
+                  const value = disk(s, true);
+                  return value == null ? "—" : ioFormat(value);
+                },
+              },
+              {
+                title: "网络接收",
+                key: "rx",
+                render: (_, s) =>
+                  s.network_scope === "CONTAINER"
+                    ? rate(s.rx)
+                    : "共享网络 / 未知",
+              },
+              {
+                title: "网络发送",
+                key: "tx",
+                render: (_, s) =>
+                  s.network_scope === "CONTAINER"
+                    ? rate(s.tx)
+                    : "共享网络 / 未知",
+              },
+            ]}
           />
-          <p className="resource-trend-note">共享网络时段不展示单容器流量</p>
-        </Card>
-      </div>
+        </div>
+      )}
       <Typography.Paragraph
         type="secondary"
         className="resource-trend-footnote"

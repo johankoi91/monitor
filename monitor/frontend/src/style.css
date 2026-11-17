@@ -1,10 +1,15 @@
 :root {
+  --monitor-bg: #f5f7fa;
+  --monitor-text: #1f2937;
+  --monitor-secondary: #475569;
+  --monitor-border: #dce3eb;
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
   color: #262626;
   background: #f5f5f5;
   font-size: 14px;
 }
+
 .rtc-screen { min-width: 0; }
 .rtc-heading, .rtc-section-toolbar, .rtc-log-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .rtc-heading { margin-bottom: 20px; }
@@ -988,4 +993,92 @@ pre {
   .inventory-heading > .ant-typography:first-child {
     font-size: 20px;
   }
+}
+
+/* Operations workspace: compact, high contrast and status-led. */
+body, :root { background: var(--monitor-bg); color: var(--monitor-text); }
+.app-header.ant-layout-header { min-height: 64px; padding-top: 12px; padding-bottom: 12px; }
+.app-content.ant-layout-content { padding-top: 20px; }
+.brand-group small, .app-footer.ant-layout-footer, .page-card p,
+.section-title small, .member small, .host-group-header, .node-observation,
+.resource-trend-empty, .resource-trend-note, .resource-trend-footnote.ant-typography,
+.resource-inline-label, .service-panel .service-counts, .metric-inline-note,
+.metric-empty, .resource-unavailable, .startup-unified .ant-table-cell:first-child {
+  color: var(--monitor-secondary);
+}
+.resource-trend-note, .resource-trend-footnote.ant-typography,
+.service-panel .metric-inline-note, .metric-update-stale small { font-size: 12px; }
+.status-page-heading, .status-refresh, .status-detail-title, .status-controlled-actions {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+}
+.status-page-heading { margin: 0 0 16px; }
+.status-page-heading h2.ant-typography { margin: 0 0 6px; }
+.status-refresh { font-size: 12px; }
+.status-update { color: var(--monitor-secondary); font-size: 12px; }
+.status-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.status-summary-button { text-align: left; border: 1px solid var(--monitor-border); border-radius: 8px; background: #fff; padding: 12px 16px; cursor: pointer; font: inherit; }
+.status-summary-button[aria-pressed="true"] { background: #edf5ff; border-color: #0958d9; }
+.status-summary-button .ant-statistic-title { color: var(--monitor-secondary); font-size: 12px; }
+.status-summary-button .ant-statistic-content { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--monitor-text); }
+.status-summary-button > span { color: var(--monitor-secondary); font-size: 12px; }
+.status-summary-bad .ant-statistic-title { color: #b42318; }
+.status-summary-unknown .ant-statistic-title { color: #92400e; }
+.rtc-overview.ant-card { margin-bottom: 16px; }
+.rtc-overview .ant-card-head { min-height: 38px; }
+.rtc-overview .ant-card-body { padding: 10px 14px; font-size: 12px; }
+.rtc-overview .ant-card-head-title { font-size: 14px; }
+.status-table-card .ant-card-head { min-height: 48px; }
+.status-table-card > .ant-card-body { padding: 0; }
+.status-filters-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; padding: 0 16px 14px; }
+.status-filters-row .ant-form-item { margin: 0; min-width: 110px; }
+.status-filters-row .ant-form-item:first-child { flex: 1; min-width: 220px; }
+.status-filters-row .ant-form-item-label { padding-bottom: 4px; }
+.status-filters-row label { color: var(--monitor-secondary) !important; font-size: 12px !important; }
+.status-filters-row .ant-select { min-width: 110px; }
+.status-table-card .ant-table { font-size: 12px; }
+.status-table-card .ant-table-thead th { color: var(--monitor-secondary); font-weight: 500; background: #f8fafc; }
+.status-table-card .ant-table-tbody td { padding-top: 10px; padding-bottom: 10px; }
+.status-table-card .ant-table-tbody td:first-child .ant-typography { font-size: 13px; }
+.status-selected-row, .status-table-card .ant-table-tbody > tr.status-selected-row > td { background: #edf5ff; }
+.status-row-reason { font-size: 12px; color: var(--monitor-secondary); margin-top: 3px; overflow-wrap: anywhere; }
+.status-mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.status-list-footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 12px 16px; font-size: 12px; color: var(--monitor-secondary); }
+.status-table-card .ant-pagination { padding: 0 16px; }
+.status-loading, .status-empty { padding: 28px 20px; }
+.status-empty { text-align: center; }
+.status-detail-card.ant-card { margin-top: 16px; }
+.status-detail-card > .ant-card-body { padding: 12px 16px; }
+.status-detail-title { justify-content: flex-start; }
+.status-detail-card .resource-view { padding: 0; }
+.status-controlled-actions { border-top: 1px solid var(--monitor-border); padding-top: 12px; margin-top: 12px; font-size: 12px; }
+.health-tag.ant-tag { white-space: nowrap; }
+.status-mobile-node { padding: 12px; border-top: 1px solid var(--monitor-border); }
+.status-mobile-identity { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.status-mobile-identity > div { min-width: 0; overflow-wrap: anywhere; }
+.status-mobile-bottom { display: flex; gap: 8px; justify-content: space-between; align-items: center; color: var(--monitor-secondary); font-size: 12px; margin-top: 6px; }
+.rtc-summary-value { color: var(--monitor-text); }
+.rtc-summary-value small, .rtc-path-arrow { color: var(--monitor-secondary); }
+.resource-history-table { margin-top: 14px; }
+.resource-trend-plot .resource-trend-empty { background: #fff; padding: 6px; }
+@media(max-width: 760px) {
+  .status-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .status-summary-button { padding: 10px 12px; }
+  .status-filters-row { padding: 0 12px 12px; gap: 8px; }
+  .status-filters-row .ant-form-item:first-child { flex-basis: 100%; min-width: 0; }
+  .status-filters-row .ant-form-item:not(:first-child) { flex: 1 1 100px; min-width: 100px; }
+  .status-filters-row .ant-select { min-width: 0; width: 100%; }
+  .status-table-card .ant-card-head, .status-detail-card .ant-card-head { padding: 0 12px; }
+  .status-detail-card .ant-card-head-wrapper { align-items: flex-start; gap: 8px; padding: 10px 0; }
+  .status-detail-card .ant-card-head-title { white-space: normal; }
+  .status-detail-card > .ant-card-body { padding: 12px; }
+  .rtc-form-grid { grid-template-columns: 1fr; }
+  .status-screen .ant-alert { align-items: flex-start; }
+  .status-screen .ant-alert-action { margin-left: 6px; }
+}
+@media(pointer: coarse) {
+  .status-screen .ant-btn { min-height: 44px; }
+  .status-filters-row .ant-input, .status-filters-row .ant-select-selector { font-size: 16px !important; }
+}
+@media(prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0s !important; transition-duration: 0s !important; scroll-behavior: auto !important; }
 }
