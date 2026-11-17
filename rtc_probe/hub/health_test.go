@@ -11,7 +11,6 @@ func healthFixture(t *testing.T) (*Hub, protocol.Task) {
 	c := testConfig()
 	c.Targets[0].Driver = "agora"
 	c.Tasks[0].TimeoutSeconds = 30
-	c.Tasks[0].Receiver = c.Tasks[0].Sender
 	c.Tasks[0].FailureThreshold = 3
 	c.Tasks[0].RecoveryThreshold = 2
 	c.Tasks[0].RTC = &protocol.RTCParameters{AppID: "88dc432b1fe248039879fb84844c497b", AuthMode: "none"}
@@ -120,7 +119,7 @@ func TestHistoryRetentionIsScoped(t *testing.T) {
 	if err != nil || page.Total != 120 || len(page.Runs) != 10 {
 		t.Fatal("history tied to 100-run cache", err)
 	}
-	if err = h.archive.RTCCleanup(now.Add(-7*24*time.Hour), now.Add(-30*24*time.Hour), 100); err != nil {
+	if err = h.archive.RTCCleanup(now.Add(-7*24*time.Hour), 100); err != nil {
 		t.Fatal(err)
 	}
 	usage, err := h.archive.RTCUsage()

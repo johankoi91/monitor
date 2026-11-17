@@ -7,21 +7,21 @@ import (
 )
 
 type TaskHealth struct {
-	TaskID            string     `json:"task_id"`
-	TargetID          string     `json:"target_id"`
-	Revision          string     `json:"config_revision"`
-	State             string     `json:"state"`
-	Reason            string     `json:"reason"`
-	Enabled           bool       `json:"enabled"`
-	FailureCount      int        `json:"failure_count"`
-	SuccessCount      int        `json:"success_count"`
-	FailureThreshold  int        `json:"failure_threshold"`
-	RecoveryThreshold int        `json:"recovery_threshold"`
-	LastRunID         string     `json:"last_run_id,omitempty"`
-	LatestResult      string     `json:"latest_result,omitempty"`
-	LastResultAt      *time.Time `json:"last_result_at,omitempty"`
-	LastSuccessAt     *time.Time `json:"last_success_at,omitempty"`
-	UnknownSince      *time.Time `json:"unknown_since,omitempty"`
+	InfrastructureReason string     `json:"infrastructure_reason,omitempty"`
+	TaskID               string     `json:"task_id"`
+	TargetID             string     `json:"target_id"`
+	Revision             string     `json:"config_revision"`
+	State                string     `json:"state"`
+	Reason               string     `json:"reason"`
+	Enabled              bool       `json:"enabled"`
+	FailureCount         int        `json:"failure_count"`
+	SuccessCount         int        `json:"success_count"`
+	FailureThreshold     int        `json:"failure_threshold"`
+	RecoveryThreshold    int        `json:"recovery_threshold"`
+	LastRunID            string     `json:"last_run_id,omitempty"`
+	LastResultAt         *time.Time `json:"last_result_at,omitempty"`
+	LastSuccessAt        *time.Time `json:"last_success_at,omitempty"`
+	UnknownSince         *time.Time `json:"unknown_since,omitempty"`
 }
 type BusinessFact struct {
 	TaskID   string
@@ -51,7 +51,14 @@ func (h *Hub) newHealth(t protocol.Task, now time.Time, reason string) TaskHealt
 	return TaskHealth{TaskID: t.ID, TargetID: t.TargetID, Revision: revision(t, h.target(t.TargetID)), State: "UNKNOWN", Reason: reason, Enabled: h.enabled(t), FailureThreshold: f, RecoveryThreshold: r, UnknownSince: &now}
 }
 func (h *Hub) applyHealth(s *state, run *Run, now time.Time) {
+	if run.Kind == nativeCoverageKind {
+		h.applyNativePhaseResult(s, run, now)
+		return
+	}
 	if run.ParentRunID != "" {
+		if h.recordNativeChild(s, run, now) {
+			return
+		}
 		h.recordEdgeResult(s, run, now)
 		return
 	}
@@ -69,8 +76,13 @@ func (h *Hub) applyHealth(s *state, run *Run, now time.Time) {
 	if v.LastRunID == run.ID {
 		return
 	}
+	s.Health[task.ID] = advanceHealth(v, task, run, now)
+}
+func advanceHealth(v TaskHealth, task protocol.Task, run *Run, now time.Time) TaskHealth {
+	v.Revision = run.Revision
+	v.TaskID = task.ID
+	v.TargetID = task.TargetID
 	v.LastRunID = run.ID
-	v.LatestResult = run.Status
 	v.LastResultAt = &now
 	v.Enabled = true
 	v.FailureThreshold, v.RecoveryThreshold = thresholds(task)
@@ -112,12 +124,15 @@ func (h *Hub) applyHealth(s *state, run *Run, now time.Time) {
 			v.UnknownSince = &now
 		}
 	}
-	s.Health[task.ID] = v
+	return v
 }
 func (h *Hub) effectiveHealth(t protocol.Task, now time.Time) TaskHealth {
 	v, ok := h.state.Health[t.ID]
 	if !ok || v.Revision != revision(t, h.target(t.TargetID)) {
 		v = h.newHealth(t, now, "WAITING_FIRST_RESULT")
+	}
+	if nativeEnabled(t) {
+		v = h.nativeHealth(t, now)
 	}
 	v.Enabled = h.enabled(t)
 	v.FailureThreshold, v.RecoveryThreshold = thresholds(t)
@@ -129,10 +144,10 @@ func (h *Hub) effectiveHealth(t protocol.Task, now time.Time) TaskHealth {
 		return v
 	}
 	reason := ""
-	session := h.sessions[t.Sender]
+	session := h.sessions[t.ProbeID]
 	if !h.storageOK {
 		reason = "STORAGE_UNAVAILABLE"
-	} else if h.state.DisabledProbes[t.Sender] {
+	} else if h.state.DisabledProbes[t.ProbeID] {
 		reason = "PROBE_DISABLED"
 	} else if session != nil && session.Driver == "agora" && (!supportsNativeMedia(session) || t.RTC != nil && t.RTC.MediaEdges != nil && !supportsEdgeRouting(session)) {
 		reason = "PROBE_CAPABILITY_MISMATCH"
@@ -140,18 +155,24 @@ func (h *Hub) effectiveHealth(t protocol.Task, now time.Time) TaskHealth {
 		reason = "PROBE_STORAGE_EXHAUSTED"
 	} else if session == nil || session.Driver != "agora" || now.Sub(session.Seen) > 60*time.Second {
 		reason = "PROBE_OFFLINE"
-		if h.state.DisabledProbes[t.Sender] {
+		if h.state.DisabledProbes[t.ProbeID] {
 			reason = "PROBE_DISABLED"
 		}
-	} else if v.LastResultAt != nil && now.Sub(*v.LastResultAt) > taskFreshness(t) {
+	} else if !nativeEnabled(t) && v.LastResultAt != nil && now.Sub(*v.LastResultAt) > taskFreshness(t) {
 		reason = "RESULT_EXPIRED"
 	}
 	if reason != "" {
+		if nativeEnabled(t) && v.State == "UNHEALTHY" {
+			v.InfrastructureReason = reason
+			return v
+		}
 		v.State = "UNKNOWN"
 		v.Reason = reason
 		v.FailureCount = 0
 		v.SuccessCount = 0
-		if v.UnknownSince == nil {
+		if old, ok := h.state.Health[t.ID]; ok && old.Revision == v.Revision && old.State == "UNKNOWN" && old.UnknownSince != nil {
+			v.UnknownSince = old.UnknownSince
+		} else if v.UnknownSince == nil {
 			v.UnknownSince = &now
 		}
 	}
@@ -199,9 +220,9 @@ func (h *Hub) BusinessFacts() []BusinessFact {
 }
 
 func taskPath(t protocol.Task) string {
-	path := t.Sender + "/sender → " + t.TargetID
+	path := t.ProbeID + " → " + t.TargetID
 	if t.RTC != nil && t.RTC.MediaEdges != nil {
 		path += " [" + t.RTC.MediaEdges.Host + ":" + strconv.Itoa(t.RTC.MediaEdges.StartPort) + "-" + strconv.Itoa(t.RTC.MediaEdges.EndPort) + "]"
 	}
-	return path + " → " + t.Receiver + "/receiver"
+	return path
 }

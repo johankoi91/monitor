@@ -49,7 +49,7 @@ func liveParameters(t *testing.T) *protocol.RTCParameters {
 	if os.Getenv("RTC_NATIVE_LIVE_QA") != "1" {
 		t.Skip("explicit real RTC acceptance required")
 	}
-	p := &protocol.RTCParameters{AppID: os.Getenv("RTC_NATIVE_QA_APP_ID"), AuthMode: "none", Private: true, AccessIPs: []string{"111.230.192.59"}, AccessDomains: []string{"111.230.192.59"}, VerifyDomain: "ap.1145326.agora.local", ProxyMode: 0, DisableAut: true, ChannelPrefix: "qa"}
+	p := &protocol.RTCParameters{AppID: os.Getenv("RTC_NATIVE_QA_APP_ID"), AuthMode: "none", Private: true, AccessIPs: []string{"111.230.192.59"}, AccessDomains: []string{"111.230.192.59"}, VerifyDomain: "ap.1145326.agora.local", ProxyMode: 0, DisableAut: true}
 	if err := p.Normalize(); err != nil {
 		t.Fatal(err)
 	}
@@ -67,13 +67,9 @@ func newNativeFixture(t *testing.T, tasks int, policy string) *nativeFixture {
 	p := liveParameters(t)
 	root := t.TempDir()
 	cfg := hub.Config{MaxConcurrentRuns: 2, Probes: []hub.ProbeConfig{{ID: "qa-native", Secret: strings.Repeat("n", 32), Name: "isolated native acceptance", Location: "同机真实 SDK 验收"}}, Targets: []protocol.Target{{ID: "qa-overall-rtc", Name: "isolated RTC functional acceptance", Driver: "agora"}}}
-	seed, _ := strconv.ParseUint(protocol.ID()[:6], 16, 32)
-	uidBase := uint32(30000 + (seed%10000)*2)
 	for i := 0; i < tasks; i++ {
 		copy := *p
-		copy.SenderUID = uidBase + uint32(i*2)
-		copy.ReceiverUID = uidBase + uint32(i*2) + 1
-		cfg.Tasks = append(cfg.Tasks, protocol.Task{ID: fmt.Sprintf("qa-av-%02d", i), TargetID: "qa-overall-rtc", Sender: "qa-native", Receiver: "qa-native", Enabled: true, IntervalSeconds: 3600, TimeoutSeconds: 15, RTC: &copy})
+		cfg.Tasks = append(cfg.Tasks, protocol.Task{ID: fmt.Sprintf("qa-av-%02d", i), TargetID: "qa-overall-rtc", ProbeID: "qa-native", Enabled: true, IntervalSeconds: 3600, TimeoutSeconds: 15, RTC: &copy})
 	}
 	h, err := hub.New(filepath.Join(root, "center"), cfg, nil)
 	if err != nil {

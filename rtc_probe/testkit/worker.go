@@ -65,7 +65,7 @@ func (r *recorder) call(stage, name string, fn func() error) error {
 }
 
 // Run executes an isolated mock worker over a private JSON pipe.
-func Run(ctx context.Context, input io.Reader, output io.Writer) error {
+func runRole(ctx context.Context, input io.Reader, output io.Writer) error {
 	d := json.NewDecoder(io.LimitReader(input, 1<<20))
 	var initial protocol.Message
 	if err := d.Decode(&initial); err != nil {

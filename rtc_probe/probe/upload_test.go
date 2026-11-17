@@ -23,7 +23,7 @@ import (
 func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 	dir := t.TempDir()
 	secret := strings.Repeat("p", 32)
-	cfg := hub.Config{Probes: []hub.ProbeConfig{{ID: "a", Secret: secret, Location: "A"}, {ID: "b", Secret: strings.Repeat("q", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "target", Name: "protocol fixture", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "task", TargetID: "target", Sender: "a", Receiver: "b", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30}}}
+	cfg := hub.Config{Probes: []hub.ProbeConfig{{ID: "a", Secret: secret, Location: "A"}, {ID: "b", Secret: strings.Repeat("q", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "target", Name: "protocol fixture", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "task", TargetID: "target", ProbeID: "a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30}}}
 	h, err := hub.New(dir, cfg, nil)
 	if err != nil {
 		t.Fatal(err)

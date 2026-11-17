@@ -19,3 +19,19 @@ Agent通过本机Docker Socket执行inspect，容器状态、资源指标及现�
 已部署avops-center:params-10m-20261104与avops-agent:params-10m-20261104。全量Go竞争测试通过，包含10分钟前省略完整参数、到期重新上报、身份/配置变化立即上报、失败不推进周期及9分钟记录仍有效的检查。线上11个纳管节点在35秒对比窗口内继续收到新状态采样，而参数reported_at保持不变；中心READY，两端无重启循环。10分钟到期边界由受控时间单元测试验证，线上短窗口用于确认高频状态与低频参数已经分开。
 
 部署前数据库备份为中心 `/opt/avops-monitor/deploy-20261104-params-10m/before.dump`，两端保留before-params-10m-20261104回退容器。回退应配套恢复中心与Agent版本，避免新参数周期与旧过期阈值不一致。未修改账号、台账、业务容器或已发布离线包。
+
+## media_edge 按 AP 分组
+
+`GET /api/v1/containers/media-edges` 使用 `inventory.read` 权限，遍历所有已接入机器发现的容器，包含未纳管容器，筛选名称含 `media_edge` 的记录。从对应容器最近一次完整有效启动参数提取 `--ap`、`--ip-for-client`、`--user-port`，支持独立参数和 `--参数=值`；Docker Args 优先，普通 shell `-c` 只做字面分词，不执行命令或变量展开。
+
+返回 `by_ap: map[string][]MediaEdgeEndpoint`：key 为 AP IP，数组每项包含客户端 IP、用户端口及来源机器/容器。`--ap` 支持逗号分隔多个 IP，各地址校验、规范化并去重后，将同一个 Edge 分别关联到对应分组；无效或残缺地址列表整体列入 `skipped`。多个 AP 分组关联同一 Edge 时，容器总数按实例计算，不能直接累加各组数组长度。同 AP 下各容器分别追加，每次从最新快照重新生成，重复查询和周期上报不累加重复元素；容器删除、AP/端口变更自动反映到结果。直接复用已有加密启动参数记录，不另存一份启动参数或历史版本。
+
+`hosts` 列出已接入机器 IP，`matched_containers` 统计匹配容器数；缺失参数、不完整或容器身份已变化的记录列入 `skipped`，不使用旧容器参数填充。离线、停止或过期的同一容器仍保留最后已知参数，并用 `stale` 标记。UDP、web、aut 等名称含 `media_edge` 的容器均参与汇总。
+
+## 2026-11-17 接入 183.131.59.146
+
+新 Agent `rtc-183-146` 使用独立凭证连接现有中心 WSS，镜像 `avops-agent:site130451-20261117`，数据目录 `/var/lib/avops-agent`，配置 `/etc/avops-monitor/agent.env`，15 秒采集，Docker 容器自动重启策略 `unless-stopped`。重启规则为空。安装后中心收到容器状态、完整启动参数及资源数据；验收过程中业务扩容后当前共 25 个运行容器（含上报 Agent），UDP/AUT/Web Edge 各 4 个。
+
+复用现场 `agora_cadvisor`。该容器未发布宿主端口，通过 `avops-cadvisor-local.socket` / `.service` 将 `127.0.0.1:18089` 转发至当前 Docker 地址 `172.18.0.2:8080`，Agent 仅访问回环端点。若以后重建 cAdvisor 导致 Docker 地址改变，须同步更新本地代理的目标。此安装未重建业务容器。
+
+Edge 的 `--ap=172.17.80.111,172.17.80.158` 作为两个 AP 分组关联。目标使用已确认的本机 AP 分组 `172.17.80.158`，客户端入口 `183.131.59.146`。多 AP 解析及重复地址去重已补齐，相关测试及竞态测试通过。中心发布镜像 `avops-center:rtc11-site130451-20261117`，原配置、加密 RTC 控制状态和旧容器在 `/opt/avops-monitor/rtc11-site130451-20261117` 发布记录中保留。

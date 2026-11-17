@@ -33,8 +33,6 @@ func (h *Hub) publicTask(t protocol.Task) protocol.Task {
 	t.RTC = nil
 	t.Credentials = nil
 	t.HasCertificate = false
-	t.HasSenderToken = false
-	t.HasReceiverToken = false
 	t.CredentialVersion = ""
 	return t
 }
@@ -68,16 +66,12 @@ func (h *Hub) pairCommand(r *Run) (protocol.Message, bool) {
 		if credentials == nil {
 			c := h.state.TargetCredentials[r.TargetID]
 			credentials = &protocol.Credentials{}
-			if job.RTC.AuthMode == "token" {
-				credentials.SenderToken = c.SenderToken
-				credentials.ReceiverToken = c.ReceiverToken
-			}
-			if job.RTC.AuthMode == "certificate" {
+			if job.RTC != nil && job.RTC.AuthMode == "certificate" {
 				ttl := uint32(time.Until(r.Deadline).Seconds()) + 120
 				var err error
-				credentials.SenderToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, job.RTC.SenderUID, token.RolePublisher, ttl, ttl)
+				credentials.SenderToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, protocol.SenderUID, token.RolePublisher, ttl, ttl)
 				if err == nil {
-					credentials.ReceiverToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, job.RTC.ReceiverUID, token.RolePublisher, ttl, ttl)
+					credentials.ReceiverToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, protocol.ReceiverUID, token.RolePublisher, ttl, ttl)
 				}
 				if err != nil {
 					now := time.Now().UTC()
@@ -100,6 +94,9 @@ func (h *Hub) pairCommand(r *Run) (protocol.Message, bool) {
 }
 func verifiedEvidence(r *Run, a, b *protocol.Result) bool {
 	if !a.Evidence.Connected || !b.Evidence.Connected {
+		return false
+	}
+	if r.NativeCase != nil && (a.Route == nil || b.Route == nil || a.Route.Status != "VERIFIED" || b.Route.Status != "VERIFIED" || !a.Route.Guarded || !b.Route.Guarded) {
 		return false
 	}
 	p := r.Endpoints["sender"].Job.RTC
@@ -157,10 +154,13 @@ func (h *Hub) healthLocked() (string, string, string) {
 }
 
 func runOccupiesSlot(r *Run, now time.Time) bool {
-	if r.Kind == edgeSweepKind {
+	if isSummary(r) {
 		return false
 	}
 	if !terminal(r.Status) {
+		return true
+	}
+	if r.NativeCase != nil && r.FinishedAt != nil && now.Before(r.FinishedAt.Add(5*time.Second)) {
 		return true
 	}
 	if r.FinishedAt == nil || now.After(r.FinishedAt.Add(protocol.CleanupGrace+protocol.ResultReportGrace)) {

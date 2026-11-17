@@ -20,8 +20,22 @@ def main():
     p.add_argument("component", choices=["center", "probe"])
     p.add_argument("stage", type=Path)
     p.add_argument("--release", required=True)
+    p.add_argument("--probe-capacity", help="probe resource ceiling: auto or integer")
+    p.add_argument("--probe-cpus", type=float)
+    p.add_argument("--probe-memory-mib", type=int)
+    p.add_argument("--probe-pids-limit", type=int)
     p.add_argument("--prebuilt", action="store_true", help="use an image loaded from the offline bundle")
     args = p.parse_args()
+    if args.component != "probe" and any(v is not None for v in [args.probe_capacity,args.probe_cpus,args.probe_memory_mib,args.probe_pids_limit]):
+        raise RuntimeError("probe resource options require probe component")
+    if args.probe_capacity is not None and args.probe_capacity != "auto" and (not args.probe_capacity.isdigit() or not 1 <= int(args.probe_capacity) <= 64):
+        raise RuntimeError("invalid probe capacity")
+    if args.probe_cpus is not None and not 0 < args.probe_cpus <= 64:
+        raise RuntimeError("invalid probe CPU allocation")
+    if args.probe_memory_mib is not None and not 128 <= args.probe_memory_mib <= 65536:
+        raise RuntimeError("invalid probe memory allocation")
+    if args.probe_pids_limit is not None and not 128 <= args.probe_pids_limit <= 8192:
+        raise RuntimeError("invalid probe PID allocation")
     if os.geteuid() != 0:
         raise RuntimeError("root required")
     stage = args.stage.resolve()
@@ -39,7 +53,10 @@ def main():
     (stage / "previous-container.json").write_text(json.dumps(old))
     (stage / "previous-container.json").chmod(0o600)
     env = stage / "runtime.env"
-    env.write_text("\n".join(old["Config"]["Env"]) + "\n")
+    environment=old["Config"]["Env"]
+    if args.probe_capacity is not None:
+        environment=[v for v in environment if not v.startswith("RTC_PROBE_CAPACITY=")]+["RTC_PROBE_CAPACITY="+args.probe_capacity]
+    env.write_text("\n".join(environment) + "\n")
     env.chmod(0o600)
     if args.component == "center" and not args.prebuilt:
         (stage / "Dockerfile").write_text("FROM " + old["Config"]["Image"] + "\nCOPY center /center\n")
@@ -47,7 +64,10 @@ def main():
         docker("build", "-q", "-t", image, str(stage))
     else:
         docker("image", "inspect", image, capture=True)
-    host = old["HostConfig"]
+    host = dict(old["HostConfig"])
+    if args.probe_cpus is not None:host["NanoCpus"]=int(args.probe_cpus*1e9)
+    if args.probe_memory_mib is not None:host["Memory"]=args.probe_memory_mib*(1<<20)
+    if args.probe_pids_limit is not None:host["PidsLimit"]=args.probe_pids_limit
     command = ["run", "-d", "--name", name, "--restart", "unless-stopped", "--network", host["NetworkMode"], "--env-file", str(env)]
     for bind in host.get("Binds") or []:
         command += ["-v", bind]

@@ -16,31 +16,11 @@ import (
 type Settings struct {
 	Version             string `json:"version"`
 	HistoryDays         int    `json:"history_days"`
-	AuditDays           int    `json:"audit_days"`
 	HistoryMB           int    `json:"history_mb"`
 	LogsMB              int    `json:"logs_mb"`
 	ProbeSuccessMinutes int    `json:"probe_success_minutes"`
 	ProbeFailureMinutes int    `json:"probe_failure_minutes"`
 	ProbeDiskMB         int    `json:"probe_disk_mb"`
-}
-type Audit struct {
-	ID       string      `json:"audit_id"`
-	At       time.Time   `json:"at"`
-	Actor    string      `json:"actor"`
-	Action   string      `json:"action"`
-	Target   string      `json:"target"`
-	Outcome  string      `json:"outcome"`
-	TaskID   string      `json:"task_id,omitempty"`
-	RunID    string      `json:"run_id,omitempty"`
-	Revision string      `json:"config_revision,omitempty"`
-	Before   *TaskHealth `json:"before,omitempty"`
-	After    *TaskHealth `json:"after,omitempty"`
-}
-type AuditPage struct {
-	Audits []Audit `json:"audits"`
-	Total  int     `json:"total"`
-	Limit  int     `json:"limit"`
-	Offset int     `json:"offset"`
 }
 type HistoryPage struct {
 	Runs   []Run `json:"runs"`
@@ -49,9 +29,8 @@ type HistoryPage struct {
 	Offset int   `json:"offset"`
 }
 type HistoryUsage struct {
-	Runs   int64 `json:"runs"`
-	Audits int64 `json:"audits"`
-	Bytes  int64 `json:"bytes"`
+	Runs  int64 `json:"runs"`
+	Bytes int64 `json:"bytes"`
 }
 type Archive interface {
 	RTCInit() error
@@ -59,14 +38,12 @@ type Archive interface {
 	RTCGetRun(string) (Run, error)
 	RTCGetLog(string) (protocol.LogRequest, error)
 	RTCListRuns(string, int, int) (HistoryPage, error)
-	RTCPutAudit(Audit, int64) error
-	RTCListAudits(string, int, int) (AuditPage, error)
 	RTCUsage() (HistoryUsage, error)
-	RTCCleanup(time.Time, time.Time, int) error
+	RTCCleanup(time.Time, int) error
 }
 
 func defaultSettings() Settings {
-	return Settings{Version: protocol.ID(), HistoryDays: 7, AuditDays: 30, HistoryMB: 2048, LogsMB: 2048, ProbeSuccessMinutes: 60, ProbeFailureMinutes: 1440, ProbeDiskMB: 1024}
+	return Settings{Version: protocol.ID(), HistoryDays: 7, HistoryMB: 2048, LogsMB: 2048, ProbeSuccessMinutes: 60, ProbeFailureMinutes: 1440, ProbeDiskMB: 1024}
 }
 func (h *Hub) UpdateSettings(expected string, v Settings) error {
 	h.mu.Lock()
@@ -82,7 +59,7 @@ func (h *Hub) UpdateSettings(expected string, v Settings) error {
 	if err := (protocol.RetentionPolicy{Version: "validate", SuccessMinutes: v.ProbeSuccessMinutes, FailureMinutes: v.ProbeFailureMinutes, DiskMB: v.ProbeDiskMB}).Validate(); err != nil {
 		return err
 	}
-	if v.HistoryDays < 1 || v.HistoryDays > 365 || v.AuditDays < 1 || v.AuditDays > 365 || v.HistoryMB < 16 || v.HistoryMB > 8192 || v.LogsMB < 16 || v.LogsMB > 8192 {
+	if v.HistoryDays < 1 || v.HistoryDays > 365 || v.HistoryMB < 16 || v.HistoryMB > 8192 || v.LogsMB < 16 || v.LogsMB > 8192 {
 		return errors.New("保留天数或容量无效")
 	}
 	v.Version = protocol.ID()
@@ -100,16 +77,6 @@ func (h *Hub) History(task string, limit, offset int) (HistoryPage, error) {
 	}
 	return page, err
 }
-func (h *Hub) RecordAudit(actor, action, target, outcome string) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	err := h.archive.RTCPutAudit(Audit{ID: protocol.ID(), At: time.Now().UTC(), Actor: actor, Action: action, Target: target, Outcome: outcome}, int64(h.state.Settings.HistoryMB)<<20)
-	if err != nil {
-		h.storageOK = false
-		h.storageInterrupted = true
-	}
-	return err
-}
 func (h *Hub) Usage() (HistoryUsage, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -121,7 +88,7 @@ func (h *Hub) maintenance(now time.Time) {
 	}
 	h.lastMaintenance = now
 	h.cleanStagedUploads(now)
-	if err := h.archive.RTCCleanup(now.Add(-time.Duration(h.state.Settings.HistoryDays)*24*time.Hour), now.Add(-time.Duration(h.state.Settings.AuditDays)*24*time.Hour), 100); err != nil {
+	if err := h.archive.RTCCleanup(now.Add(-time.Duration(h.state.Settings.HistoryDays)*24*time.Hour), 100); err != nil {
 		h.storageOK = false
 		h.storageInterrupted = true
 	}
@@ -163,12 +130,11 @@ func (h *Hub) maintenance(now time.Time) {
 type fileArchive struct{ dir string }
 
 func (f *fileArchive) RTCInit() error {
-	for _, name := range []string{"runs", "audit"} {
-		if err := os.MkdirAll(filepath.Join(f.dir, name), 0700); err != nil {
-			return err
-		}
+	if err := os.MkdirAll(filepath.Join(f.dir, "runs"), 0700); err != nil {
+		return err
 	}
-	return nil
+	// Remove data from the retired RTC audit feature during upgrade.
+	return os.RemoveAll(filepath.Join(f.dir, "audit"))
 }
 func (f *fileArchive) RTCPutRun(v Run, max int64) error {
 	b, _ := json.Marshal(v)
@@ -255,94 +221,55 @@ func (f *fileArchive) RTCListRuns(task string, limit, offset int) (HistoryPage, 
 	}
 	return out, nil
 }
-func (f *fileArchive) RTCPutAudit(v Audit, max int64) error {
-	if _, err := os.Stat(filepath.Join(f.dir, "audit", v.ID+".json")); err == nil {
-		return nil
-	}
-	usage, err := f.RTCUsage()
-	if err != nil {
-		return err
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	if usage.Bytes+int64(len(b)) > max {
-		return errors.New("RTC history/audit capacity exhausted")
-	}
-	return durable.Write(filepath.Join(f.dir, "audit", v.ID+".json"), v)
-}
 func (f *fileArchive) RTCUsage() (HistoryUsage, error) {
 	var out HistoryUsage
-	for _, dir := range []string{"runs", "audit"} {
-		entries, err := os.ReadDir(filepath.Join(f.dir, dir))
+	entries, err := os.ReadDir(filepath.Join(f.dir, "runs"))
+	if err != nil {
+		return out, err
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
 		if err != nil {
 			return out, err
 		}
-		for _, e := range entries {
-			info, err := e.Info()
-			if err != nil {
-				return out, err
-			}
-			out.Bytes += info.Size()
-			if dir == "runs" {
-				var metadata struct {
-					ParentRunID string `json:"parent_run_id"`
-				}
-				if err := durable.Read(filepath.Join(f.dir, dir, e.Name()), 4<<20, &metadata); err != nil {
-					return out, err
-				}
-				if metadata.ParentRunID == "" {
-					out.Runs++
-				}
-			} else {
-				out.Audits++
-			}
+		out.Bytes += info.Size()
+		var metadata struct {
+			ParentRunID string `json:"parent_run_id"`
+		}
+		if err := durable.Read(filepath.Join(f.dir, "runs", entry.Name()), 4<<20, &metadata); err != nil {
+			return out, err
+		}
+		if metadata.ParentRunID == "" {
+			out.Runs++
 		}
 	}
 	return out, nil
 }
-func (f *fileArchive) RTCCleanup(runCutoff, auditCutoff time.Time, batch int) error {
-	for _, kind := range []string{"runs", "audit"} {
-		entries, err := os.ReadDir(filepath.Join(f.dir, kind))
-		if err != nil {
+func (f *fileArchive) RTCCleanup(cutoff time.Time, batch int) error {
+	entries, err := os.ReadDir(filepath.Join(f.dir, "runs"))
+	if err != nil {
+		return err
+	}
+	removed := 0
+	for _, entry := range entries {
+		if removed >= batch {
+			break
+		}
+		path := filepath.Join(f.dir, "runs", entry.Name())
+		var run Run
+		if err := durable.Read(path, 4<<20, &run); err != nil {
 			return err
 		}
-		removed := 0
-		for _, e := range entries {
-			if removed >= batch {
-				break
+		if run.ParentRunID != "" {
+			if parent, err := f.RTCGetRun(run.ParentRunID); err == nil && (parent.FinishedAt == nil || !parent.FinishedAt.Before(cutoff)) {
+				continue
 			}
-			path := filepath.Join(f.dir, kind, e.Name())
-			cutoff := runCutoff
-			at := time.Time{}
-			if kind == "runs" {
-				var v Run
-				if err := durable.Read(path, 4<<20, &v); err != nil {
-					return err
-				}
-				if v.FinishedAt != nil {
-					at = *v.FinishedAt
-				}
-				if v.ParentRunID != "" {
-					if parent, err := f.RTCGetRun(v.ParentRunID); err == nil && (parent.FinishedAt == nil || !parent.FinishedAt.Before(runCutoff)) {
-						continue
-					}
-				}
-			} else {
-				var v Audit
-				if err := durable.Read(path, 1<<20, &v); err != nil {
-					return err
-				}
-				at = v.At
-				cutoff = auditCutoff
+		}
+		if run.FinishedAt != nil && run.FinishedAt.Before(cutoff) {
+			if err := os.Remove(path); err != nil {
+				return err
 			}
-			if !at.IsZero() && at.Before(cutoff) {
-				if err := os.Remove(path); err != nil {
-					return err
-				}
-				removed++
-			}
+			removed++
 		}
 	}
 	return nil

@@ -48,6 +48,10 @@ def main():
     ca = root / "system/etc/ssl/certs/ca-certificates.crt"
     ca.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile("/etc/pki/tls/certs/ca-bundle.crt", ca)
+    capture = root / "system/opt/rtc-probe/libroute_capture.so"
+    capture.parent.mkdir(parents=True,exist_ok=True)
+    subprocess.run(["gcc","-shared","-fPIC","-O2","-o",str(capture),str(Path(__file__).resolve().parent.parent/"native/route_capture.c"),"-ldl","-pthread"],check=True)
+    capture.chmod(0o755)
     shutil.copyfile(args.binary, root / "rtc-probe")
     (root / "rtc-probe").chmod(0o755)
     (root/"sdk").mkdir(exist_ok=True)

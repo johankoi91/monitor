@@ -11,7 +11,7 @@ import (
 )
 
 func testConfig() Config {
-	return Config{Probes: []ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "A"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "service", Name: "overall RTC", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "audio", TargetID: "service", Sender: "probe-a", Receiver: "probe-b", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, Scenario: "success"}}}
+	return Config{Probes: []ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "A"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "service", Name: "overall RTC", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "audio", TargetID: "service", ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, Scenario: "success"}}}
 }
 func online(t *testing.T, h *Hub, id string) *session {
 	t.Helper()
@@ -151,8 +151,8 @@ func TestEditablePlanPersistsAndCancelsOldExecution(t *testing.T) {
 	}
 	p = restored.planLocked()
 	revision = planRevision(p)
-	p.Tasks[0].Receiver = p.Tasks[0].Sender
+	p.Tasks[0].ProbeID = "missing-probe"
 	if restored.UpdatePlan(revision, p) == nil {
-		t.Fatal("same probe used as both identities")
+		t.Fatal("unregistered probe accepted")
 	}
 }

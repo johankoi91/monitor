@@ -29,12 +29,12 @@ func targetPlanFixture(t *testing.T) *Hub {
 	return h
 }
 func targetTask(id, target string) protocol.Task {
-	return protocol.Task{ID: id, TargetID: target, Sender: "probe-a", Receiver: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30}
+	return protocol.Task{ID: id, TargetID: target, ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30}
 }
 func TestTargetOwnsSharedRTCAndCredentials(t *testing.T) {
 	h := targetPlanFixture(t)
 	certificate := strings.Repeat("c", 32)
-	plan := Plan{Targets: []protocol.Target{{ID: "rtc", Name: "RTC", Driver: "agora", RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.Credentials{AppCertificate: certificate}}}, Tasks: []protocol.Task{targetTask("a", "rtc"), targetTask("b", "rtc")}}
+	plan := Plan{Targets: []protocol.Target{{ID: "rtc", Name: "RTC", Driver: "agora", RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.AppCredentials{AppCertificate: certificate}}}, Tasks: []protocol.Task{targetTask("a", "rtc"), targetTask("b", "rtc")}}
 	if err := h.UpdatePlan(planRevision(h.planLocked()), plan); err != nil {
 		t.Fatal(err)
 	}
@@ -145,52 +145,33 @@ func TestTaskCannotOverrideTargetOrWriteTargetCredentials(t *testing.T) {
 		t.Fatal("task overrode canonical target settings")
 	}
 	next := h.planLocked()
-	next.Tasks[0].Credentials = &protocol.Credentials{SenderToken: "not-allowed"}
+	next.Tasks[0].Credentials = &protocol.AppCredentials{AppCertificate: strings.Repeat("c", 32)}
 	if err := h.UpdatePlan(planRevision(h.planLocked()), next); err == nil {
 		t.Fatal("task credential override accepted")
 	}
 }
 
 func TestTargetCredentialScopeChangeRequiresReplacementAndIsAtomic(t *testing.T) {
-	for _, name := range []string{"appid", "auth", "token_uid", "token_channel"} {
-		t.Run(name, func(t *testing.T) {
-			h := targetPlanFixture(t)
-			params := &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}
-			creds := &protocol.Credentials{AppCertificate: strings.Repeat("c", 32)}
-			if strings.HasPrefix(name, "token_") {
-				params.AuthMode, params.ChannelName = "token", "fixed"
-				creds = &protocol.Credentials{SenderToken: "sender-token", ReceiverToken: "receiver-token"}
-			}
-			p := Plan{Targets: []protocol.Target{{ID: "rtc", Name: "RTC", Driver: "agora", RTC: params, Credentials: creds}}, Tasks: []protocol.Task{targetTask("task", "rtc")}}
-			if err := h.UpdatePlan(planRevision(h.planLocked()), p); err != nil {
-				t.Fatal(err)
-			}
-			before := planRevision(h.planLocked())
-			oldSecret := h.state.TargetCredentials["rtc"]
-			next := h.planLocked()
-			switch name {
-			case "appid":
-				next.Targets[0].RTC.AppID = strings.Repeat("b", 32)
-			case "auth":
-				next.Targets[0].RTC.AuthMode, next.Targets[0].RTC.ChannelName = "token", "fixed"
-			case "token_uid":
-				next.Targets[0].RTC.SenderUID += 10
-			case "token_channel":
-				next.Targets[0].RTC.ChannelName = "other"
-			}
-			if err := h.UpdatePlan(before, next); err == nil {
-				t.Fatal("changed scope reused old credentials")
-			}
-			if planRevision(h.planLocked()) != before || h.state.TargetCredentials["rtc"] != oldSecret {
-				t.Fatal("rejected update modified persisted configuration")
-			}
-			next.Targets[0].Credentials = &protocol.Credentials{AppCertificate: strings.Repeat("d", 32), SenderToken: "new-sender", ReceiverToken: "new-receiver"}
-			if err := h.UpdatePlan(before, next); err != nil {
-				t.Fatal(err)
-			}
-			if h.state.TargetCredentials["rtc"] == oldSecret || planRevision(h.planLocked()) == before {
-				t.Fatal("replacement not applied")
-			}
-		})
+	h := targetPlanFixture(t)
+	p := Plan{Targets: []protocol.Target{{ID: "rtc", Name: "RTC", Driver: "agora", RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.AppCredentials{AppCertificate: strings.Repeat("c", 32)}}}}
+	if err := h.UpdatePlan(planRevision(h.planLocked()), p); err != nil {
+		t.Fatal(err)
+	}
+	before := planRevision(h.planLocked())
+	oldSecret := h.state.TargetCredentials["rtc"]
+	next := h.planLocked()
+	next.Targets[0].RTC.AppID = strings.Repeat("b", 32)
+	if err := h.UpdatePlan(before, next); err == nil {
+		t.Fatal("changed project reused old certificate")
+	}
+	if planRevision(h.planLocked()) != before || h.state.TargetCredentials["rtc"] != oldSecret {
+		t.Fatal("rejected update changed state")
+	}
+	next.Targets[0].Credentials = &protocol.AppCredentials{AppCertificate: strings.Repeat("d", 32)}
+	if err := h.UpdatePlan(before, next); err != nil {
+		t.Fatal(err)
+	}
+	if h.state.TargetCredentials["rtc"] == oldSecret {
+		t.Fatal("replacement not applied")
 	}
 }

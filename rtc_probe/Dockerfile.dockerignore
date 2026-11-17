@@ -7,6 +7,10 @@ rtc_probe/*
 !rtc_probe/probe/**
 !rtc_probe/durable/**
 !rtc_probe/telemetry/**
+!rtc_probe/routeproof/**
+!rtc_probe/native/
+rtc_probe/native/*
+!rtc_probe/native/route_capture.c
 !rtc_probe/agoranative/**
 !rtc_probe/cmd/**
 !rtc_probe/build/

@@ -25,7 +25,7 @@ func TestNativeCredentialsStayAtCenterAndPairHasOneAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	cert := strings.Repeat("c", 32)
-	plan := Plan{Targets: []protocol.Target{{ID: "native", Name: "真实 RTC", Driver: "agora"}}, Tasks: []protocol.Task{{ID: "native-av", TargetID: "native", Sender: "probe-a", Receiver: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30, RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.Credentials{AppCertificate: cert}}}}
+	plan := Plan{Targets: []protocol.Target{{ID: "native", Name: "真实 RTC", Driver: "agora"}}, Tasks: []protocol.Task{{ID: "native-av", TargetID: "native", ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30, RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.AppCredentials{AppCertificate: cert}}}}
 	if err = h.UpdatePlan(planRevision(h.planLocked()), plan); err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestAudioSuccessDoesNotMaskMissingVideo(t *testing.T) {
 
 func TestNativeCapabilityMismatchPausesTask(t *testing.T) {
 	h, task := healthFixture(t)
-	session := h.sessions[task.Sender]
+	session := h.sessions[task.ProbeID]
 	session.Capabilities = []string{"rtc_audio_v1", "retention_v1"}
 	if _, err := h.Start(task.ID); err == nil {
 		t.Fatal("audio-only probe received combined RTC task")

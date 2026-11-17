@@ -15,7 +15,7 @@ func edgeFixture(t *testing.T) (*Hub, protocol.Task) {
 	}
 	h.config.Tasks[0] = task
 	h.config.Targets[0].RTC = cloneRTC(task.RTC)
-	h.sessions[task.Sender].Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "rtc_vos_list_v1"}
+	h.sessions[task.ProbeID].Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "rtc_vos_list_v1"}
 	return h, task
 }
 func currentSweepChild(t *testing.T, h *Hub, parentID string) *Run {
@@ -77,7 +77,7 @@ func TestSweepRunsEveryPortAndCannotHideEarlierFailure(t *testing.T) {
 		if child.EdgeEndpoint != task.RTC.MediaEdges.Endpoints()[index] {
 			t.Fatal("ports out of order", child.EdgeEndpoint)
 		}
-		commands := h.Commands(task.Sender, h.sessions[task.Sender])
+		commands := h.Commands(task.ProbeID, h.sessions[task.ProbeID])
 		prepared := 0
 		for _, m := range commands {
 			if m.Type == "prepare_run" {
@@ -183,7 +183,7 @@ func TestSweepRestartAndProbeDisableNeverResumeOldPorts(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				if err = h.EnableProbe(task.Sender, false); err != nil {
+				if err = h.EnableProbe(task.ProbeID, false); err != nil {
 					t.Fatal(err)
 				}
 			}

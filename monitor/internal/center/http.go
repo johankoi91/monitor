@@ -169,7 +169,9 @@ func (s *Server) Handler() http.Handler {
 			if account != nil {
 				p := routePermission(path, r.Method)
 				if p != "" && !identity.Has(*account, p) && !(path == "/api/v1/roles" && r.Method == "GET" && identity.Has(*account, "users.manage")) {
-					s.Accounts.Audit(id, ip, "ACCESS_DENIED", path, "DENIED", map[string]string{"permission": p})
+					if !strings.HasPrefix(path, "/api/v1/rtc/") {
+						s.Accounts.Audit(id, ip, "ACCESS_DENIED", path, "DENIED", map[string]string{"permission": p})
+					}
 					failure(w, 403, "PERMISSION_DENIED", "当前角色没有此操作权限")
 					return
 				}
@@ -276,21 +278,7 @@ func (s *Server) Handler() http.Handler {
 			if s.Probes == nil {
 				failure(w, 503, "RTC_PROBE_DISABLED", "RTC 探测服务尚未配置")
 			} else {
-				if r.Method != "GET" || strings.Contains(path, "/logs/") {
-					if err := s.Probes.RecordAudit(id, "RTC_"+r.Method, path, "REQUESTED"); err != nil && path != "/api/v1/rtc/settings" {
-						failure(w, 503, "RTC_AUDIT_UNAVAILABLE", "RTC 操作审计不可用，请检查存储容量")
-						return
-					}
-					audit := &rtcAuditWriter{ResponseWriter: w}
-					s.Probes.ServeAdmin(audit, r)
-					outcome := "SUCCESS"
-					if audit.status >= 400 {
-						outcome = "FAILED"
-					}
-					_ = s.Probes.RecordAudit(id, "RTC_"+r.Method, path, outcome)
-				} else {
-					s.Probes.ServeAdmin(w, r)
-				}
+				s.Probes.ServeAdmin(w, r)
 			}
 			return
 		}
@@ -641,6 +629,12 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			s.list(w, r)
+		case path == "/api/v1/containers/media-edges":
+			if r.Method != "GET" {
+				method(w)
+				return
+			}
+			send(w, 200, s.Store.MediaEdges())
 		case path == "/api/v1/agents":
 			if r.Method != "GET" {
 				method(w)

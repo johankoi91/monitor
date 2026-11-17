@@ -51,6 +51,9 @@ func (h *Hub) admitProbe(t protocol.Task, now time.Time, parentID string) error 
 	if !h.enabled(t) {
 		return errors.New("task disabled")
 	}
+	nativeParent := h.state.Runs[parentID]
+	parallelNative := nativeEnabled(t) && nativeParent != nil && nativeParent.Kind == nativeCoverageKind && nativeParent.TaskID == t.ID && !terminal(nativeParent.Status)
+	taskUsed := 0
 	active := 0
 	used := map[string]int{}
 	for _, r := range h.state.Runs {
@@ -60,7 +63,10 @@ func (h *Hub) admitProbe(t protocol.Task, now time.Time, parentID string) error 
 		if runOccupiesSlot(r, now) {
 			active++
 			if r.TaskID == t.ID {
-				return errors.New("task already running")
+				if !parallelNative || r.NativeCase == nil {
+					return errors.New("task already running")
+				}
+				taskUsed++
 			}
 			seen := map[string]bool{}
 			for _, e := range r.Endpoints {
@@ -71,11 +77,18 @@ func (h *Hub) admitProbe(t protocol.Task, now time.Time, parentID string) error 
 			}
 		}
 	}
+	members := 0
+	if state := h.state.Native[t.ID]; state != nil {
+		members = len(state.Expected)
+	}
+	if parallelNative && taskUsed >= h.nativeWorkerLimit(t, members) {
+		return errors.New("native task worker limit reached")
+	}
 	if active >= h.config.MaxConcurrentRuns {
 		return errors.New("RTC capacity exhausted")
 	}
 	target := h.target(t.TargetID)
-	for _, id := range []string{t.Sender, t.Receiver} {
+	for _, id := range []string{t.ProbeID} {
 		s := h.sessions[id]
 		if target.Driver == "agora" && s != nil && !supportsNativeMedia(s) {
 			return errors.New("probe audio/video capability unavailable")

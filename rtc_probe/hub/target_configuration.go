@@ -19,21 +19,15 @@ func cloneRTC(p *protocol.RTCParameters) *protocol.RTCParameters {
 	_ = json.Unmarshal(b, &copy)
 	return &copy
 }
-func hasCredentials(c protocol.Credentials) bool {
-	return c.AppCertificate != "" || c.SenderToken != "" || c.ReceiverToken != ""
+func hasCredentials(c protocol.AppCredentials) bool {
+	return c.AppCertificate != ""
 }
-func overlayCredentials(old protocol.Credentials, input *protocol.Credentials) protocol.Credentials {
+func overlayCredentials(old protocol.AppCredentials, input *protocol.AppCredentials) protocol.AppCredentials {
 	if input == nil {
 		return old
 	}
 	if input.AppCertificate != "" {
 		old.AppCertificate = input.AppCertificate
-	}
-	if input.SenderToken != "" {
-		old.SenderToken = input.SenderToken
-	}
-	if input.ReceiverToken != "" {
-		old.ReceiverToken = input.ReceiverToken
 	}
 	return old
 }
@@ -41,26 +35,19 @@ func credentialScopeChanged(a, b *protocol.RTCParameters) bool {
 	if a == nil || b == nil {
 		return a != b
 	}
-	return a.AppID != b.AppID || a.AuthMode != b.AuthMode || a.ChannelName != b.ChannelName || b.AuthMode == "token" && (a.SenderUID != b.SenderUID || a.ReceiverUID != b.ReceiverUID)
+	return a.AppID != b.AppID || a.AuthMode != b.AuthMode
 }
-func validateCredentials(p *protocol.RTCParameters, c protocol.Credentials) (protocol.Credentials, error) {
+func validateCredentials(p *protocol.RTCParameters, c protocol.AppCredentials) (protocol.AppCredentials, error) {
 	if p == nil {
-		return protocol.Credentials{}, nil
+		return protocol.AppCredentials{}, nil
 	}
 	switch p.AuthMode {
 	case "none":
-		return protocol.Credentials{}, nil
+		return protocol.AppCredentials{}, nil
 	case "certificate":
 		if len(c.AppCertificate) != 32 {
 			return c, errors.New("请在目标服务填写 32 位 App Certificate")
 		}
-		c.SenderToken = ""
-		c.ReceiverToken = ""
-	case "token":
-		if c.SenderToken == "" || c.ReceiverToken == "" {
-			return c, errors.New("请在目标服务填写两端 Token")
-		}
-		c.AppCertificate = ""
 	}
 	return c, nil
 }
@@ -102,10 +89,10 @@ func promoteTaskSettings(plan Plan, vault map[string]protocol.Credentials) (Plan
 		if err = config.Normalize(); err != nil {
 			return Plan{}, err
 		}
-		c := overlayCredentials(vault[task.ID], task.Credentials)
+		c := overlayCredentials(protocol.AppCredentials{AppCertificate: vault[task.ID].AppCertificate}, task.Credentials)
 		keyData, _ := json.Marshal(struct {
 			RTC         *protocol.RTCParameters
-			Credentials protocol.Credentials
+			Credentials protocol.AppCredentials
 		}{config, c})
 		key := sha256.Sum256(keyData)
 		if groups[baseID] == nil {
@@ -161,16 +148,12 @@ func storagePlan(p Plan) Plan {
 	for i := range copy.Targets {
 		copy.Targets[i].Credentials = nil
 		copy.Targets[i].HasCertificate = false
-		copy.Targets[i].HasSenderToken = false
-		copy.Targets[i].HasReceiverToken = false
 	}
 	for i := range copy.Tasks {
 		copy.Tasks[i].RTC = nil
 		copy.Tasks[i].Credentials = nil
 		copy.Tasks[i].CredentialVersion = ""
 		copy.Tasks[i].HasCertificate = false
-		copy.Tasks[i].HasSenderToken = false
-		copy.Tasks[i].HasReceiverToken = false
 	}
 	return copy
 }
@@ -179,8 +162,6 @@ func (h *Hub) publicTarget(target protocol.Target) protocol.Target {
 	target.RTC = cloneRTC(target.RTC)
 	target.Credentials = nil
 	target.HasCertificate = c.AppCertificate != ""
-	target.HasSenderToken = c.SenderToken != ""
-	target.HasReceiverToken = c.ReceiverToken != ""
 	return target
 }
 
@@ -204,7 +185,7 @@ func (h *Hub) loadTargetConfiguration() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	vault := map[string]protocol.Credentials{}
+	vault := map[string]protocol.AppCredentials{}
 	for i := range p.Targets {
 		target := &p.Targets[i]
 		c := overlayCredentials(h.state.TargetCredentials[target.ID], target.Credentials)
@@ -219,8 +200,6 @@ func (h *Hub) loadTargetConfiguration() (bool, error) {
 		vault[target.ID] = c
 		target.Credentials = nil
 		target.HasCertificate = false
-		target.HasSenderToken = false
-		target.HasReceiverToken = false
 	}
 	for i := range p.Tasks {
 		for _, target := range p.Targets {

@@ -16,7 +16,7 @@ func (d *DB) RTCInit() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var ready bool
-	err := d.Pool.QueryRowContext(ctx, `SELECT to_regclass('avops.rtc_probe_runs') IS NOT NULL AND to_regclass('avops.rtc_probe_audit') IS NOT NULL AND to_regclass('avops.rtc_probe_logs') IS NOT NULL`).Scan(&ready)
+	err := d.Pool.QueryRowContext(ctx, `SELECT to_regclass('avops.rtc_probe_runs') IS NOT NULL AND to_regclass('avops.rtc_probe_logs') IS NOT NULL`).Scan(&ready)
 	if err != nil {
 		return err
 	}
@@ -32,7 +32,7 @@ func (d *DB) RTCPutRun(v hub.Run, max int64) error {
 	}
 	return d.transaction(func(ctx context.Context, tx *sql.Tx) error {
 		var total, old int64
-		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(sum(payload_bytes),0)+(SELECT COALESCE(sum(pg_column_size(payload)),0) FROM avops.rtc_probe_audit) FROM avops.rtc_probe_runs").Scan(&total); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(sum(payload_bytes),0) FROM avops.rtc_probe_runs").Scan(&total); err != nil {
 			return err
 		}
 		if err := tx.QueryRowContext(ctx, "SELECT payload_bytes FROM avops.rtc_probe_runs WHERE run_id=$1", v.ID).Scan(&old); err != nil && err != sql.ErrNoRows {
@@ -100,113 +100,16 @@ func (d *DB) RTCListRuns(task string, limit, offset int) (hub.HistoryPage, error
 	}
 	return out, rows.Err()
 }
-func (d *DB) RTCPutAudit(v hub.Audit, max int64) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	return d.transaction(func(ctx context.Context, tx *sql.Tx) error {
-		if err := checkRTCAuditBudget(ctx, tx, []hub.Audit{v}, max); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, "INSERT INTO avops.rtc_probe_audit(audit_id,at,payload) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", v.ID, v.At, string(b))
-		return err
-	})
-}
 func (d *DB) RTCUsage() (hub.HistoryUsage, error) {
+	var out hub.HistoryUsage
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var out hub.HistoryUsage
-	err := d.Pool.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM avops.rtc_probe_runs WHERE COALESCE(payload->>'parent_run_id','')=''),(SELECT count(*) FROM avops.rtc_probe_audit),(SELECT COALESCE(sum(payload_bytes),0) FROM avops.rtc_probe_runs)+COALESCE((SELECT sum(pg_column_size(payload)) FROM avops.rtc_probe_audit),0)`).Scan(&out.Runs, &out.Audits, &out.Bytes)
+	err := d.Pool.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM avops.rtc_probe_runs WHERE COALESCE(payload->>'parent_run_id','')=''),COALESCE(sum(payload_bytes),0) FROM avops.rtc_probe_runs`).Scan(&out.Runs, &out.Bytes)
 	return out, err
 }
-func (d *DB) RTCCleanup(runCutoff, auditCutoff time.Time, batch int) error {
+func (d *DB) RTCCleanup(cutoff time.Time, batch int) error {
 	return d.transaction(func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "DELETE FROM avops.rtc_probe_runs WHERE run_id IN (SELECT c.run_id FROM avops.rtc_probe_runs c WHERE c.finished_at<$1 AND NOT EXISTS (SELECT 1 FROM avops.rtc_probe_runs p WHERE p.run_id=c.payload->>'parent_run_id' AND (p.finished_at IS NULL OR p.finished_at>=$1)) ORDER BY c.finished_at LIMIT $2)", runCutoff, batch); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, "DELETE FROM avops.rtc_probe_audit WHERE audit_id IN (SELECT audit_id FROM avops.rtc_probe_audit WHERE at<$1 ORDER BY at LIMIT $2)", auditCutoff, batch)
+		_, err := tx.ExecContext(ctx, "DELETE FROM avops.rtc_probe_runs WHERE run_id IN (SELECT c.run_id FROM avops.rtc_probe_runs c WHERE c.finished_at<$1 AND NOT EXISTS (SELECT 1 FROM avops.rtc_probe_runs p WHERE p.run_id=c.payload->>'parent_run_id' AND (p.finished_at IS NULL OR p.finished_at>=$1)) ORDER BY c.finished_at LIMIT $2)", cutoff, batch)
 		return err
 	})
-}
-
-// Commit the health transition audit with the encrypted control state before ACK.
-func (d *DB) RTCCommitState(state []byte, audits []hub.Audit) error {
-	var config struct {
-		Settings struct {
-			HistoryMB int `json:"history_mb"`
-		} `json:"settings"`
-	}
-	if err := json.Unmarshal(state, &config); err != nil {
-		return err
-	}
-	return d.transaction(func(ctx context.Context, tx *sql.Tx) error {
-		if len(audits) > 0 {
-			if err := checkRTCAuditBudget(ctx, tx, audits, int64(config.Settings.HistoryMB)<<20); err != nil {
-				return err
-			}
-		}
-		if err := d.saveDocument(ctx, tx, "rtc-probe/state-v1", state); err != nil {
-			return err
-		}
-		for _, audit := range audits {
-			data, err := json.Marshal(audit)
-			if err != nil {
-				return err
-			}
-			if _, err = tx.ExecContext(ctx, "INSERT INTO avops.rtc_probe_audit(audit_id,at,payload) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", audit.ID, audit.At, string(data)); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-func (d *DB) RTCListAudits(task string, limit, offset int) (hub.AuditPage, error) {
-	page := hub.AuditPage{Audits: []hub.Audit{}, Limit: limit, Offset: offset}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := d.Pool.QueryRowContext(ctx, "SELECT count(*) FROM avops.rtc_probe_audit WHERE ($1='' OR payload->>'task_id'=$1)", task).Scan(&page.Total); err != nil {
-		return page, err
-	}
-	rows, err := d.Pool.QueryContext(ctx, "SELECT payload FROM avops.rtc_probe_audit WHERE ($1='' OR payload->>'task_id'=$1) ORDER BY at DESC,audit_id LIMIT $2 OFFSET $3", task, limit, offset)
-	if err != nil {
-		return page, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var b []byte
-		var a hub.Audit
-		if err := rows.Scan(&b); err != nil {
-			return page, err
-		}
-		if err := json.Unmarshal(b, &a); err != nil {
-			return page, err
-		}
-		page.Audits = append(page.Audits, a)
-	}
-	return page, rows.Err()
-}
-
-func checkRTCAuditBudget(ctx context.Context, tx *sql.Tx, audits []hub.Audit, max int64) error {
-	var total int64
-	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COALESCE(sum(payload_bytes),0) FROM avops.rtc_probe_runs)+(SELECT COALESCE(sum(pg_column_size(payload)),0) FROM avops.rtc_probe_audit)`).Scan(&total); err != nil {
-		return err
-	}
-	for _, a := range audits {
-		var exists bool
-		if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM avops.rtc_probe_audit WHERE audit_id=$1)", a.ID).Scan(&exists); err != nil {
-			return err
-		}
-		if !exists {
-			b, err := json.Marshal(a)
-			if err != nil {
-				return err
-			}
-			total += int64(len(b))
-		}
-	}
-	if total > max {
-		return errors.New("RTC history/audit capacity exhausted")
-	}
-	return nil
 }

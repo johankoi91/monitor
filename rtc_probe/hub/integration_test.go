@@ -35,7 +35,7 @@ func TestMockWorkerProcess(t *testing.T) {
 	os.Exit(0)
 }
 func config(scenario string) hub.Config {
-	return hub.Config{Probes: []hub.ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "A"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "rtc-whole-service", Name: "RTC overall service", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "audio", TargetID: "rtc-whole-service", Sender: "probe-a", Receiver: "probe-b", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 4, Scenario: scenario}}}
+	return hub.Config{Probes: []hub.ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "A"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "rtc-whole-service", Name: "RTC overall service", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "audio", TargetID: "rtc-whole-service", ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 4, Scenario: scenario}}}
 }
 func eventually(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
@@ -73,7 +73,7 @@ func setup(t *testing.T, scenario string) fixture {
 	}))
 	var dirs []string
 	clientDone := []chan error{}
-	for _, identity := range config(scenario).Probes {
+	for _, identity := range config(scenario).Probes[:1] {
 		dir := t.TempDir()
 		dirs = append(dirs, dir)
 		c, e := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(s.URL, "http") + "/api/v1/probe/connect", ID: identity.ID, Secret: identity.Secret, DataDir: dir, Capacity: 1, AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
@@ -175,7 +175,7 @@ func TestRealWorkersEvidenceAcknowledgementAndLogRetrieval(t *testing.T) {
 	}
 	eventually(t, 8*time.Second, func() bool {
 		r = detail(t, f.hub, r.ID)
-		if len(r.Logs) != 2 {
+		if len(r.Logs) != 1 {
 			return false
 		}
 		for _, v := range r.Logs {
@@ -222,8 +222,8 @@ func TestNoMediaAndCancellationDoNotSucceed(t *testing.T) {
 		if r.Endpoints["receiver"].Result.Evidence.ValidSamples != 0 {
 			t.Fatal("no-media scenario invented frames")
 		}
-		if len(r.Logs) != 2 {
-			t.Fatal("failure did not trigger two-end diagnostics")
+		if len(r.Logs) != 1 {
+			t.Fatal("failure did not trigger a shared Service diagnostic")
 		}
 	})
 	t.Run("cancel", func(t *testing.T) {

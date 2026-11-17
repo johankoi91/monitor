@@ -27,13 +27,18 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 		registered[p.ID] = true
 	}
 	targets := map[string]bool{}
+	names := map[string]bool{}
 	drivers := map[string]string{}
 	for i := range plan.Targets {
 		v := &plan.Targets[i]
-		if !protocol.ValidID(v.ID) || v.Name == "" || len(v.Name) > 128 || (v.Driver != "mock" && v.Driver != "agora") || targets[v.ID] {
+		if v.ID == "" {
+			v.ID = protocol.ID()
+		}
+		if !protocol.ValidID(v.ID) || v.Name == "" || len(v.Name) > 128 || (v.Driver != "mock" && v.Driver != "agora") || targets[v.ID] || names[v.Name] {
 			return Plan{}, errors.New("目标名称、标识或模拟模式无效")
 		}
 		targets[v.ID] = true
+		names[v.Name] = true
 		drivers[v.ID] = v.Driver
 		if v.RTC != nil {
 			if v.Driver != "agora" {
@@ -68,15 +73,12 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 		if v.FailureThreshold < 1 || v.FailureThreshold > 10 || v.RecoveryThreshold < 1 || v.RecoveryThreshold > 10 || v.UnknownNotifySeconds < 30 || v.UnknownNotifySeconds > 3600 || len(v.Description) > 1000 {
 			return Plan{}, errors.New("失败/恢复次数、未知通知时长或描述无效")
 		}
-		if !protocol.ValidID(v.ID) || tasks[v.ID] || !targets[v.TargetID] || !registered[v.Sender] || !registered[v.Receiver] || v.IntervalSeconds < 5 || v.IntervalSeconds > 3600 || v.TimeoutSeconds < 3 || v.TimeoutSeconds >= v.IntervalSeconds {
+		if !protocol.ValidID(v.ID) || tasks[v.ID] || !targets[v.TargetID] || !registered[v.ProbeID] || v.IntervalSeconds < 5 || v.IntervalSeconds > 3600 || v.TimeoutSeconds < 3 || v.TimeoutSeconds >= v.IntervalSeconds {
 			return Plan{}, errors.New("任务目标、双端探针、周期或超时配置无效")
 		}
 		if drivers[v.TargetID] == "agora" {
 			if v.IntervalSeconds < 30 || v.TimeoutSeconds < 5 || v.TimeoutSeconds > 120 {
 				return Plan{}, errors.New("真实 RTC 周期为 30–3600 秒，业务超时为 5–120 秒且须短于周期")
-			}
-			if v.Sender != v.Receiver {
-				return Plan{}, errors.New("真实 SDK 任务请选择同一探测服务，由内部两个连接分别收发")
 			}
 			var target *protocol.Target
 			for j := range plan.Targets {
@@ -88,16 +90,25 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 			if target == nil || target.RTC == nil {
 				return Plan{}, errors.New("请先在目标服务配置 RTC 接入与鉴权")
 			}
+			if target.RTC.NativeCoverage != nil {
+				if v.SweepIntervalSeconds == 0 {
+					v.SweepIntervalSeconds = 900
+				}
+				if v.CrossIntervalSeconds == 0 {
+					v.CrossIntervalSeconds = 1800
+				}
+				if v.SweepIntervalSeconds < 60 || v.SweepIntervalSeconds > 86400 || v.CrossIntervalSeconds < 60 || v.CrossIntervalSeconds > 86400 {
+					return Plan{}, errors.New("Native 轮巡周期为 60–86400 秒")
+				}
+			}
 			v.RTC = cloneRTC(target.RTC)
 			v.CredentialVersion = target.CredentialVersion
 			v.Credentials = nil
 			v.HasCertificate = false
-			v.HasSenderToken = false
-			v.HasReceiverToken = false
 			if v.RTC.MediaDurationMS+2000 > v.TimeoutSeconds*1000 {
 				return Plan{}, errors.New("业务超时应至少比媒体发送时长多 2 秒")
 			}
-		} else if v.Sender == v.Receiver || !scenarios[v.Scenario] {
+		} else if !scenarios[v.Scenario] {
 			return Plan{}, errors.New("旧模拟任务双端或场景无效")
 		}
 		tasks[v.ID] = true
@@ -134,13 +145,16 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 	if err != nil {
 		return err
 	}
-	secrets := map[string]protocol.Credentials{}
+	if err := h.validateNativeBudget(p.Tasks, p.Targets); err != nil {
+		return err
+	}
+	secrets := map[string]protocol.AppCredentials{}
 	for i := range p.Targets {
 		target := &p.Targets[i]
 		previous := h.target(target.ID)
 		old := h.state.TargetCredentials[target.ID]
 		if credentialScopeChanged(previous.RTC, target.RTC) {
-			old = protocol.Credentials{}
+			old = protocol.AppCredentials{}
 		}
 		next := overlayCredentials(old, target.Credentials)
 		next, err = validateCredentials(target.RTC, next)
@@ -154,8 +168,6 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 		}
 		target.Credentials = nil
 		target.HasCertificate = false
-		target.HasSenderToken = false
-		target.HasReceiverToken = false
 		secrets[target.ID] = next
 	}
 	for i := range p.Tasks {
@@ -197,6 +209,30 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 		s.TargetCredentials = secrets
 		s.Credentials = nil
 		s.Enabled = map[string]bool{}
+		for id, current := range s.Native {
+			if !affected[id] {
+				continue
+			}
+			var next *protocol.Task
+			for i := range p.Tasks {
+				if p.Tasks[i].ID == id {
+					next = &p.Tasks[i]
+					break
+				}
+			}
+			if next == nil || !nativeEnabled(*next) {
+				delete(s.Native, id)
+				continue
+			}
+			if old, ok := h.task(id); ok && old.TargetID != next.TargetID {
+				current.Expected = nil
+			}
+			current.Version = ""
+			for _, phase := range current.Phases {
+				phase.Health = TaskHealth{State: "UNKNOWN", Reason: "CONFIG_CHANGED"}
+				phase.NextAt = now
+			}
+		}
 		for id := range s.Health {
 			if affected[id] {
 				delete(s.Health, id)
@@ -207,6 +243,9 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 				run.Status = "CANCELLED"
 				run.Reason = "CONFIG_CHANGED"
 				run.FinishedAt = &now
+				if run.Kind == nativeCoverageKind {
+					h.stopNative(s, run, now, "CONFIG_CHANGED", "CANCELLED")
+				}
 				if run.Kind == edgeSweepKind {
 					h.stopSweep(s, run, now, "CONFIG_CHANGED", "CANCELLED")
 				}

@@ -28,7 +28,11 @@ func (c *Client) collect(ctx context.Context, request protocol.LogRequest) {
 		c.mu.Unlock()
 		return
 	}
-	r := c.records[recordKey(request.RunID, request.Role)]
+	role := request.Role
+	if role == "pair" {
+		role = "sender"
+	}
+	r := c.records[recordKey(request.RunID, role)]
 	if r == nil {
 		if c.logReports == nil {
 			c.logReports = map[string]protocol.LogRequest{}
@@ -39,13 +43,26 @@ func (c *Client) collect(ctx context.Context, request protocol.LogRequest) {
 		c.mu.Unlock()
 		return
 	}
-	if r.Job.Role != request.Role || c.collecting[request.ID] || c.stopping || ctx.Err() != nil {
+	if (r.Job.Role != request.Role && request.Role != "pair") || c.collecting[request.ID] || c.stopping || ctx.Err() != nil {
 		c.mu.Unlock()
 		return
 	}
 	job := r.Job
 	partial := r.Result == nil
 	notStarted := r.Result != nil && r.Result.Cleanup == "NOT_STARTED"
+	endpoints := map[string]protocol.DiagnosticEndpoint{}
+	if request.Role == "pair" {
+		other := c.records[recordKey(request.RunID, "receiver")]
+		if request.Scope != protocol.ServiceLogScope || job.LogScope != protocol.ServiceLogScope || other == nil || other.Job.LogScope != protocol.ServiceLogScope || !sameBundleExecution(job, other.Job) {
+			c.mu.Unlock()
+			return
+		}
+		job.Role = "pair"
+		endpoints["sender"] = diagnosticEndpoint(r.Job)
+		endpoints["receiver"] = diagnosticEndpoint(other.Job)
+		partial = partial || other.Result == nil
+		notStarted = notStarted && other.Result != nil && other.Result.Cleanup == "NOT_STARTED"
+	}
 	c.collecting[request.ID] = true
 	c.logsWG.Add(1)
 	c.mu.Unlock()
@@ -91,46 +108,25 @@ func (c *Client) collect(ctx context.Context, request protocol.LogRequest) {
 		c.mu.Unlock()
 		path := filepath.Join(c.runDir(request.RunID), "bundles", request.ID+".zip")
 		data, e := os.ReadFile(path)
+		if e == nil && !cachedBundleMatchesJob(data, job) {
+			// Keep the original trace files; a new collection request rebuilds the ZIP.
+			c.mu.Lock()
+			if c.logReports == nil {
+				c.logReports = map[string]protocol.LogRequest{}
+			}
+			request.Status = "FAILED"
+			request.Error = "PROBE_LOG_UNAVAILABLE"
+			c.logReports[request.ID] = request
+			c.mu.Unlock()
+			return
+		}
 		if os.IsNotExist(e) {
 			var buf bytes.Buffer
 			writer := zip.NewWriter(&buf)
-			files := []map[string]any{}
-			for _, name := range []string{"events.jsonl", "sdk-api.jsonl", "result.json", "process.stdout.log", "process.stderr.log"} {
-				source := filepath.Join(c.runDir(request.RunID), name)
-				if name == "events.jsonl" || name == "result.json" || name == "sdk-api.jsonl" {
-					source = filepath.Join(c.endpointDir(request.RunID, request.Role), name)
-				}
-				f, err := os.Open(source)
-				if err != nil {
-					files = append(files, map[string]any{"name": name, "missing": true})
-					continue
-				}
-				limit := 1 << 20
-				if name == "sdk-api.jsonl" {
-					limit = 8 << 20
-				}
-				b, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
-				f.Close()
-				if err != nil {
-					writer.Close()
-					return
-				}
-				truncated := len(b) > limit
-				if truncated {
-					b = b[:limit]
-				}
-				b = c.safeText(b)
-				sum := sha256.Sum256(b)
-				entry, err := writer.Create(name)
-				if err != nil {
-					writer.Close()
-					return
-				}
-				if _, err = entry.Write(b); err != nil {
-					writer.Close()
-					return
-				}
-				files = append(files, map[string]any{"name": name, "bytes": len(b), "sha256": hex.EncodeToString(sum[:]), "truncated": truncated})
+			files, err := c.appendDiagnosticFiles(writer, request.RunID, request.Role)
+			if err != nil {
+				writer.Close()
+				return
 			}
 			sdkFiles, err := c.appendSDKLogs(writer, request.RunID)
 			if err != nil {
@@ -139,7 +135,7 @@ func (c *Client) collect(ctx context.Context, request protocol.LogRequest) {
 			}
 			files = append(files, sdkFiles...)
 
-			manifest := map[string]any{"request_id": request.ID, "job": job, "driver": job.Target.Driver, "simulation_only": job.Target.Driver == "mock", "partial": partial, "collected_at": time.Now().UTC(), "files": files, "native_sdk_logs": map[bool]string{true: "collected", false: "unavailable"}[len(sdkFiles) > 0]}
+			manifest := map[string]any{"scope": request.Scope, "endpoints": endpoints, "request_id": request.ID, "job": job, "driver": job.Target.Driver, "simulation_only": job.Target.Driver == "mock", "partial": partial, "collected_at": time.Now().UTC(), "files": files, "native_sdk_logs": map[bool]string{true: "collected", false: "unavailable"}[len(sdkFiles) > 0]}
 			var exit protocol.ProcessExitInfo
 			if durable.Read(filepath.Join(c.runDir(request.RunID), "process.exit.json"), 4096, &exit) == nil {
 				manifest["process_exit"] = exit
@@ -223,4 +219,48 @@ func (c *Client) appendSDKLogs(writer *zip.Writer, run string) ([]map[string]any
 		files = append(files, map[string]any{"name": name, "bytes": len(b), "sha256": hex.EncodeToString(sum[:]), "truncated": truncated})
 	}
 	return files, nil
+}
+
+// Cached artifacts must still describe the restored execution identity.
+func cachedBundleMatchesJob(data []byte, job protocol.Job) bool {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return false
+	}
+	for _, file := range archive.File {
+		if file.Name != "manifest.json" {
+			continue
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return false
+		}
+		defer reader.Close()
+		var manifest struct {
+			Scope     string                                 `json:"scope"`
+			Endpoints map[string]protocol.DiagnosticEndpoint `json:"endpoints"`
+			Job       protocol.Job                           `json:"job"`
+		}
+		if json.NewDecoder(io.LimitReader(reader, 64<<10)).Decode(&manifest) != nil {
+			return false
+		}
+		stored := manifest.Job
+		if job.Role == "pair" {
+			if manifest.Scope != protocol.ServiceLogScope || stored.LogScope != protocol.ServiceLogScope || len(manifest.Endpoints) != 2 {
+				return false
+			}
+			for _, role := range []string{"sender", "receiver"} {
+				endpoint, ok := manifest.Endpoints[role]
+				uid := "10001"
+				if role == "receiver" {
+					uid = "10002"
+				}
+				if !ok || endpoint.Role != role || endpoint.Channel != job.Channel || endpoint.UID != uid || endpoint.PublisherUID != job.PublisherUID {
+					return false
+				}
+			}
+		}
+		return stored.RunID == job.RunID && stored.Revision == job.Revision && stored.Role == job.Role && stored.ProbeID == job.ProbeID && stored.UID == job.UID && stored.PublisherUID == job.PublisherUID && stored.Channel == job.Channel
+	}
+	return false
 }

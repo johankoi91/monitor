@@ -12,10 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 
+	"github.com/johankoi91/monitor/rtc-probe/durable"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
 )
 
@@ -45,6 +45,9 @@ type Endpoint struct {
 	Result *protocol.Result `json:"result,omitempty"`
 }
 type Run struct {
+	NativePlan   *protocol.NativePlan           `json:"native_plan,omitempty"`
+	NativeCase   *protocol.NativeCase           `json:"native_case,omitempty"`
+	Cases        []NativeCaseResult             `json:"cases,omitempty"`
 	Kind         string                         `json:"kind,omitempty"`
 	ParentRunID  string                         `json:"parent_run_id,omitempty"`
 	EdgeEndpoint string                         `json:"edge_endpoint,omitempty"`
@@ -63,16 +66,16 @@ type Run struct {
 	Logs         map[string]protocol.LogRequest `json:"logs"`
 }
 type state struct {
-	TargetCredentials map[string]protocol.Credentials `json:"target_credentials,omitempty"`
-	PendingAudits     []Audit                         `json:"pending_audits,omitempty"`
-	Registered        map[string]ProbeConfig          `json:"registered,omitempty"`
-	DisabledProbes    map[string]bool                 `json:"disabled_probes,omitempty"`
-	Settings          Settings                        `json:"settings"`
-	Health            map[string]TaskHealth           `json:"health,omitempty"`
-	Credentials       map[string]protocol.Credentials `json:"credentials,omitempty"`
-	Plan              *Plan                           `json:"plan,omitempty"`
-	Runs              map[string]*Run                 `json:"runs"`
-	Enabled           map[string]bool                 `json:"enabled"`
+	Native            map[string]*NativeState            `json:"native,omitempty"`
+	TargetCredentials map[string]protocol.AppCredentials `json:"target_credentials,omitempty"`
+	Registered        map[string]ProbeConfig             `json:"registered,omitempty"`
+	DisabledProbes    map[string]bool                    `json:"disabled_probes,omitempty"`
+	Settings          Settings                           `json:"settings"`
+	Health            map[string]TaskHealth              `json:"health,omitempty"`
+	Credentials       map[string]protocol.Credentials    `json:"credentials,omitempty"`
+	Plan              *Plan                              `json:"plan,omitempty"`
+	Runs              map[string]*Run                    `json:"runs"`
+	Enabled           map[string]bool                    `json:"enabled"`
 }
 type session struct {
 	StorageBytes                       int64
@@ -88,6 +91,10 @@ type session struct {
 	Stop                               chan struct{}
 }
 type Hub struct {
+	nativeInventory    func() (protocol.NativeInventory, error)
+	nativeSnapshot     protocol.NativeInventory
+	nativeInventoryAt  time.Time
+	nativeInventoryErr error
 	lastStorageCheck   time.Time
 	uploadMu           sync.Mutex
 	archive            Archive
@@ -142,7 +149,7 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 		if t.TimeoutSeconds == 0 {
 			t.TimeoutSeconds = 30
 		}
-		if !protocol.ValidID(t.ID) || tasks[t.ID] || !targets[t.TargetID] || !probes[t.Sender] || !probes[t.Receiver] || t.IntervalSeconds < 5 || t.IntervalSeconds > 3600 || t.TimeoutSeconds < 3 || t.TimeoutSeconds >= t.IntervalSeconds {
+		if !protocol.ValidID(t.ID) || tasks[t.ID] || !targets[t.TargetID] || !probes[t.ProbeID] || t.IntervalSeconds < 5 || t.IntervalSeconds > 3600 || t.TimeoutSeconds < 3 || t.TimeoutSeconds >= t.IntervalSeconds {
 			return nil, errors.New("invalid RTC task")
 		}
 		tasks[t.ID] = true
@@ -181,13 +188,18 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 	if err != nil {
 		return nil, err
 	}
+	bindingsMigrated := false
 	if len(b) > 0 {
+		b, bindingsMigrated, err = migrateStoredState(b)
+		if err != nil {
+			return nil, err
+		}
 		if len(b) > 32<<20 || json.Unmarshal(b, &h.state) != nil || h.state.Runs == nil || h.state.Enabled == nil {
 			return nil, errors.New("corrupt RTC state; preserve for repair")
 		}
 	}
 	for id, run := range h.state.Runs {
-		if run == nil || !protocol.ValidID(id) || run.ID != id || (run.Kind != edgeSweepKind && (run.Endpoints["sender"] == nil || run.Endpoints["receiver"] == nil)) || (run.Kind == edgeSweepKind && (len(run.Edges) == 0 || len(run.Edges) > protocol.MaxMediaEdges)) || run.Logs == nil {
+		if run == nil || !protocol.ValidID(id) || run.ID != id || (!isSummary(run) && (run.Endpoints["sender"] == nil || run.Endpoints["receiver"] == nil)) || (run.Kind == edgeSweepKind && (len(run.Edges) == 0 || len(run.Edges) > protocol.MaxMediaEdges)) || (run.Kind == nativeCoverageKind && (run.NativePlan == nil || len(run.Cases) == 0)) || run.Logs == nil {
 			return nil, errors.New("corrupt RTC execution; preserve for repair")
 		}
 	}
@@ -201,14 +213,24 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 	} else {
 		now := time.Now().UTC()
 		for id, v := range h.state.Health {
-			before := v
 			v.State = "UNKNOWN"
 			v.Reason = "CENTER_RESTARTED"
 			v.FailureCount = 0
 			v.SuccessCount = 0
 			v.UnknownSince = &now
 			h.state.Health[id] = v
-			h.state.PendingAudits = append(h.state.PendingAudits, healthAudit(&before, &v))
+		}
+	}
+	if h.state.Native == nil {
+		h.state.Native = map[string]*NativeState{}
+	}
+	for _, state := range h.state.Native {
+		for _, phase := range state.Phases {
+			phase.Health.State = "UNKNOWN"
+			phase.Health.Reason = "CENTER_RESTARTED"
+			phase.Health.FailureCount = 0
+			phase.Health.SuccessCount = 0
+			phase.NextAt = time.Now().UTC()
 		}
 	}
 	h.tokens = map[string]*protocol.Credentials{}
@@ -234,12 +256,15 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 		}
 	}
 	now := time.Now().UTC()
-	dirty := migrated || len(h.state.PendingAudits) > 0
+	dirty := bindingsMigrated || migrated || len(h.state.Health) > 0
 	for _, r := range h.state.Runs {
 		if !terminal(r.Status) {
 			r.Status = "ERROR"
 			r.Reason = "CENTER_RESTARTED"
 			r.FinishedAt = &now
+			if r.Kind == nativeCoverageKind {
+				h.stopNative(&h.state, r, now, "CENTER_RESTARTED", "ERROR")
+			}
 			if r.Kind == edgeSweepKind {
 				h.stopSweep(&h.state, r, now, "CENTER_RESTARTED", "ERROR")
 			}
@@ -306,7 +331,6 @@ func (h *Hub) persist(s *state) error {
 			}
 		}
 	}
-	s.PendingAudits = append(s.PendingAudits, h.healthAudits(*s)...)
 	b, e := json.Marshal(s)
 	if e != nil {
 		return e
@@ -314,7 +338,11 @@ func (h *Hub) persist(s *state) error {
 	if len(b) > 32<<20 {
 		return errors.New("RTC state capacity reached")
 	}
-	e = h.commitAuditedState(s, b)
+	if h.documents != nil {
+		e = h.documents.SaveDocument("rtc-probe/state-v1", b)
+	} else {
+		e = durable.Bytes(filepath.Join(h.dir, "state.json"), b)
+	}
 	h.storageOK = e == nil
 	if e != nil {
 		h.storageInterrupted = true
@@ -455,6 +483,7 @@ func (h *Hub) tick(now time.Time) {
 	h.refreshHealth(now)
 	h.maintenance(now)
 	h.advanceSweeps(now)
+	h.tickNative(now)
 	for _, r := range h.state.Runs {
 		for id, request := range r.Logs {
 			if request.Status == "REQUESTED" && now.After(request.ExpiresAt) {
@@ -467,7 +496,7 @@ func (h *Hub) tick(now time.Time) {
 				})
 			}
 		}
-		if r.Kind != edgeSweepKind && !terminal(r.Status) && now.After(r.Deadline.Add(protocol.CleanupGrace+protocol.ResultReportGrace)) {
+		if !isSummary(r) && !terminal(r.Status) && now.After(r.Deadline.Add(protocol.CleanupGrace+protocol.ResultReportGrace)) {
 			id := r.ID
 			_ = h.change(func(s *state) error {
 				v := s.Runs[id]
@@ -483,6 +512,9 @@ func (h *Hub) tick(now time.Time) {
 	scheduled := false
 	for i := 0; i < len(h.config.Tasks); i++ {
 		t := h.config.Tasks[(i+h.scheduleCursor)%len(h.config.Tasks)]
+		if nativeEnabled(t) {
+			continue
+		}
 		if h.enabled(t) && !now.Before(h.next[t.ID]) {
 			scheduled = true
 			h.next[t.ID] = now.Add(time.Duration(t.IntervalSeconds) * time.Second)
@@ -510,12 +542,18 @@ func (h *Hub) Start(taskID string) (Run, error) {
 	return h.startLocked(taskID, time.Now().UTC())
 }
 func (h *Hub) startLocked(taskID string, now time.Time) (Run, error) {
+	if task, ok := h.task(taskID); ok && nativeEnabled(task) {
+		return h.startNativeCoverage(task, now)
+	}
 	if task, ok := h.task(taskID); ok && task.RTC != nil && task.RTC.MediaEdges != nil {
 		return h.startSweepLocked(taskID, now)
 	}
 	return h.startProbeLocked(taskID, now, "", "")
 }
 func (h *Hub) startProbeLocked(taskID string, now time.Time, edgeEndpoint, parentID string) (Run, error) {
+	return h.startProbeSpec(taskID, now, edgeEndpoint, parentID, nil)
+}
+func (h *Hub) startProbeSpec(taskID string, now time.Time, edgeEndpoint, parentID string, nativeCase *protocol.NativeCase) (Run, error) {
 	if !h.storageOK {
 		if err := h.change(func(*state) error { return nil }); err != nil {
 			return Run{}, errors.New("RTC 存储不可用")
@@ -534,20 +572,25 @@ func (h *Hub) startProbeLocked(taskID string, now time.Time, edgeEndpoint, paren
 	target := h.target(t.TargetID)
 	rev := revision(t, target)
 	id := protocol.ID()
-	r := Run{ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, ID: id, TaskID: t.ID, TargetID: t.TargetID, Revision: rev, Driver: target.Driver, Status: "PREPARING", Reason: "MOCK_EXECUTION", CreatedAt: now, Deadline: now.Add(time.Duration(t.TimeoutSeconds) * time.Second), Endpoints: map[string]*Endpoint{}, Logs: map[string]protocol.LogRequest{}}
+	r := Run{NativeCase: nativeCase, ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, ID: id, TaskID: t.ID, TargetID: t.TargetID, Revision: rev, Driver: target.Driver, Status: "PREPARING", Reason: "MOCK_EXECUTION", CreatedAt: now, Deadline: now.Add(time.Duration(t.TimeoutSeconds) * time.Second), Endpoints: map[string]*Endpoint{}, Logs: map[string]protocol.LogRequest{}}
 	if target.Driver == "agora" {
 		r.Reason = "SDK_EXECUTION"
 	}
-	for role, probe := range map[string]string{"sender": t.Sender, "receiver": t.Receiver} {
+	for role, probe := range map[string]string{"sender": t.ProbeID, "receiver": t.ProbeID} {
 		uid := "10001"
 		if role == "receiver" {
 			uid = "10002"
 		}
-		job := protocol.Job{ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, RunID: id, TaskID: t.ID, Target: target, Revision: rev, ProbeID: probe, Role: role, Channel: "probe_" + id, UID: uid, PublisherUID: "10001", Scenario: t.Scenario, Deadline: r.Deadline, MediaDurationMS: 1200}
+		job := protocol.Job{NativeCase: nativeCase, ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, RunID: id, TaskID: t.ID, Target: target, Revision: rev, ProbeID: probe, Role: role, Channel: "probe_" + id, UID: uid, PublisherUID: "10001", Scenario: t.Scenario, Deadline: r.Deadline, MediaDurationMS: 1200}
 		if sess := h.sessions[probe]; sess != nil {
 			job.ProbeVersion = sess.ProbeVersion
 			job.SDKVersion = sess.SDKVersion
 			job.Platform = sess.Platform
+			for _, capability := range sess.Capabilities {
+				if capability == protocol.SharedServiceLogsCapability {
+					job.LogScope = protocol.ServiceLogScope
+				}
+			}
 		}
 		for _, config := range h.probesLocked() {
 			if config.ID == probe {
@@ -558,15 +601,6 @@ func (h *Hub) startProbeLocked(taskID string, now time.Time, edgeEndpoint, paren
 		if t.RTC != nil {
 			job.RTC = t.RTC
 			job.MediaDurationMS = t.RTC.MediaDurationMS
-			job.Channel = t.RTC.ChannelPrefix + "_" + id
-			if t.RTC.ChannelName != "" {
-				job.Channel = t.RTC.ChannelName
-			}
-			job.PublisherUID = strconv.FormatUint(uint64(t.RTC.SenderUID), 10)
-			job.UID = job.PublisherUID
-			if role == "receiver" {
-				job.UID = strconv.FormatUint(uint64(t.RTC.ReceiverUID), 10)
-			}
 		}
 		r.Endpoints[role] = &Endpoint{Job: job, Events: []protocol.Event{}}
 	}
@@ -600,7 +634,9 @@ func (h *Hub) startProbeLocked(taskID string, now time.Time, edgeEndpoint, paren
 				}
 			}
 			parent.Status = "RUNNING"
-			parent.Reason = "MEDIA_EDGE_SWEEP_RUNNING"
+			if parent.Kind == edgeSweepKind {
+				parent.Reason = "MEDIA_EDGE_SWEEP_RUNNING"
+			}
 		}
 		return nil
 	})
@@ -618,12 +654,33 @@ func (h *Hub) Enable(id string, enabled bool) error {
 	if !ok {
 		return errors.New("task not found")
 	}
+	if enabled && nativeEnabled(t) {
+		tasks := append([]protocol.Task(nil), h.config.Tasks...)
+		for i := range tasks {
+			tasks[i].Enabled = h.enabled(tasks[i])
+			if tasks[i].ID == id {
+				tasks[i].Enabled = true
+			}
+		}
+		if err := h.validateNativeBudget(tasks, h.config.Targets); err != nil {
+			return err
+		}
+	}
 	if h.enabled(t) == enabled {
 		return nil
 	}
 	now := time.Now().UTC()
 	return h.change(func(s *state) error {
 		s.Enabled[id] = enabled
+		if state := s.Native[id]; state != nil {
+			for _, phase := range state.Phases {
+				phase.Health.State = "UNKNOWN"
+				phase.Health.Reason = "TASK_DISABLED"
+				phase.Health.FailureCount = 0
+				phase.Health.SuccessCount = 0
+				phase.NextAt = now
+			}
+		}
 		if !enabled {
 			v := s.Health[id]
 			if v.TaskID == "" {
@@ -641,7 +698,6 @@ func (h *Hub) Enable(id string, enabled bool) error {
 			old := s.Health[id]
 			v.LastSuccessAt = old.LastSuccessAt
 			v.LastRunID = old.LastRunID
-			v.LatestResult = old.LatestResult
 			v.LastResultAt = old.LastResultAt
 			s.Health[id] = v
 		}
@@ -652,6 +708,9 @@ func (h *Hub) Enable(id string, enabled bool) error {
 					r.Status = "CANCELLED"
 					r.Reason = "TASK_DISABLED"
 					r.FinishedAt = &now
+					if r.Kind == nativeCoverageKind {
+						h.stopNative(s, r, now, "TASK_DISABLED", "CANCELLED")
+					}
 					if r.Kind == edgeSweepKind {
 						h.stopSweep(s, r, now, "TASK_DISABLED", "CANCELLED")
 					}
@@ -674,6 +733,9 @@ func (h *Hub) Cancel(id string) error {
 			r.Status = "CANCELLED"
 			r.Reason = "MANUAL_CANCEL"
 			r.FinishedAt = &now
+			if r.Kind == nativeCoverageKind {
+				h.stopNative(s, r, now, "MANUAL_CANCEL", "CANCELLED")
+			}
 			if r.Kind == edgeSweepKind {
 				h.stopSweep(s, r, now, "MANUAL_CANCEL", "CANCELLED")
 			}
@@ -682,30 +744,71 @@ func (h *Hub) Cancel(id string) error {
 		return nil
 	})
 }
+func logJob(r *Run, role string) (protocol.Job, bool) {
+	if r == nil {
+		return protocol.Job{}, false
+	}
+	if role == "pair" {
+		a, b := r.Endpoints["sender"], r.Endpoints["receiver"]
+		if a == nil || b == nil || a.Job.ProbeID != b.Job.ProbeID || a.Job.LogScope != protocol.ServiceLogScope || b.Job.LogScope != protocol.ServiceLogScope {
+			return protocol.Job{}, false
+		}
+		job := a.Job
+		job.Role = "pair"
+		return job, true
+	}
+	if endpoint := r.Endpoints[role]; endpoint != nil {
+		return endpoint.Job, true
+	}
+	return protocol.Job{}, false
+}
 func (h *Hub) addLogs(r *Run, now time.Time) {
-	for role, e := range r.Endpoints {
+	if r.Logs == nil {
+		r.Logs = map[string]protocol.LogRequest{}
+	}
+	roles := []string{"sender", "receiver"}
+	if _, ok := logJob(r, "pair"); ok {
+		roles = []string{"pair"}
+	}
+	for _, role := range roles {
+		job, ok := logJob(r, role)
+		if !ok {
+			continue
+		}
+		complete := true
+		if role == "pair" {
+			complete = r.Endpoints["sender"].Result != nil && r.Endpoints["receiver"].Result != nil
+		} else {
+			complete = r.Endpoints[role].Result != nil
+		}
 		exists := false
 		for _, v := range r.Logs {
-			if v.Role == role {
-				if v.Partial && e.Result != nil {
-					continue
-				}
-				if v.Status == "REQUESTED" && now.Before(v.ExpiresAt) {
+			if v.Role != role {
+				continue
+			}
+			if v.Partial && complete {
+				continue
+			}
+			if v.Status == "REQUESTED" && now.Before(v.ExpiresAt) {
+				exists = true
+			}
+			if v.Status == "AVAILABLE" {
+				if _, err := os.Stat(filepath.Join(h.dir, "logs", v.ID+".zip")); err == nil {
 					exists = true
-				}
-				if v.Status == "AVAILABLE" {
-					if _, err := os.Stat(filepath.Join(h.dir, "logs", v.ID+".zip")); err == nil {
-						exists = true
-					}
 				}
 			}
 		}
 		if !exists {
 			id := protocol.ID()
-			r.Logs[id] = protocol.LogRequest{ID: id, RunID: r.ID, ProbeID: e.Job.ProbeID, Role: role, Status: "REQUESTED", ExpiresAt: now.Add(time.Hour)}
+			scope := ""
+			if role == "pair" {
+				scope = protocol.ServiceLogScope
+			}
+			r.Logs[id] = protocol.LogRequest{Scope: scope, ID: id, RunID: r.ID, ProbeID: job.ProbeID, Role: role, Status: "REQUESTED", ExpiresAt: now.Add(time.Hour)}
 		}
 	}
 }
+
 func (h *Hub) Collect(id string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -720,6 +823,24 @@ func (h *Hub) Collect(id string) error {
 	return h.change(func(s *state) error {
 		if s.Runs[id] == nil {
 			s.Runs[id] = &archived
+		}
+		if s.Runs[id].Kind == nativeCoverageKind {
+			for _, row := range s.Runs[id].Cases {
+				if row.RunID == "" {
+					continue
+				}
+				child := s.Runs[row.RunID]
+				if child == nil {
+					saved, err := h.archive.RTCGetRun(row.RunID)
+					if err != nil {
+						continue
+					}
+					child = &saved
+					s.Runs[row.RunID] = child
+				}
+				h.addLogs(child, time.Now().UTC())
+			}
+			return nil
 		}
 		if s.Runs[id].Kind == edgeSweepKind {
 			for _, edge := range s.Runs[id].Edges {
@@ -761,10 +882,10 @@ func (h *Hub) Commands(id string, s *session) []protocol.Message {
 		}
 	}
 	for _, r := range h.state.Runs {
-		if r.Kind == edgeSweepKind {
+		if isSummary(r) {
 			continue
 		}
-		if r.Driver == "agora" && r.Endpoints["sender"].Job.ProbeID == id && r.Endpoints["receiver"].Job.ProbeID == id {
+		if r.Endpoints["sender"].Job.ProbeID == id && r.Endpoints["receiver"].Job.ProbeID == id {
 			if m, ok := h.pairCommand(r); ok {
 				out = append(out, m)
 			}
@@ -826,7 +947,7 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 		return h.receiveLogStatus(id, m)
 	}
 	if m.Type == "hello" || m.Type == "heartbeat" {
-		if (m.Driver != "mock" && m.Driver != "agora") || m.Capacity < 1 || m.Capacity > 8 {
+		if (m.Driver != "mock" && m.Driver != "agora") || m.Capacity < 1 || m.Capacity > protocol.MaxWorkerCapacity {
 			return protocol.Message{}, errors.New("unsupported capability")
 		}
 		sess.Driver = m.Driver
@@ -869,6 +990,11 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 			if !terminal(run.Status) && run.Endpoints["sender"].Ready && run.Endpoints["receiver"].Ready {
 				run.Status = "RUNNING"
 				if p := s.Runs[run.ParentRunID]; p != nil && !terminal(p.Status) {
+					for i := range p.Cases {
+						if p.Cases[i].RunID == run.ID {
+							p.Cases[i].Status = "RUNNING"
+						}
+					}
 					for i := range p.Edges {
 						if p.Edges[i].RunID == run.ID {
 							p.Edges[i].Status = "RUNNING"
@@ -944,6 +1070,15 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 							run.Reason = x.Reason
 						}
 					}
+					if run.NativeCase != nil {
+						for _, result := range []*protocol.Result{a, b} {
+							if result.Outcome == "FAILED" {
+								run.Status = "FAILED"
+								run.Reason = result.Reason
+								break
+							}
+						}
+					}
 					if run.Status == "SUCCESS" && !verifiedEvidence(run, a, b) {
 						run.Status = "FAILED"
 						run.Reason = "MEDIA_EVIDENCE_MISSING"
@@ -1007,7 +1142,7 @@ func (h *Hub) Snapshot() any {
 			healths[t.ID] = h.effectiveHealth(t, now)
 		}
 	}
-	v := map[string]any{"mode": mode, "config_revision": planRevision(h.planLocked()), "rtc_service_status": health, "reason": reason, "storage_available": h.storageOK, "probes": probes, "targets": h.planLocked().Targets, "tasks": tasks, "runs": runs, "task_health": healths, "settings": h.state.Settings}
+	v := map[string]any{"mode": mode, "config_revision": planRevision(h.planLocked()), "rtc_service_status": health, "reason": reason, "storage_available": h.storageOK, "probes": probes, "targets": h.planLocked().Targets, "tasks": tasks, "runs": runs, "task_health": healths, "settings": h.state.Settings, "native_coverage": h.state.Native}
 	b, _ := json.Marshal(v)
 	return json.RawMessage(b)
 }

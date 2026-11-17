@@ -5,6 +5,7 @@ package agoranative
 import (
 	"encoding/json"
 	rtc "github.com/AgoraIO-Extensions/Agora-Golang-Server-SDK/v2/go_sdk/rtc"
+	"github.com/johankoi91/monitor/rtc-probe/protocol"
 	"path/filepath"
 )
 
@@ -32,13 +33,13 @@ func (r *recorder) arguments(role, name string) map[string]any {
 	case "SetVideoEncoderConfiguration":
 		return map[string]any{"config": map[string]any{"CodecType": int(rtc.VideoCodecTypeH264), "Width": 352, "Height": 288, "Framerate": 15, "Bitrate": 400, "MinBitrate": -1, "OrientationMode": 0, "DegradePreference": 2, "MirrorMode": 0, "EncodeAlpha": false}}
 	case "Connect":
-		uid := p.SenderUID
+		uid := protocol.SenderUID
 		token := ""
 		if r.job.Credentials != nil {
 			token = r.job.Credentials.SenderToken
 		}
 		if role == "receiver" {
-			uid = p.ReceiverUID
+			uid = protocol.ReceiverUID
 			if r.job.Credentials != nil {
 				token = r.job.Credentials.ReceiverToken
 			}

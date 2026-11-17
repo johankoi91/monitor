@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,9 +30,11 @@ import (
 )
 
 type Config struct {
+	RouteCapturePath         string
 	URL, ID, Secret, DataDir string
 	Driver                   string
 	Capacity                 int
+	AutoCapacity             bool
 	AllowPlaintextLoopback   bool
 	WorkerCommand            func(context.Context) *exec.Cmd
 }
@@ -85,10 +88,19 @@ func New(c Config) (*Client, error) {
 	if c.Driver == "" {
 		c.Driver = "mock"
 	}
+	if c.RouteCapturePath == "" {
+		c.RouteCapturePath = os.Getenv("RTC_PROBE_ROUTE_CAPTURE")
+		if c.RouteCapturePath == "" {
+			c.RouteCapturePath = "/opt/rtc-probe/libroute_capture.so"
+		}
+	}
+	if c.AutoCapacity {
+		c.Capacity = resourceWorkerCapacity()
+	}
 	if c.Capacity == 0 {
 		c.Capacity = 2
 	}
-	if c.Capacity < 1 || c.Capacity > 8 {
+	if c.Capacity < 1 || c.Capacity > protocol.MaxWorkerCapacity {
 		return nil, errors.New("invalid worker capacity")
 	}
 	if c.WorkerCommand == nil {
@@ -163,6 +175,10 @@ func (c *Client) Run(parent context.Context) error {
 		if r.Result == nil {
 			r.Result = &protocol.Result{ID: protocol.ID(), WorkerID: protocol.ID(), Driver: "mock", Outcome: "ERROR", Reason: "PROBE_PROCESS_RESTARTED", Cleanup: "UNKNOWN", FinishedAt: time.Now().UTC()}
 			r.Result.Driver = r.Job.Target.Driver
+		}
+		// Older pair clients stored zero before the worker applied its UID default.
+		if r.Job.Target.Driver == "agora" && r.Job.Role == "receiver" && r.Job.UID == "0" {
+			r.Job.UID = strconv.FormatUint(uint64(protocol.ReceiverUID), 10)
 		}
 		migrated[recordKey(r.Job.RunID, r.Job.Role)] = r
 	}
@@ -270,11 +286,11 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 	}
 	hello := protocol.Msg("hello")
 	hello.Driver = c.config.Driver
-	hello.ProbeVersion, hello.SDKVersion, hello.Platform = "0.4.0", sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
+	hello.ProbeVersion, hello.SDKVersion, hello.Platform = "0.7.0", sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
 	hello.Capacity = c.config.Capacity
 	hello.ResourceError = c.resourceStatus()
 	hello.StorageBytes = c.storageSize()
-	hello.Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "retention_v1", "log_chunks_v1", "rtc_vos_list_v1"}
+	hello.Capabilities = c.capabilities()
 	if e := write(hello); e != nil {
 		return e
 	}
@@ -299,11 +315,11 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 		case <-heartbeat.C:
 			m := protocol.Msg("heartbeat")
 			m.Driver = c.config.Driver
-			m.ProbeVersion, m.SDKVersion, m.Platform = "0.4.0", sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
+			m.ProbeVersion, m.SDKVersion, m.Platform = "0.7.0", sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
 			m.Capacity = c.config.Capacity
 			m.ResourceError = c.resourceStatus()
 			m.StorageBytes = c.storageSize()
-			m.Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "retention_v1", "log_chunks_v1", "rtc_vos_list_v1"}
+			m.Capabilities = c.capabilities()
 			if e := write(m); e != nil {
 				return e
 			}
@@ -368,6 +384,8 @@ func (c *Client) pending() []protocol.Message {
 			out = append(out, m)
 		}
 	}
+	priority := map[string]int{"run_ready": 0, "run_result": 1, "log_status": 2, "telemetry_batch": 3}
+	sort.SliceStable(out, func(i, j int) bool { return priority[out[i].Type] < priority[out[j].Type] })
 	return out
 }
 func (c *Client) handle(ctx context.Context, m protocol.Message) error {
@@ -493,6 +511,14 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		}
 		return nil
 	}
+	if job.NativeCase != nil {
+		if err := job.NativeCase.Validate(); err != nil {
+			return err
+		}
+		if _, err := os.Stat(c.config.RouteCapturePath); err != nil {
+			return errors.New("native route capture unavailable")
+		}
+	}
 	if len(c.workers) >= c.config.Capacity {
 		return errors.New("worker capacity exhausted")
 	}
@@ -516,8 +542,8 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		v := job
 		v.Credentials = nil
 		v.Role = role
-		if job.RTC != nil && role == "receiver" {
-			v.UID = strconv.FormatUint(uint64(job.RTC.ReceiverUID), 10)
+		if role == "receiver" {
+			v.UID = strconv.FormatUint(uint64(protocol.ReceiverUID), 10)
 		}
 		c.records[recordKey(job.RunID, role)] = &record{Job: v, Events: []protocol.Event{}}
 	}
@@ -566,6 +592,22 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		cancel()
 		return e
 	}
+	if job.NativeCase != nil {
+		environment := cmd.Env
+		if environment == nil {
+			environment = os.Environ()
+		}
+		for _, key := range []string{"LD_PRELOAD", "RTC_PROBE_ROUTE_LOG", "RTC_PROBE_ROUTE_ALLOW_ENDPOINTS"} {
+			filtered := environment[:0]
+			for _, value := range environment {
+				if !strings.HasPrefix(value, key+"=") {
+					filtered = append(filtered, value)
+				}
+			}
+			environment = filtered
+		}
+		cmd.Env = append(environment, "LD_PRELOAD="+c.config.RouteCapturePath, "RTC_PROBE_ROUTE_LOG="+filepath.Join(dir, "route-capture.jsonl"), "RTC_PROBE_ROUTE_ALLOW_ENDPOINTS="+strings.Join(job.NativeCase.AllowedEndpoints(), ";"))
+	}
 	cmd.Stdout = &limitedWriter{w: stdout, remaining: 1 << 20}
 	cmd.Stderr = &limitedWriter{w: stderr, remaining: 1 << 20}
 	p := &process{input: json.NewEncoder(stdin), cancel: cancel, done: make(chan struct{})}
@@ -588,17 +630,9 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		defer stdout.Close()
 		defer stderr.Close()
 		if startErr == nil {
-			decoder := json.NewDecoder(read)
-			for {
-				var m protocol.Message
-				if e := decoder.Decode(&m); e != nil {
-					break
-				}
-				if e := c.recordMessage(job, m); e != nil {
-					c.fail(e)
-					cancel()
-					break
-				}
+			if err := c.readWorkerMessages(workerCtx, job, read); err != nil {
+				c.fail(err)
+				cancel()
 			}
 		}
 		if cmd.Process != nil {
@@ -637,9 +671,7 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 	return nil
 }
 func (c *Client) runDir(id string) string { return filepath.Join(c.config.DataDir, "runs", id) }
-func (c *Client) recordMessage(job protocol.Job, m protocol.Message) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Client) recordWorkerMessage(job protocol.Job, m protocol.Message) error {
 	r := c.records[recordKey(job.RunID, m.Role)]
 	if r == nil || m.RunID != job.RunID || m.Revision != job.Revision || (m.Role != job.Role && job.Role != "pair") {
 		return errors.New("worker evidence identity mismatch")
@@ -687,7 +719,7 @@ func (c *Client) recordMessage(job protocol.Job, m protocol.Message) error {
 	default:
 		return fmt.Errorf("invalid worker message")
 	}
-	return c.save()
+	return nil
 }
 
 type limitedWriter struct {
@@ -722,7 +754,10 @@ func (c *Client) UploadURL(id string) string {
 	return u.String()
 }
 func (c *Client) safeText(b []byte) []byte {
-	text := strings.ReplaceAll(string(b), c.config.Secret, "[REDACTED]")
+	text := string(b)
+	if c.config.Secret != "" {
+		text = strings.ReplaceAll(text, c.config.Secret, "[REDACTED]")
+	}
 	text = regexp.MustCompile(`00[67][A-Za-z0-9+/=]{40,}`).ReplaceAllString(text, "[REDACTED_TOKEN]")
 	return []byte(text)
 }
@@ -734,4 +769,14 @@ func sdkVersion(driver string) string {
 		return "Go-2.6.6/native-4.6.31.135"
 	}
 	return "mock/1"
+}
+
+func (c *Client) capabilities() []string {
+	out := []string{protocol.SharedServiceLogsCapability, "rtc_audio_v1", "rtc_video_v1", "retention_v1", "log_chunks_v1", "rtc_vos_list_v1"}
+	if c.config.Driver == "agora" {
+		if info, err := os.Stat(c.config.RouteCapturePath); err == nil && info.Mode().IsRegular() {
+			out = append(out, "native_routes_v1")
+		}
+	}
+	return out
 }

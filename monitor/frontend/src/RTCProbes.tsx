@@ -19,28 +19,28 @@ import Typography from "antd/es/typography";
 import { APIError, type API } from "./api";
 import {
   ProbeRegistration,
-  RTCAuditHistory,
   RTCRetention,
   type RTCStorageSettings,
 } from "./RTCAdministration";
-import RTCSettings, { rtcDefaults, type RTCParameters } from "./RTCSettings";
+import RTCSettings, { rtcDefaults, type RTCParameters, type NativeDiscovery } from "./RTCSettings";
+
+import NativeCoverageDetails, {NativeCases,type NativeState} from "./RTCNativeCoverage";
 
 interface Target {
  rtc?: RTCParameters;
- credentials?: {app_certificate?:string;sender_token?:string;receiver_token?:string};
+ credentials?: {app_certificate?:string};
  has_certificate?:boolean;
- has_sender_token?:boolean;
- has_receiver_token?:boolean;
   target_id: string;
   name: string;
   cluster_code?: string;
   driver: string;
 }
 interface Task {
+ sweep_interval_seconds?:number;
+ cross_interval_seconds?:number;
   task_id: string;
   target_id: string;
-  sender_probe_id: string;
-  receiver_probe_id: string;
+  probe_id: string;
   enabled: boolean;
   failure_threshold: number;
   recovery_threshold: number;
@@ -131,6 +131,8 @@ interface LogFile {
 }
 interface EdgeResult {endpoint:string;run_id?:string;status:string;reason?:string;receiver_evidence?:Evidence;cleanup?:string;started_at?:string;finished_at?:string;}
 interface Run {
+ native_plan?: {phase:string;coverage_version:string;issues:string[]};
+ cases?: import("./RTCNativeCoverage").NativeRun["cases"];
  kind?:string;
  parent_run_id?:string;
  edge_endpoint?:string;
@@ -148,6 +150,7 @@ interface Run {
   logs: Record<string, LogFile>;
 }
 interface Snapshot {
+ native_coverage?:Record<string,NativeState>;
   mode: string;
   config_revision: string;
   rtc_service_status: string;
@@ -162,12 +165,12 @@ interface Snapshot {
     {
       state: string;
       reason: string;
+      infrastructure_reason?:string;
       failure_count: number;
       success_count: number;
       failure_threshold: number;
       recovery_threshold: number;
       last_success_at?: string;
-      latest_result?: string;
       last_run_id?: string;
       last_result_at?: string;
     }
@@ -194,6 +197,7 @@ const statuses: Record<string, string> = {
   UNKNOWN: "未知",
 };
 const reasons: Record<string, string> = {
+ NATIVE_SCHEDULE_BUDGET_EXCEEDED:"任务周期不足以覆盖当前实例，请调整执行间隔",NATIVE_COVERAGE_PENDING:"等待完整 Native 覆盖",NATIVE_COVERAGE_VERIFIED:"Native UDP/AUT 覆盖通过",NATIVE_AP_FAILED:"AP 接入异常",NATIVE_DIRECT_FAILED:"固定 Edge 接入异常",NATIVE_CROSS_FAILED:"跨 Edge 互通异常",INVENTORY_STALE:"发现数据过期或实例失联",INVENTORY_INCOMPLETE:"部分 Native 实例参数无法解析",COVERAGE_CHANGED:"覆盖清单变化，等待新结果",
  MEDIA_EDGE_SWEEP_RUNNING:"正在逐个探测 UDP edge",
  ALL_MEDIA_EDGES_VERIFIED:"全部 UDP edge 音视频接收通过",
  MEDIA_EDGE_FAILED:"存在探测失败的 UDP edge",
@@ -270,6 +274,7 @@ export default function RTCProbes({
     [edit, setEdit] = useState<Edit | null>(null),
     [pane, setPane] = useState("tasks");
   const [registerProbe, setRegisterProbe] = useState(false);
+ const [nativeTask,setNativeTask]=useState<string|null>(null);
   const [history, setHistory] = useState<Run[]>([]),
     [historyTotal, setHistoryTotal] = useState(0),
     [historyPage, setHistoryPage] = useState(1);
@@ -316,8 +321,7 @@ export default function RTCProbes({
     setBusy(key);
     setError("");
     try {
-      const result = await api.post<Run>(path, body);
-      if (result.run_id && path.endsWith("/run")) setSelected(result.run_id);
+      await api.post(path, body);
       await refresh();
     } catch (e) {
       setError(errorText(e));
@@ -331,11 +335,6 @@ export default function RTCProbes({
   const probeName = (id: string) => {
     const p = data?.probes.find((p) => p.probe_id === id);
     return p ? `${p.location} · ${id}` : id;
-  };
-  const sameHost = (t: Task) => {
-    const a = data?.probes.find((p) => p.probe_id === t.sender_probe_id),
-      b = data?.probes.find((p) => p.probe_id === t.receiver_probe_id);
-    return !!a?.host_address && a.host_address === b?.host_address;
   };
   const [archivedDetail,setArchivedDetail]=useState<Run|null>(null);
   useEffect(()=>{
@@ -373,32 +372,17 @@ export default function RTCProbes({
       <div className="rtc-heading">
         <div>
           <Typography.Title level={2}>RTC 业务探测</Typography.Title>
-          <Typography.Text type="secondary">
-            验证整体 RTC 服务在已配置路径上的加入、发布和媒体接收功能。
-          </Typography.Text>
         </div>
-        <Button
-          onClick={() => void refresh()}
-          loading={fetching.current && !data}
-        >
-          刷新
-        </Button>
       </div>
       {disabled ? (
         <Card>
           <Empty description="尚未配置 RTC 探测服务" />
           <Typography.Paragraph type="secondary">
-            登记独立探针身份后，可在这里创建整体服务目标与双端探测任务。
+            登记独立探针身份后，可在这里创建整体服务目标与探测任务。
           </Typography.Paragraph>
         </Card>
       ) : (
         <>
-          <Alert
-            type="info"
-            showIcon
-            message="真实 RTC SDK 音视频探测"
-            description="使用 demo 固定音视频文件，从同一探测服务的两个 RTC 连接验证整体服务；请先在目标服务配置实际 AppID 与接入参数，再创建关联任务。"
-          />
           {error && (
             <Alert
               className="page-alert"
@@ -471,7 +455,7 @@ export default function RTCProbes({
                     <>
                       <div className="rtc-section-toolbar">
                         <Typography.Text type="secondary">
-                          一条任务对应一个整体服务目标和一条发送 → 接收路径。
+                          每条任务关联一个目标服务，由所选探针执行。
                         </Typography.Text>
                         {canManage && (
                           <Button
@@ -510,23 +494,8 @@ export default function RTCProbes({
                             ),
                           },
                           {
-                            title: "双端路径",
-                            key: "path",
-                            width: 280,
-                            render: (_, t) => (
-                              <>
-                                <div>{probeName(t.sender_probe_id)}</div>
-                                <div className="rtc-path-arrow">↓</div>
-                                <div>{probeName(t.receiver_probe_id)}</div>
-                                {sameHost(t) && (
-                                  <Tag>
-                                    {t.sender_probe_id === t.receiver_probe_id
-                                      ? "单探针双连接"
-                                      : "同机探测"}
-                                  </Tag>
-                                )}
-                              </>
-                            ),
+                            title: "执行探针", key: "probe", width: 200,
+                            render: (_, t) => probeName(t.probe_id),
                           },
                           {
                             title: "调度",
@@ -534,36 +503,13 @@ export default function RTCProbes({
                             width: 120,
                             render: (_, t) => (
                               <>
-                                <div>每 {t.interval_seconds} 秒</div>
+                                <div>{targetRTC(t)?.native_coverage?`完成后间隔：AP ${t.interval_seconds} / 直连 ${t.sweep_interval_seconds||900} / 互通 ${t.cross_interval_seconds||1800} 秒`:`每 ${t.interval_seconds} 秒`}</div>
                                 <Typography.Text type="secondary">
                                   单端口 / 会话超时 {t.timeout_seconds} 秒
                                 </Typography.Text>
                                 {targetRTC(t)?.media_edges?.enabled && <div><Tag>UDP {targetRTC(t)!.media_edges!.host}:{targetRTC(t)!.media_edges!.start_port}–{targetRTC(t)!.media_edges!.end_port}</Tag></div>}
                               </>
                             ),
-                          },
-                          {
-                            title: "最近结果 / 业务状态",
-                            key: "latest",
-                            width: 140,
-                            render: (_, t) => {
-                              const r = data?.runs.find(
-                                (r) => r.task_id === t.task_id && !r.parent_run_id,
-                              );
-                              const health=data?.task_health?.[t.task_id];
-                              const runID=r?.run_id||health?.last_run_id;
-                              const status=r?.status||health?.latest_result;
-                              return runID && status ? (
-                                <Button
-                                  type="link"
-                                  onClick={() => setSelected(runID)}
-                                >
-                                  <State value={status} />
-                                </Button>
-                              ) : (
-                                "尚未执行"
-                              );
-                            },
                           },
                           {
                             title: "业务状态",
@@ -588,6 +534,7 @@ export default function RTCProbes({
                                         ? "异常"
                                         : "未知"}
                                   </Tag>
+                                  {h.infrastructure_reason && <div><Typography.Text type="secondary">{reasons[h.infrastructure_reason]||h.infrastructure_reason}</Typography.Text></div>}
                                   <div>
                                     <Typography.Text type="secondary">
                                       {h.reason === "FAILURE_CONFIRMING"
@@ -604,66 +551,20 @@ export default function RTCProbes({
                             },
                           },
                           {
-                            title: "启用",
-                            key: "enabled",
-                            width: 80,
-                            render: (_, t) => (
-                              <Switch
-                                aria-label={`启用任务 ${t.task_id}`}
-                                checked={t.enabled}
-                                disabled={!canManage || !!busy}
-                                onChange={(v) =>
-                                  void operate(
-                                    t.task_id,
-                                    `/api/v1/rtc/tasks/${t.task_id}/enabled`,
-                                    { enabled: v },
-                                  )
-                                }
-                              />
-                            ),
-                          },
-                          {
                             title: "操作",
                             key: "actions",
                             width: 180,
-                            render: (_, t) => (
-                              <Space wrap>
-                                {canManage && (
-                                  <>
-                                    <Button
-                                      size="small"
-                                      type="primary"
-                                      loading={busy === t.task_id}
-                                      disabled={
-                                        !t.enabled ||
-                                        !!busy ||
-                                        !!data?.runs.some(
-                                          (r) =>
-                                            r.task_id === t.task_id &&
-                                            !terminal(r.status),
-                                        )
-                                      }
-                                      onClick={() =>
-                                        void operate(
-                                          t.task_id,
-                                          `/api/v1/rtc/tasks/${t.task_id}/run`,
-                                        )
-                                      }
-                                    >
-                                      立即探测
-                                    </Button>
-                                    <Button
-                                      size="small"
-                                      onClick={() =>
-                                        setEdit({ kind: "task", value: t })
-                                      }
-                                    >
-                                      编辑
-                                    </Button>
-                                  </>
-                                )}
-                              </Space>
-                            ),
+                            render: (_, t) => {
+                              const latest = data?.runs.find(r=>r.task_id===t.task_id && !r.parent_run_id)?.run_id || data?.task_health?.[t.task_id]?.last_run_id;
+                              return <Space wrap>
+                                <Button size="small" disabled={!latest && !targetRTC(t)?.native_coverage} onClick={()=>targetRTC(t)?.native_coverage?setNativeTask(t.task_id):latest && setSelected(latest)}>详情</Button>
+                                {canManage && <>
+                                  <Button size="small" type="primary" disabled={!t.enabled || !!busy || !!data?.runs.some(r=>r.task_id===t.task_id && !terminal(r.status))} loading={busy===t.task_id} onClick={()=>void operate(t.task_id,`/api/v1/rtc/tasks/${t.task_id}/run`)}>立即探测</Button>
+                                  <Button size="small" disabled={!!busy} onClick={()=>setEdit({kind:"task",value:t})}>编辑</Button>
+                                  <Button size="small" disabled={!!busy} onClick={()=>void operate(t.task_id,`/api/v1/rtc/tasks/${t.task_id}/enabled`,{enabled:!t.enabled})}>{t.enabled?"停用":"启用"}</Button>
+                                </>}
+                              </Space>;
+                            },
                           },
                         ]}
                       />
@@ -677,7 +578,7 @@ export default function RTCProbes({
                     <>
                       <div className="rtc-section-toolbar">
                         <Typography.Text type="secondary">
-                          目标服务统一管理 RTC 接入、鉴权、私有化部署和端口范围，任务关联后自动使用。
+                          目标服务统一管理 RTC 接入、鉴权、AP 分组和 Edge 覆盖，任务关联后自动使用。
                         </Typography.Text>
                         {canManage && (
                           <Button
@@ -695,18 +596,12 @@ export default function RTCProbes({
                         scroll={{ x: 650 }}
                         columns={[
                           { title: "服务名称", dataIndex: "name" },
-                          { title: "目标标识", dataIndex: "target_id" },
-                          {title:"RTC 接入",key:"rtc",render:(_,t)=>t.rtc?<><div>{t.rtc.app_id}</div><Tag>{({none:"无 Token",certificate:"中心签发 Token",token:"预签发 Token"} as Record<string,string>)[t.rtc.auth_mode]}</Tag></>:<Tag color="warning">接入未配置</Tag>},
-                          {title:"UDP edge 范围",key:"edges",render:(_,t)=>t.rtc?.media_edges?.enabled?`${t.rtc.media_edges.host}:${t.rtc.media_edges.start_port}–${t.rtc.media_edges.end_port}`:"默认接入策略"},
+                          {title:"RTC 接入",key:"rtc",render:(_,t)=>t.rtc?<><div>{t.rtc.app_id}</div><Tag>{({none:"未开启鉴权",certificate:"App Certificate"} as Record<string,string>)[t.rtc.auth_mode]}</Tag></>:<Tag color="warning">接入未配置</Tag>},
+                          {title:"接入覆盖",key:"edges",render:(_,t)=>t.rtc?.native_coverage?`Native UDP / AUT · ${t.rtc.native_coverage.groups.length} 个 AP 分组`:t.rtc?.media_edges?.enabled?`${t.rtc.media_edges.host}:${t.rtc.media_edges.start_port}–${t.rtc.media_edges.end_port}`:"默认接入策略"},
                           {
                             title: "关联集群",
                             dataIndex: "cluster_code",
                             render: (v) => v || "—",
-                          },
-                          {
-                            title: "业务状态",
-                            key: "health",
-                            render: () => <Tag>待真实验证</Tag>,
                           },
                           {
                             title: "操作",
@@ -827,7 +722,6 @@ export default function RTCProbes({
                     />
                   ) : null,
                 },
-                {key:"audit",label:"状态与操作审计",children:<RTCAuditHistory api={api}/>},
                 {
                   key: "history",
                   label: "执行记录",
@@ -913,7 +807,6 @@ export default function RTCProbes({
                   ? "Agora 2.6.6 · 真实 SDK"
                   : "历史模拟记录"}
               </Tag>
-              <Button onClick={() => void refresh()}>刷新过程</Button>
               {canManage && !terminal(current.status) && (
                 <Button
                   danger
@@ -938,7 +831,7 @@ export default function RTCProbes({
                     )
                   }
                 >
-                  {current.kind==="EDGE_SWEEP"?"回捞各端口日志":"回捞两端日志"}
+                  {current.kind==="NATIVE_COVERAGE"?"回捞各用例日志":current.kind==="EDGE_SWEEP"?"回捞各端口日志":"回捞两端日志"}
                 </Button>
               )}
             </Space>
@@ -973,7 +866,7 @@ export default function RTCProbes({
             />
             {current.parent_run_id && <Button type="link" onClick={()=>setSelected(current.parent_run_id!)}>返回整轮探测</Button>}
             {current.edge_endpoint && <Typography.Paragraph><Tag>指定 UDP edge：{current.edge_endpoint}</Tag></Typography.Paragraph>}
-            {current.kind==="EDGE_SWEEP" ? <>
+            {current.kind==="NATIVE_COVERAGE" ? <NativeCases run={current} onOpen={setSelected}/> : current.kind==="EDGE_SWEEP" ? <>
               <Typography.Paragraph>端口进度：{(current.edges||[]).filter(e=>terminal(e.status)).length} / {(current.edges||[]).length}。各端口单独验证音视频收发。</Typography.Paragraph>
               <Table<EdgeResult> rowKey="endpoint" dataSource={current.edges||[]} pagination={false} scroll={{x:760}} columns={[
                 {title:"UDP edge",dataIndex:"endpoint"},
@@ -1177,9 +1070,7 @@ export default function RTCProbes({
                       <div className="rtc-log-row">
                         <Space wrap>
                           <Typography.Text strong>
-                            {file.endpoint_role === "sender"
-                              ? "发送端 A"
-                              : "接收端 B"}
+                            {file.endpoint_role === "pair" ? "本次探测日志（收发合并）" : file.endpoint_role === "sender" ? "发送端 A" : "接收端 B"}
                           </Typography.Text>
                           <State value={file.status} />
                           {file.partial&&<Tag>过程快照</Tag>}
@@ -1196,7 +1087,7 @@ export default function RTCProbes({
                               void api
                                 .download(
                                   `/api/v1/rtc/logs/${file.request_id}`,
-                                  `rtc-${current.run_id}-${file.endpoint_role}.zip`,
+                                  file.endpoint_role==="pair"?`rtc-${current.run_id}.zip`:`rtc-${current.run_id}-${file.endpoint_role}.zip`,
                                 )
                                 .catch((e) => setError(errorText(e)))
                             }
@@ -1218,9 +1109,11 @@ export default function RTCProbes({
           <Empty description="正在读取本轮执行" />
         )}
       </Drawer>
+      {nativeTask && data && <NativeCoverageDetails api={api} taskID={nativeTask} state={data.native_coverage?.[nativeTask]} runs={data.runs} onClose={()=>setNativeTask(null)} onOpen={id=>{setNativeTask(null);setSelected(id)}}/>}
       {edit && data && (
         <Editor
           key={edit.kind + (edit.value ? "edit" : "create")}
+          api={api}
           edit={edit}
           snapshot={data}
           onClose={() => setEdit(null)}
@@ -1228,14 +1121,12 @@ export default function RTCProbes({
             const targets = [...data.targets],
               tasks = [...data.tasks];
             if (edit.kind === "target") {
-              const v = { ...(value as Target), driver: "agora" };
+              const v = { ...(value as Target), target_id:edit.value?.target_id || "", driver: "agora" };
               const i = targets.findIndex((t) => t.target_id === v.target_id);
-              if (i >= 0 && !edit.value) throw new Error("目标标识已存在");
               if (i < 0) targets.push(v);
               else targets[i] = v;
             } else {
               const v = value as Task;
-              v.receiver_probe_id = v.sender_probe_id;
               const i = tasks.findIndex((t) => t.task_id === v.task_id);
               if (i >= 0 && !edit.value) throw new Error("任务标识已存在");
               if (i < 0) tasks.push(v);
@@ -1243,8 +1134,8 @@ export default function RTCProbes({
             }
             await api.post("/api/v1/rtc/config", {
               expected_revision: data.config_revision,
-              targets,
-              tasks,
+              targets:targets.map(t=>({target_id:t.target_id,name:t.name,cluster_code:t.cluster_code,driver:t.driver,rtc:t.rtc,credentials:t.credentials})),
+              tasks:tasks.map(t=>({sweep_interval_seconds:t.sweep_interval_seconds,cross_interval_seconds:t.cross_interval_seconds,task_id:t.task_id,target_id:t.target_id,probe_id:t.probe_id,interval_seconds:t.interval_seconds,timeout_seconds:t.timeout_seconds,failure_threshold:t.failure_threshold,recovery_threshold:t.recovery_threshold,unknown_notify_seconds:t.unknown_notify_seconds,description:t.description})),
             });
             setEdit(null);
             await refresh();
@@ -1263,11 +1154,13 @@ export default function RTCProbes({
 }
 
 function Editor({
+ api,
   edit,
   snapshot,
   onClose,
   onSave,
 }: {
+ api:API;
   edit: Edit;
   snapshot: Snapshot;
   onClose: () => void;
@@ -1276,6 +1169,13 @@ function Editor({
   const [error, setError] = useState(""),
     [saving, setSaving] = useState(false);
   const target = edit.kind === "target";
+ const [discovery,setDiscovery]=useState<NativeDiscovery|null>(null);
+ useEffect(()=>{let active=true;if(target)void api.get<NativeDiscovery>("/api/v1/containers/media-edges").then(value=>{if(active)setDiscovery(value)}).catch(()=>{});return()=>{active=false};},[api,target]);
+ const expected=snapshot.tasks.filter(task=>task.target_id===edit.value?.target_id).flatMap(task=>snapshot.native_coverage?.[task.task_id]?.expected||[]);
+ const options=new Map<string,{label:string;value:string}>();
+ for(const member of expected){const edge=member.edge;const key=`${edge.agent_id}/${edge.container_name}`;options.set(key,{value:key,label:`${edge.container_name} · ${edge.endpoint}${edge.stale?"（待验证）":""}`})}
+ for(const rows of Object.values(discovery?.by_ap||{})){for(const edge of rows){if(edge.edge_type==="web")continue;const key=`${edge.agent_id}/${edge.container_name}`;options.set(key,{value:key,label:`${edge.container_name} · ${edge.ip_for_client}:${edge.user_port}`})}}
+
   const [form]=Form.useForm();
   const selectedTargetID=Form.useWatch("target_id",form);
   const selectedTarget=snapshot.targets.find(t=>t.target_id===selectedTargetID);
@@ -1296,7 +1196,7 @@ function Editor({
     >
       <Typography.Paragraph type="secondary">
         {target
-          ? "配置整体 RTC 服务的接入、鉴权、私有化部署与 UDP edge 端口范围。"
+          ? "配置整体 RTC 服务的接入、鉴权、AP 分组与 Edge 覆盖。"
           : "选择目标服务后自动使用其接入配置，再选择探针和执行规则。"}
         保存配置会取消关联任务中正在执行的旧轮次。
       </Typography.Paragraph>
@@ -1304,12 +1204,13 @@ function Editor({
         form={form}
         layout="vertical"
         initialValues={
-          (target && edit.value?{...edit.value,rtc:(edit.value as Target).rtc||rtcDefaults}:edit.value) ||
+          (target && edit.value?{...edit.value,native_enabled:!!(edit.value as Target).rtc?.native_coverage,rtc:(edit.value as Target).rtc||rtcDefaults}:edit.value) ||
           (target
-            ? {rtc:rtcDefaults}
+            ? {rtc:rtcDefaults,native_enabled:false}
             : {
-                enabled: true,
                 interval_seconds: 60,
+                sweep_interval_seconds:900,
+                cross_interval_seconds:1800,
                 timeout_seconds: 30,
                 failure_threshold: 3,
                 recovery_threshold: 2,
@@ -1320,6 +1221,7 @@ function Editor({
           setSaving(true);
           setError("");
           try {
+            if(target){if(!value.native_enabled)value.rtc.native_coverage=null;delete value.native_enabled;}
             await onSave(value);
           } catch (e) {
             setError(errorText(e));
@@ -1330,9 +1232,6 @@ function Editor({
       >
         {target ? (
           <>
-            <Form.Item label="目标标识" name="target_id" rules={idRules}>
-              <Input disabled={!!edit.value} />
-            </Form.Item>
             <Form.Item
               label="服务名称"
               name="name"
@@ -1343,10 +1242,8 @@ function Editor({
             <Form.Item label="关联集群编号（可选）" name="cluster_code">
               <Input />
             </Form.Item>
-            <RTCSettings
+            <RTCSettings discovery={discovery} excludedOptions={[...options.values()]}
               hasCertificate={edit.kind==="target" && edit.value?.has_certificate}
-              hasSenderToken={edit.kind==="target" && edit.value?.has_sender_token}
-              hasReceiverToken={edit.kind==="target" && edit.value?.has_receiver_token}
             />
           </>
         ) : (
@@ -1359,7 +1256,7 @@ function Editor({
               name="target_id"
               rules={[{ required: true, message: "请选择目标服务" }]}
             >
-              <Select onChange={id=>{const target=snapshot.targets.find(t=>t.target_id===id);if(target?.rtc?.media_edges?.enabled && form.getFieldValue("interval_seconds")<=60){form.setFieldValue("interval_seconds",600);}}}
+              <Select onChange={id=>{const target=snapshot.targets.find(t=>t.target_id===id);if(target?.rtc?.native_coverage && form.getFieldValue("interval_seconds")<=60){form.setFieldValue("interval_seconds",180);}if(target?.rtc?.media_edges?.enabled && form.getFieldValue("interval_seconds")<=60){form.setFieldValue("interval_seconds",600);}}}
                 options={snapshot.targets
                   .filter((t) => t.driver === "agora" && !!t.rtc)
                   .map((t) => ({
@@ -1371,7 +1268,7 @@ function Editor({
             {selectedTarget && <TargetConnectionSummary target={selectedTarget}/>}
             <Form.Item
               label="执行探针"
-              name="sender_probe_id"
+              name="probe_id"
               rules={[{ required: true, message: "请选择真实 SDK 探针" }]}
             >
               <Select
@@ -1385,7 +1282,7 @@ function Editor({
             </Form.Item>
             <div className="rtc-form-grid">
               <Form.Item
-                label="探测周期（秒）"
+                label={selectedTarget?.rtc?.native_coverage?"AP 完成后间隔（秒）":"探测周期（秒）"}
                 name="interval_seconds"
                 rules={[{ required: true }]}
               >
@@ -1408,6 +1305,10 @@ function Editor({
                 <InputNumber min={7} max={120} precision={0} />
               </Form.Item>
             </div>
+            {selectedTarget?.rtc?.native_coverage && <div className="rtc-form-grid">
+              <Form.Item name="sweep_interval_seconds" label="固定 Edge 轮巡间隔（秒）" rules={[{required:true}]}><InputNumber min={60} max={86400}/></Form.Item>
+              <Form.Item name="cross_interval_seconds" label="跨 Edge 轮巡间隔（秒）" rules={[{required:true}]}><InputNumber min={60} max={86400}/></Form.Item>
+            </div>}
             <div className="rtc-form-grid">
               <Form.Item
                 label="连续失败确认次数"
@@ -1435,9 +1336,7 @@ function Editor({
               <Input.TextArea maxLength={1000} />
             </Form.Item>
 
-            <Form.Item label="启用任务" name="enabled" valuePropName="checked">
-              <Switch />
-            </Form.Item>
+            <Typography.Text type="secondary">新任务默认停用，保存后在操作栏启用。</Typography.Text>
           </>
         )}
         {error && (
@@ -1461,10 +1360,9 @@ function TargetConnectionSummary({target}:{target:Target}) {
   <Descriptions size="small" column={1} items={[
     {key:"service",label:"目标服务",children:target.name},
     {key:"app",label:"AppID",children:rtc.app_id},
-    {key:"auth",label:"鉴权",children:({none:"项目未启用 Token",certificate:`中心签发 Token（凭证${target.has_certificate?"已配置":"未配置"}）`,token:`预签发 Token（发送${target.has_sender_token?"已配置":"未配置"}，接收${target.has_receiver_token?"已配置":"未配置"}）`} as Record<string,string>)[rtc.auth_mode]},
-    {key:"uids",label:"发送 / 接收 UID",children:`${rtc.sender_uid} / ${rtc.receiver_uid}`},
+    {key:"auth",label:"鉴权",children:({none:"未开启鉴权",certificate:`App Certificate（${target.has_certificate?"已配置":"未配置"}）`} as Record<string,string>)[rtc.auth_mode]},
     {key:"private",label:"私有化部署",children:rtc.private_deployment?`${[...(rtc.access_ips||[]),...(rtc.access_domains||[])].join(", ")} · ${rtc.verify_domain||"未指定校验域名"}`:"公共接入"},
-    {key:"edges",label:"UDP edge",children:rtc.media_edges?.enabled?`${rtc.media_edges.host}:${rtc.media_edges.start_port}–${rtc.media_edges.end_port}（逐端口）`:"默认接入策略"},
+    {key:"edges",label:"接入覆盖",children:rtc.native_coverage?`Native UDP / AUT · ${rtc.native_coverage.groups.map(g=>`${g.group} → ${g.entrypoints.join(", ")}`).join("；")}`:rtc.media_edges?.enabled?`${rtc.media_edges.host}:${rtc.media_edges.start_port}–${rtc.media_edges.end_port}（逐端口）`:"默认接入策略"},
   ]}/>
   <Typography.Text type="secondary">在目标服务中修改后，关联任务自动使用新配置；执行历史保留原参数。</Typography.Text>
  </Card>;

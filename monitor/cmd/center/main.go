@@ -121,6 +121,7 @@ func main() {
 		if err != nil {
 			log.Fatal("cannot initialize RTC probe framework: ", err)
 		}
+		probes.SetNativeInventoryProvider(store.NativeInventory)
 	}
 	assets, _ := fs.Sub(web.Files, "static")
 	allowed := []string{}

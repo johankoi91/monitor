@@ -230,3 +230,41 @@ func (h *Hub) cleanStagedUploads(now time.Time) {
 		}
 	}
 }
+
+// Called with the hub lock held. A log request is already scoped to one probe.
+func (h *Hub) receiveLogStatus(probe string, m protocol.Message) (protocol.Message, error) {
+	if m.Logs == nil || (m.Logs.Status != "EXPIRED" && m.Logs.Status != "FAILED") {
+		return protocol.Message{}, errors.New("invalid log status")
+	}
+	v, ok := h.logOwner(m.Logs.ID, probe)
+	if !ok || v.RunID != m.Logs.RunID || v.Role != m.Logs.Role || m.Logs.ProbeID != probe {
+		return protocol.Message{}, errors.New("log status owner mismatch")
+	}
+	if v.Status == "REQUESTED" {
+		if err := h.change(func(s *state) error {
+			if s.Runs[v.RunID] == nil {
+				r, err := h.archive.RTCGetRun(v.RunID)
+				if err != nil {
+					return err
+				}
+				s.Runs[v.RunID] = &r
+			}
+			v.Status = m.Logs.Status
+			if v.Status == "EXPIRED" {
+				v.Error = "LOCAL_RETENTION_EXPIRED"
+			} else {
+				v.Error = "PROBE_LOG_UNAVAILABLE"
+				if m.Logs.Error == "SDK_NOT_STARTED" || m.Logs.Error == "LOG_BUNDLE_LIMIT_EXCEEDED" {
+					v.Error = m.Logs.Error
+				}
+			}
+			s.Runs[v.RunID].Logs[v.ID] = v
+			return nil
+		}); err != nil {
+			return protocol.Message{}, err
+		}
+	}
+	ack := protocol.Msg("log_status_ack")
+	ack.ID = v.ID
+	return ack, nil
+}

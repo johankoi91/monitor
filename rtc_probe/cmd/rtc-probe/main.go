@@ -35,7 +35,8 @@ func main() {
 		log.Fatal("build the Linux SDK probe with -tags agora")
 	}
 	capacity := 1
-	if text := os.Getenv("RTC_PROBE_CAPACITY"); text != "" {
+	autoCapacity := os.Getenv("RTC_PROBE_CAPACITY") == "auto"
+	if text := os.Getenv("RTC_PROBE_CAPACITY"); text != "" && !autoCapacity {
 		v, e := strconv.Atoi(text)
 		if e != nil {
 			log.Fatal("invalid capacity")
@@ -46,7 +47,7 @@ func main() {
 	if dir == "" {
 		dir = "data/rtc-probe"
 	}
-	c, e := probe.New(probe.Config{Driver: runtimeDriver, URL: os.Getenv("RTC_PROBE_CENTER_URL"), ID: os.Getenv("RTC_PROBE_ID"), Secret: os.Getenv("RTC_PROBE_SECRET"), DataDir: dir, Capacity: capacity, AllowPlaintextLoopback: os.Getenv("RTC_PROBE_DEV_HTTP") == "1"})
+	c, e := probe.New(probe.Config{Driver: runtimeDriver, URL: os.Getenv("RTC_PROBE_CENTER_URL"), ID: os.Getenv("RTC_PROBE_ID"), Secret: os.Getenv("RTC_PROBE_SECRET"), DataDir: dir, Capacity: capacity, AutoCapacity: autoCapacity, AllowPlaintextLoopback: os.Getenv("RTC_PROBE_DEV_HTTP") == "1"})
 	if e != nil {
 		log.Fatal(e)
 	}

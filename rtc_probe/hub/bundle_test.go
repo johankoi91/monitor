@@ -59,3 +59,29 @@ func TestDiagnosticChecksCRCFileDigestsAndExecutionAttribution(t *testing.T) {
 		t.Fatal("partial snapshot flag lost", err)
 	}
 }
+
+func TestSharedBundleRequiresBothEndpointIdentities(t *testing.T) {
+	job := protocol.Job{RunID: "run", ProbeID: "probe", Role: "pair", Revision: "revision", Channel: "channel", UID: "10001", PublisherUID: "10001", LogScope: protocol.ServiceLogScope, Target: protocol.Target{ID: "target"}}
+	req := protocol.LogRequest{ID: "request", RunID: job.RunID, ProbeID: job.ProbeID, Role: "pair", Scope: protocol.ServiceLogScope}
+	build := func(receiverChannel string, missing bool) []byte {
+		var buffer bytes.Buffer
+		writer := zip.NewWriter(&buffer)
+		endpoints := map[string]protocol.DiagnosticEndpoint{"sender": {Role: "sender", Channel: job.Channel, UID: "10001", PublisherUID: "10001"}, "receiver": {Role: "receiver", Channel: receiverChannel, UID: "10002", PublisherUID: "10001"}}
+		if missing {
+			delete(endpoints, "receiver")
+		}
+		f, _ := writer.Create("manifest.json")
+		json.NewEncoder(f).Encode(map[string]any{"request_id": req.ID, "job": job, "scope": protocol.ServiceLogScope, "endpoints": endpoints})
+		writer.Close()
+		return buffer.Bytes()
+	}
+	if _, err := validateDiagnosticBundle(build("channel", false), req, job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateDiagnosticBundle(build("foreign-channel", false), req, job); err == nil {
+		t.Fatal("foreign receiver accepted")
+	}
+	if _, err := validateDiagnosticBundle(build("channel", true), req, job); err == nil {
+		t.Fatal("receiver identity missing")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/rtc-probe/probe"
 	"github.com/johankoi91/monitor/rtc-probe/testkit"
+	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/testfixture"
 	"github.com/johankoi91/monitor/runtime/web"
 )
@@ -47,7 +49,24 @@ func TestRTCUIWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(testfixture.AccountAuth((&Server{Store: setup(t), Probes: h, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets))}).Handler()))
+	store := setup(t)
+	discovered := report("agora_udp_media_edge_1", "agora_udp_media_edge_2", "agora_udp_media_edge_3", "agora_aut_media_edge_1", "agora_aut_media_edge_2", "agora_aut_media_edge_3", "agora_web_media_edge_1")
+	for i := range discovered.Containers {
+		port := 4001 + i
+		if i >= 3 {
+			port = 4701 + i - 3
+		}
+		if i == 6 {
+			port = 4501
+		}
+		discovered.Containers[i].Startup.Config = model.StartupConfig{Args: []string{"--ap", "172.16.80.25", "--ip-for-client", "127.0.0.1", "--user-port", strconv.Itoa(port)}}
+	}
+	h.SetNativeInventoryProvider(store.NativeInventory)
+	session := store.Connect("rtc-a")
+	if err := store.Receive("rtc-a", session, discovered); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(testfixture.AccountAuth((&Server{Store: store, Probes: h, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets))}).Handler()))
 	defer server.Close()
 	done := []chan error{}
 	for _, p := range config.Probes {

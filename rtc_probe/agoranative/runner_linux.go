@@ -117,13 +117,19 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 	}
 	job := *initial.Job
 	p := *job.RTC
+	if job.NativeCase != nil {
+		if err := job.NativeCase.Validate(); err != nil {
+			return err
+		}
+	}
 	if err := p.Normalize(); err != nil {
 		return err
 	}
-	if p.MediaEdges != nil && (job.EdgeEndpoint == "" || !p.MediaEdges.Contains(job.EdgeEndpoint)) {
+	nativeParameters(&p, job.NativeCase)
+	if job.NativeCase == nil && p.MediaEdges != nil && (job.EdgeEndpoint == "" || !p.MediaEdges.Contains(job.EdgeEndpoint)) {
 		return errors.New("selected UDP edge outside task range")
 	}
-	if p.MediaEdges == nil && job.EdgeEndpoint != "" {
+	if job.NativeCase == nil && p.MediaEdges == nil && job.EdgeEndpoint != "" {
 		return errors.New("UDP edge not configured by task")
 	}
 	if job.Target.Driver != "agora" || !protocol.ValidID(job.RunID) || job.WorkDir == "" {
@@ -201,6 +207,8 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 		phase = next
 		phaseAt = now
 	}
+	var mediaStart, mediaEnd int64
+	errControlStartLate := errors.New("control start left insufficient media time")
 	serviceInitialized := false
 	err := func() error {
 		sdkDir := filepath.Join(job.WorkDir, "sdk")
@@ -228,6 +236,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			return err
 		}
 		serviceInitialized = true
+
 		if job.EdgeEndpoint != "" {
 			advance("CONFIGURE_MEDIA_EDGE")
 			parameters, err := protocol.VOSParameters(job.EdgeEndpoint)
@@ -263,18 +272,25 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			connections[role] = con
 		}
 		advance("CONFIGURE_ACCESS")
-		if p.Private {
+		if p.Private || job.NativeCase != nil {
 			config := &rtc.LocalAccessPointConfiguration{IPList: p.AccessIPs, DomainList: p.AccessDomains, VerifyDomainName: p.VerifyDomain, Mode: rtc.LocalProxyMode(p.ProxyMode), DisableAut: p.DisableAut}
-			if err := r.call("sender", phase, "SetLocalAccessPoint", func() int { return rtc.SetLocalAccessPoint(config) }); err != nil {
+			if job.NativeCase != nil && job.NativeCase.Kind != "AP_JOIN" {
+				config.Mode = rtc.LocalProxyModeLocalOnly
+				config.DisableAut = job.NativeCase.Sender.Transport != "aut" && job.NativeCase.Receiver.Transport != "aut"
+			}
+			if err := r.callArgs("sender", phase, "SetLocalAccessPoint", map[string]any{"config": snapshotObject(config)}, false, func() int { return rtc.SetLocalAccessPoint(config) }); err != nil {
 				return err
 			}
+		}
+		if err := r.configureRoutes(connections); err != nil {
+			return err
 		}
 		for _, endpointRole := range []string{"sender", "receiver"} {
 			role := endpointRole
 			con := connections[role]
-			uid := strconv.FormatUint(uint64(p.SenderUID), 10)
+			uid := strconv.FormatUint(uint64(protocol.SenderUID), 10)
 			if role == "receiver" {
-				uid = strconv.FormatUint(uint64(p.ReceiverUID), 10)
+				uid = strconv.FormatUint(uint64(protocol.ReceiverUID), 10)
 			}
 			cb := func(name string, fields map[string]any) {
 				if fields == nil {
@@ -454,7 +470,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				parameters["accepted"] = accepted
 				r.callback("receiver", "RECEIVE_VIDEO", "OnRenderVideoFrame", "SubscribeVideo", parameters, true)
 			}()
-			if cleaning.Load() || ctx.Err() != nil || !streaming.Load() || channel != job.Channel || user != p.SenderUID || f == nil || f.Type != rtc.VideoPixelI420 || f.Width <= 0 || f.Height <= 0 || f.YStride < f.Width || f.UStride < (f.Width+1)/2 || f.VStride < (f.Width+1)/2 || len(f.YBuffer) < f.YStride*f.Height || len(f.UBuffer) < f.UStride*((f.Height+1)/2) || len(f.VBuffer) < f.VStride*((f.Height+1)/2) {
+			if cleaning.Load() || ctx.Err() != nil || !streaming.Load() || channel != job.Channel || user != protocol.SenderUID || f == nil || f.Type != rtc.VideoPixelI420 || f.Width <= 0 || f.Height <= 0 || f.YStride < f.Width || f.UStride < (f.Width+1)/2 || f.VStride < (f.Width+1)/2 || len(f.YBuffer) < f.YStride*f.Height || len(f.UBuffer) < f.UStride*((f.Height+1)/2) || len(f.VBuffer) < f.VStride*((f.Height+1)/2) {
 				return true
 			}
 			accepted = true
@@ -495,9 +511,9 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 					token = job.Credentials.ReceiverToken
 				}
 			}
-			uid := p.SenderUID
+			uid := protocol.SenderUID
 			if role == "receiver" {
-				uid = p.ReceiverUID
+				uid = protocol.ReceiverUID
 			}
 			if err := r.call(role, phase, "Connect", func() int {
 				return connections[role].Connect(token, job.Channel, strconv.FormatUint(uint64(uid), 10), "")
@@ -534,6 +550,9 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			return ctx.Err()
 		case <-start:
 		}
+		if time.Until(job.Deadline) < time.Duration(p.MediaDurationMS)*time.Millisecond+500*time.Millisecond {
+			return errControlStartLate
+		}
 		advance("PUBLISH")
 		streaming.Store(true)
 		if err := r.call("sender", phase, "PublishAudio", func() int { return connections["sender"].PublishAudio() }); err != nil {
@@ -545,6 +564,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 		}
 		values["sender"].update(func(e *protocol.Evidence) { e.VideoPublished = true })
 		advance("MEDIA")
+		mediaStart = time.Now().UnixNano()
 		return sendFiles(ctx, r, connections["sender"], values, failures, policy)
 	}()
 	outcome, reason := "SUCCESS", "MEDIA_VERIFIED"
@@ -572,12 +592,17 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				reason = "JOIN_TIMEOUT"
 			}
 		}
+		if errors.Is(err, errControlStartLate) {
+			outcome = "ERROR"
+			reason = "CONTROL_START_TOO_LATE"
+		}
 		r.event("receiver", "stage_event", phase, "stage_failed", "", nil, map[string]any{"reason": reason, "detail": sanitize(err.Error(), job.Credentials)}, 0)
 	}
 	snapshots := map[string]protocol.Evidence{}
 	for role, s := range values {
 		snapshots[role] = s.snapshot()
 	}
+	mediaEnd = time.Now().UnixNano()
 	businessPhase := phase
 	advance("CLEANUP")
 	cleaning.Store(true)
@@ -617,6 +642,13 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			cleanup = "FAILED"
 		}
 	}
+	proofs := map[string]*protocol.RouteEvidence{}
+	if job.NativeCase != nil {
+		for _, role := range []string{"sender", "receiver"} {
+			proofs[role] = r.routeEvidence(role, mediaStart, mediaEnd)
+			r.event(role, "route_evidence", "VERIFY_ROUTE", "route_verification", "", nil, snapshotObject(proofs[role]), 0)
+		}
+	}
 	advance("DONE")
 	traceErr = r.trace.Close()
 	if traceErr != nil {
@@ -644,7 +676,19 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				}
 			}
 		}
-		m.Result = &protocol.Result{Stages: append([]protocol.StageTiming(nil), stages...), ID: protocol.ID(), WorkerID: r.worker, Driver: "agora", Outcome: roleOutcome, Reason: roleReason, Cleanup: cleanup, Evidence: snapshots[role], FinishedAt: time.Now().UTC(), TraceComplete: traceErr == nil, TraceDropped: r.trace.Dropped()}
+		var route *protocol.RouteEvidence
+		if job.NativeCase != nil {
+			route = proofs[role]
+			if route.Reason == "AP_ALLOCATED_UNDISCOVERED_ENDPOINT" {
+				roleOutcome = "ERROR"
+				roleReason = route.Reason
+			}
+			if roleOutcome == "SUCCESS" && route.Status != "VERIFIED" {
+				roleOutcome = "ERROR"
+				roleReason = "ROUTE_" + route.Status
+			}
+		}
+		m.Result = &protocol.Result{Route: route, Stages: append([]protocol.StageTiming(nil), stages...), ID: protocol.ID(), WorkerID: r.worker, Driver: "agora", Outcome: roleOutcome, Reason: roleReason, Cleanup: cleanup, Evidence: snapshots[role], FinishedAt: time.Now().UTC(), TraceComplete: traceErr == nil, TraceDropped: r.trace.Dropped()}
 		r.out <- m
 	}
 	r.mu.Lock()

@@ -10,12 +10,14 @@ import (
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
 	"io"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 )
 
 func diagnosticName(name string) bool {
 	switch name {
-	case "manifest.json", "events.jsonl", "sdk-api.jsonl", "result.json", "process.stdout.log", "process.stderr.log", "sdk.log":
+	case "manifest.json", "events.jsonl", "sdk-api.jsonl", "route-capture.jsonl", "result.json", "process.stdout.log", "process.stderr.log", "sdk.log":
 		return true
 	}
 	return strings.HasPrefix(name, "sdk/agora") && filepath.Base(name) == strings.TrimPrefix(name, "sdk/") && strings.Contains(name, ".log") && !strings.Contains(name, "..") && !strings.ContainsAny(name, "\\\x00") && len(name) < 128
@@ -32,10 +34,12 @@ func validateDiagnosticBundle(data []byte, request protocol.LogRequest, expected
 		Missing bool   `json:"missing"`
 	}
 	var manifest struct {
-		RequestID string       `json:"request_id"`
-		Job       protocol.Job `json:"job"`
-		Partial   bool         `json:"partial"`
-		Files     []descriptor `json:"files"`
+		Scope     string                                 `json:"scope"`
+		Endpoints map[string]protocol.DiagnosticEndpoint `json:"endpoints"`
+		RequestID string                                 `json:"request_id"`
+		Job       protocol.Job                           `json:"job"`
+		Partial   bool                                   `json:"partial"`
+		Files     []descriptor                           `json:"files"`
 	}
 	actual := map[string]descriptor{}
 	var total uint64
@@ -80,6 +84,21 @@ func validateDiagnosticBundle(data []byte, request protocol.LogRequest, expected
 	job := manifest.Job
 	if manifest.RequestID != request.ID || job.RunID != request.RunID || job.ProbeID != request.ProbeID || job.Role != request.Role || job.Target.ID != expected.Target.ID || job.Revision != expected.Revision || job.Channel != expected.Channel || job.UID != expected.UID || job.PublisherUID != expected.PublisherUID || job.ParentRunID != expected.ParentRunID || job.EdgeEndpoint != expected.EdgeEndpoint {
 		return false, errors.New("diagnostic attribution mismatch")
+	}
+	if request.Role == "pair" {
+		if request.Scope != protocol.ServiceLogScope || manifest.Scope != protocol.ServiceLogScope || job.LogScope != protocol.ServiceLogScope || expected.LogScope != protocol.ServiceLogScope || len(manifest.Endpoints) != 2 || !reflect.DeepEqual(job.NativeCase, expected.NativeCase) || !reflect.DeepEqual(job.RTC, expected.RTC) {
+			return false, errors.New("invalid shared Service context")
+		}
+		for _, role := range []string{"sender", "receiver"} {
+			endpoint, ok := manifest.Endpoints[role]
+			uid := strconv.FormatUint(uint64(protocol.SenderUID), 10)
+			if role == "receiver" {
+				uid = strconv.FormatUint(uint64(protocol.ReceiverUID), 10)
+			}
+			if !ok || endpoint.Role != role || endpoint.Channel != expected.Channel || endpoint.UID != uid || endpoint.PublisherUID != expected.PublisherUID {
+				return false, errors.New("shared endpoint attribution mismatch")
+			}
+		}
 	}
 	if len(manifest.Files) > 32 {
 		return false, errors.New("too many file descriptors")

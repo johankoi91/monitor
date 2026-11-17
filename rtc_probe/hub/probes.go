@@ -59,8 +59,12 @@ func (h *Hub) EnableProbe(id string, enabled bool) error {
 				if terminal(r.Status) {
 					continue
 				}
+				if r.Kind == nativeCoverageKind {
+					h.stopNative(s, r, now, "PROBE_DISABLED", "CANCELLED")
+					continue
+				}
 				if r.Kind == edgeSweepKind {
-					if task, ok := h.task(r.TaskID); ok && (task.Sender == id || task.Receiver == id) {
+					if task, ok := h.task(r.TaskID); ok && task.ProbeID == id {
 						h.stopSweep(s, r, now, "PROBE_DISABLED", "CANCELLED")
 					}
 					continue

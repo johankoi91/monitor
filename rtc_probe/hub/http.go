@@ -151,7 +151,7 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 		reply(w, 201, map[string]any{"probe_id": v.ID, "secret": secret, "message": "机器凭证只在本次返回，请妥善保存"})
 		return
 	}
-	if len(parts) == 1 && (parts[0] == "history" || parts[0] == "audits") && r.Method == "GET" {
+	if len(parts) == 1 && parts[0] == "history" && r.Method == "GET" {
 		limit, offset := 20, 0
 		var err error
 		if q := r.URL.Query().Get("limit"); q != "" {
@@ -162,15 +162,6 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil || limit < 1 || limit > 100 || offset < 0 {
 			reply(w, 400, map[string]string{"message": "分页参数无效"})
-			return
-		}
-		if parts[0] == "audits" {
-			v, e := h.Audits(r.URL.Query().Get("task_id"), limit, offset)
-			if e != nil {
-				reply(w, 503, map[string]string{"message": "审计查询不可用"})
-			} else {
-				reply(w, 200, v)
-			}
 			return
 		}
 		v, e := h.History(r.URL.Query().Get("task_id"), limit, offset)
@@ -209,17 +200,14 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 && parts[0] == "config" && r.Method == "POST" {
-		var input struct {
-			Expected string `json:"expected_revision"`
-			Plan
-		}
+		var input configurationInput
 		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 		d.DisallowUnknownFields()
 		if d.Decode(&input) != nil || d.Decode(&struct{}{}) != io.EOF {
 			reply(w, 400, map[string]string{"message": "配置格式无效"})
 			return
 		}
-		if err := h.UpdatePlan(input.Expected, input.Plan); err != nil {
+		if err := h.UpdatePlan(input.Expected, h.configurationPlan(input)); err != nil {
 			reply(w, 409, map[string]string{"message": err.Error()})
 			return
 		}
@@ -341,9 +329,9 @@ func (h *Hub) upload(w http.ResponseWriter, r *http.Request, probe string) {
 	run := h.state.Runs[request.RunID]
 	var expected protocol.Job
 	if run != nil {
-		expected = run.Endpoints[request.Role].Job
+		expected, _ = logJob(run, request.Role)
 	} else if saved, err := h.archive.RTCGetRun(request.RunID); err == nil {
-		expected = saved.Endpoints[request.Role].Job
+		expected, _ = logJob(&saved, request.Role)
 	}
 	h.mu.Unlock()
 	partial, validationErr := validateDiagnosticBundle(b, request, expected)

@@ -28,38 +28,41 @@ func ID() string {
 }
 
 type Target struct {
-	RTC               *RTCParameters `json:"rtc,omitempty" yaml:"rtc"`
-	Credentials       *Credentials   `json:"credentials,omitempty" yaml:"-"`
-	CredentialVersion string         `json:"credential_version,omitempty" yaml:"-"`
-	HasCertificate    bool           `json:"has_certificate,omitempty" yaml:"-"`
-	HasSenderToken    bool           `json:"has_sender_token,omitempty" yaml:"-"`
-	HasReceiverToken  bool           `json:"has_receiver_token,omitempty" yaml:"-"`
-	ID                string         `json:"target_id" yaml:"target_id"`
-	Name              string         `json:"name" yaml:"name"`
-	ClusterCode       string         `json:"cluster_code,omitempty" yaml:"cluster_code"`
-	Driver            string         `json:"driver" yaml:"driver"`
+	RTC               *RTCParameters  `json:"rtc,omitempty" yaml:"rtc"`
+	Credentials       *AppCredentials `json:"credentials,omitempty" yaml:"-"`
+	CredentialVersion string          `json:"credential_version,omitempty" yaml:"-"`
+	HasCertificate    bool            `json:"has_certificate,omitempty" yaml:"-"`
+	ID                string          `json:"target_id" yaml:"target_id"`
+	Name              string          `json:"name" yaml:"name"`
+	ClusterCode       string          `json:"cluster_code,omitempty" yaml:"cluster_code"`
+	Driver            string          `json:"driver" yaml:"driver"`
 }
 type Task struct {
-	ID                   string         `json:"task_id" yaml:"task_id"`
-	TargetID             string         `json:"target_id" yaml:"target_id"`
-	Sender               string         `json:"sender_probe_id" yaml:"sender_probe_id"`
-	Receiver             string         `json:"receiver_probe_id" yaml:"receiver_probe_id"`
-	Enabled              bool           `json:"enabled" yaml:"enabled"`
-	IntervalSeconds      int            `json:"interval_seconds" yaml:"interval_seconds"`
-	TimeoutSeconds       int            `json:"timeout_seconds" yaml:"timeout_seconds"`
-	Scenario             string         `json:"mock_scenario" yaml:"mock_scenario"`
-	RTC                  *RTCParameters `json:"rtc,omitempty" yaml:"rtc"`
-	Credentials          *Credentials   `json:"credentials,omitempty" yaml:"-"`
-	CredentialVersion    string         `json:"credential_version,omitempty" yaml:"-"`
-	HasCertificate       bool           `json:"has_certificate,omitempty" yaml:"-"`
-	HasSenderToken       bool           `json:"has_sender_token,omitempty" yaml:"-"`
-	HasReceiverToken     bool           `json:"has_receiver_token,omitempty" yaml:"-"`
-	FailureThreshold     int            `json:"failure_threshold" yaml:"failure_threshold"`
-	RecoveryThreshold    int            `json:"recovery_threshold" yaml:"recovery_threshold"`
-	UnknownNotifySeconds int            `json:"unknown_notify_seconds" yaml:"unknown_notify_seconds"`
-	Description          string         `json:"description,omitempty" yaml:"description"`
+	ID                   string          `json:"task_id" yaml:"task_id"`
+	TargetID             string          `json:"target_id" yaml:"target_id"`
+	ProbeID              string          `json:"probe_id" yaml:"probe_id"`
+	Enabled              bool            `json:"enabled" yaml:"enabled"`
+	SweepIntervalSeconds int             `json:"sweep_interval_seconds,omitempty" yaml:"sweep_interval_seconds"`
+	CrossIntervalSeconds int             `json:"cross_interval_seconds,omitempty" yaml:"cross_interval_seconds"`
+	IntervalSeconds      int             `json:"interval_seconds" yaml:"interval_seconds"`
+	TimeoutSeconds       int             `json:"timeout_seconds" yaml:"timeout_seconds"`
+	Scenario             string          `json:"mock_scenario" yaml:"mock_scenario"`
+	RTC                  *RTCParameters  `json:"rtc,omitempty" yaml:"rtc"`
+	Credentials          *AppCredentials `json:"credentials,omitempty" yaml:"-"`
+	CredentialVersion    string          `json:"credential_version,omitempty" yaml:"-"`
+	HasCertificate       bool            `json:"has_certificate,omitempty" yaml:"-"`
+	FailureThreshold     int             `json:"failure_threshold" yaml:"failure_threshold"`
+	RecoveryThreshold    int             `json:"recovery_threshold" yaml:"recovery_threshold"`
+	UnknownNotifySeconds int             `json:"unknown_notify_seconds" yaml:"unknown_notify_seconds"`
+	Description          string          `json:"description,omitempty" yaml:"description"`
 }
+
+const SharedServiceLogsCapability = "shared_service_logs_v1"
+const ServiceLogScope = "service"
+
 type Job struct {
+	LogScope        string         `json:"log_scope,omitempty"`
+	NativeCase      *NativeCase    `json:"native_case,omitempty"`
 	ParentRunID     string         `json:"parent_run_id,omitempty"`
 	EdgeEndpoint    string         `json:"edge_endpoint,omitempty"`
 	ProbeLocation   string         `json:"probe_location,omitempty"`
@@ -129,6 +132,7 @@ type Evidence struct {
 	FirstVideoMS        int64 `json:"first_video_elapsed_ms,omitempty"`
 }
 type Result struct {
+	Route         *RouteEvidence   `json:"route,omitempty"`
 	ProcessExit   *ProcessExitInfo `json:"process_exit,omitempty"`
 	Stages        []StageTiming    `json:"stages,omitempty"`
 	ID            string           `json:"result_id"`
@@ -156,7 +160,15 @@ type StageTiming struct {
 	StartedMS  int64  `json:"started_elapsed_ms"`
 	DurationMS int64  `json:"duration_ms"`
 }
+type DiagnosticEndpoint struct {
+	Role         string `json:"endpoint_role"`
+	UID          string `json:"uid"`
+	PublisherUID string `json:"publisher_uid"`
+	Channel      string `json:"channel"`
+}
+
 type LogRequest struct {
+	Scope     string    `json:"scope,omitempty"`
 	Partial   bool      `json:"partial,omitempty"`
 	Error     string    `json:"error,omitempty"`
 	ID        string    `json:"request_id"`
