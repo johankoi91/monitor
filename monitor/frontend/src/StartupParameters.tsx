@@ -1,109 +1,11 @@
-import { useEffect, useState } from "react";
 import Alert from "antd/es/alert";
 import Empty from "antd/es/empty";
-import Spin from "antd/es/spin";
-import Button from "antd/es/button";
 import Table from "antd/es/table";
 import Typography from "antd/es/typography";
-import type { API } from "./api";
+import type { StartupRecord } from "./types";
 
-type Startup = {
-  collected_at: string;
-  incomplete: boolean;
-  truncated: boolean;
-  redacted_fields: string[];
-  config: {
-    image: string;
-    entrypoint: string[];
-    cmd: string[];
-    path: string;
-    args: string[];
-    working_dir: string;
-    user: string;
-    network_mode: string;
-    restart_policy: { name: string };
-    env: Array<{ name: string; value: string }>;
-    mounts: Array<{
-      source: string;
-      target: string;
-      type: string;
-      read_only: boolean;
-    }>;
-    port_bindings: Array<{
-      container_port: string;
-      host_ip: string;
-      host_port: string;
-    }>;
-  };
-};
-export default function StartupParameters({
-  api,
-  nodeID,
-}: {
-  api: API;
-  nodeID: string;
-}) {
-  const [data, setData] = useState<{
-      startup: Startup | null;
-      stale: boolean;
-      reported_at?: string;
-      container_id?: string;
-    } | null>(null),
-    [error, setError] = useState("");
-  const [requestVersion, setRequestVersion] = useState(0);
-  useEffect(() => {
-    let active = true,
-      loading = false;
-    setData(null);
-    setError("");
-    async function load() {
-      if (loading) return;
-      loading = true;
-      await api
-        .get<{
-          startup: Startup | null;
-          stale: boolean;
-          reported_at?: string;
-          container_id?: string;
-        }>(`/api/v1/nodes/startup?node_id=${encodeURIComponent(nodeID)}`)
-        .then((d) => {
-          if (active) {
-            setData(d);
-            setError("");
-          }
-        })
-        .catch((e) => {
-          if (active)
-            setError(e instanceof Error ? e.message : "启动参数读取失败");
-        })
-        .finally(() => {
-          loading = false;
-        });
-    }
-    void load();
-    const timer = window.setInterval(() => {
-      if (!document.hidden) void load();
-    }, 15000);
-    return () => {
-      window.clearInterval(timer);
-      active = false;
-    };
-  }, [api, nodeID, requestVersion]);
-  if (error)
-    return (
-      <Alert
-        showIcon
-        type="warning"
-        message={error}
-        action={
-          <Button size="small" onClick={() => setRequestVersion((v) => v + 1)}>
-            重试
-          </Button>
-        }
-      />
-    );
-  if (!data) return <Spin />;
-  if (!data.startup)
+export default function StartupParameters({ data }: { data?: StartupRecord }) {
+  if (!data?.startup)
     return (
       <Empty
         description="等待 Agent 首次上报启动参数"
@@ -210,9 +112,6 @@ export default function StartupParameters({
           )}{" "}
           · {rows.length} 项
         </Typography.Text>
-        <Button size="small" onClick={() => setRequestVersion((v) => v + 1)}>
-          刷新记录
-        </Button>
       </div>
       {(data.stale || s.incomplete || s.truncated) && (
         <Alert

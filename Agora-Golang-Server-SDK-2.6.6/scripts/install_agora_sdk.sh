@@ -1,0 +1,191 @@
+#!/bin/bash
+
+PACKAGE_HOME=$(
+    cd $(dirname $0)/..
+    pwd
+)
+
+UNAME_S=`uname -s`
+OS=unknown
+
+UNAME_M=`uname -m`
+ARCH=unknown
+
+
+#ver2.2.4
+#linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250425_144419-675648-aed-0521.zip"
+#mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_24464_FULL_20250522_1619_711331-aed.zip"
+
+#version 2.2.9 for aiqos 
+#linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250528_175520-720646-aed.zip"
+#mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_24517_FULL_20250528_1905_720662-aed.zip"
+
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250612_142144-741749-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_24654_FULL_20250612_1503_741767-aed.zip"
+
+#date: 20250617 for fix oncapability issue
+
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250617_170645-749554-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_24690_FULL_20250617_1817_749572-aed.zip"
+
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250715_161625-791246-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_24915_FULL_20250715_1710_791284-aed.zip"
+
+#date:20250814 for present timestamp issue
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250814_105012-837202-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_25242_FULL_20250814_1133_837220-aed.zip"
+
+#date:20250818 for oncallback with pts
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250818_170541-843836-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_25295_FULL_20250818_1850_843923-aed.zip"
+#mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_25295_FULL_20250818_1850_843923-test.zip"
+#date: 20250820 update sdk with pts callback, and add sessionParser helper for parse pts
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250820_100926-846510-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_25321_FULL_20250820_1052_846534-aed.zip"
+
+#date: 20250829 for update sdk with framedump
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk-x86_64-linux-gnu-v4.4.32-20250829_160340-860733-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_25418_FULL_20250829_1647_860754-aed.zip"
+
+#date: 20251028 update sdk for apm filter only test purpose for mac
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32_25776_FULL_20251021_1824_939915-aed.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.30_25869_FULL_20251030_1836_953684-aed.zip"
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.150_26715_SERVER_20251030_1807-aed.zip"
+
+#date:20251121 update sdk for auto load so and auto load ains resource, change audio-sink with userdata
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-Agora_Native_SDK_for_Linux_x64_zhourui_26895_SERVER_20251121_1628_987405_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_Agora_Native_SDK_for_Mac_zhourui_26100_FULL_20251121_1643_987406_20251021_1427-3a.zip"
+
+#date:20251124 update sdk for fix the issue of auto load so and auto load ains resource
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-Agora_Native_SDK_for_Linux_x64_zhourui_26895_SERVER_20251121_1628_987405_20251021_1427-3a.zip"
+#mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_Agora_Native_SDK_for_Mac_zhourui_26100_FULL_20251121_1643_987406_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_Agora_Native_SDK_for_Mac_zhourui_26101_FULL_20251121_2135_987705_20251021_1427-3a.zip"
+
+#date: 20251211 update sdk for 2.4.2
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.154_26982_SERVER_20251210_1745_994155_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.154_26308_FULL_20251210_1756_994156_20251021_1427-3a.zip"
+#end usrl
+#date: 20251230 update sdk to 156 for 2.4.4
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.156_27122_SERVER_20251229_1956_996360_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.156_26548_FULL_20251230_1429_996508_20251021_1427-3a.zip"
+#date: 20260128 update sdk to 161 for 2.4.6
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.161_27323_SERVER_20260128_1128_1004648_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.161_26814_FULL_20260128_1113_1004619_20251021_1427-3a.zip"
+arm_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_arm64-linux-gnu-v4.4.32.161_27323_SERVER_20260128_1128_1004648_20251021_1427-3a.zip"
+
+#date: 20260210 update sdk to 162 for 2.4.7
+
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.163_26922_FULL_20260211_1047_1009661_20251021_1427-3a.zip"
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.163_27411_SERVER_20260211_1033_1009658_20251021_1427-3a.zip"
+arm_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_aarch64-linux-gnu-v4.4.32.163_27411_SERVER_20260211_103529-1009669.zip"
+
+#date: 20260302 update sdk to 164 for 2.4.11 
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.164_27011_FULL_20260228_1856_1017201_20251021_1427-3a.zip"
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.164_27464_SERVER_20260228_1031_1017176_20251021_1427-3a.zip"
+
+#date: 20260306 update sdk to 165 for 2.4.12
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.165_27499_SERVER_20260305_1556_1019231_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.165_27049_FULL_20260305_1611_1019233_20251021_1427-3a.zip"
+
+#date: 20260331 update sdk to 166 for 2.4.13
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.168_27676_SERVER_20260331_1528_1057395_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.168_27265_FULL_20260331_1701_1057493_20251021_1427-3a.zip"
+
+#date: 20260408 update sdk to 169 for 2.4.14
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.4.32.169_27717_SERVER_20260407_1440_1066518_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.4.32.169_27334_FULL_20260407_2130_1066977_20251021_1427-3a.zip"
+
+
+#date: 20260410 update sdk 4.6.x for big-channel support
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v3.0_jira_NMS_27128_release_4_6_3_133_hc_fp_20260410.27738_27738_SERVER_20260410_1538_1071242_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v3.0_jira_NMS_27128_release_4_6_3_133_hc_fp_20260410.27368_27368_FULL_20260410_1613_1071278_20251021_1427-3a.zip"
+
+#date: 20260513 update sdk to 170 for 2.4.15
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v4.6.3.133_27885_SERVER_20260513_1453_1115703_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v4.6.3.133_27645_FULL_20260513_1453_1115702_external_20251021_1427-3a.zip"
+
+#date: 20260618 update sdk to 172 for 2.6.2, with direct audio track with apm support
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v3.0_jira_NMS_30487_release_4_6_3_133_hc_20260618.28094_28094_SERVER_20260618_1010_1169468_20251021_1427-3a.zip"
+mac_sdk="https://download.agora.io/sdk/release/agora_sdk_mac_v3.0_jira_NMS_30487_release_4_6_3_133_hc_20260618.28001_28001_FULL_20260618_1035_1169494_20251021_1427-3a.zip"
+
+#date: 20260623 update sdk for 2.6.4, with direct audio track with apm support
+linux_sdk="https://download.agora.io/sdk/release/agora_rtc_sdk_x86_64-linux-gnu-v3.0_jira_NMS_30487_release_4_6_3_133_hc_20260623.28108_28108_SERVER_20260623_1530_1177185_20251021_1427-3a.zip"
+
+#date: 20260918 update sdk to 134
+linux_sdk="https://download.agora.io/sdk/release/shengwang_rtc_sdk.v4.6.31.134_28625_SERVER_20260918_1451_1303020_external-20260824_1848-3a.zip"
+
+#date: 20261013 update sdk to 135 for 2.6.6
+linux_sdk="https://download.agora.io/sdk/release/shengwang_rtc_sdk.v4.6.31.135_28737_SERVER_20260930_1604_1321736_external-20260824_1848-3a.zip"
+
+if [[ $UNAME_S == Linux ]]; then
+    OS=linux
+elif [[ $UNAME_S == Darwin ]]; then
+    OS=mac
+# else ifeq ($(UNAME_S),CYGWIN) # Cygwin is Unix-like environment on Windows
+#     OS := windows
+# else ifeq ($(UNAME_S),MINGW32) # MinGW is a native Windows port of GNU tools
+#     OS := windows
+# else ifeq ($(UNAME_S),MSYS) # MSYS is a collection of GNU utilities for Windows
+#     OS := windows
+else
+    echo "Unsupported OS: ${UNAME_S}"
+    exit 1
+fi  
+#判断是arm64还是x86_64, 并设置ARCH
+
+if [[ $UNAME_M == x86_64 ]]; then
+    ARCH=x86_64
+elif [[ $UNAME_M == aarch64 ]]; then
+    ARCH=arm64
+elif [[ $UNAME_M == arm64 ]]; then
+    ARCH=arm64
+else
+    echo "Unsupported ARCH: ${UNAME_M}"
+    exit 1
+fi 
+
+echo "OS: ${OS}"
+echo "ARCH: ${ARCH}"
+
+check_and_download() {
+    download_url=$1
+    dst_dir=$2
+    version_file="${dst_dir}/sdk_version"
+    if [[ -f "${version_file}" ]]; then
+        sdk_version=$(cat "${version_file}")
+        if [[ "${sdk_version}" == $download_url ]]; then
+            echo "${dst_dir} downloaded"
+            return 0
+        fi
+    fi
+    zip_file="${dst_dir}.zip"
+    if [[ -f $zip_file ]]; then
+        rm -f $zip_file
+    fi
+    if [[ -d $dst_dir ]]; then
+        rm -rf $dst_dir
+    fi
+    echo "Downloading ${download_url} to ${zip_file}"
+    curl -o $zip_file $download_url
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to download ${download_url}"
+        return 1
+    fi
+    unzip $zip_file
+    rm -f $zip_file
+    if [[ "${dst_dir}" != "agora_sdk" ]]; then
+        mv agora_sdk $dst_dir
+    fi
+    echo $download_url > "${dst_dir}/sdk_version"
+    echo "$dst_dir downloaded"
+}
+
+# Download the Agora RTC SDK
+if [[ $OS == mac ]]; then
+    check_and_download $mac_sdk agora_sdk_mac
+fi
+if [[ $ARCH == arm64 ]] && [[ $OS == linux ]]; then
+    check_and_download $arm_sdk agora_sdk
+else
+    check_and_download $linux_sdk agora_sdk
+fi

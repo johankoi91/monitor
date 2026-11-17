@@ -18,6 +18,7 @@ import (
 	"github.com/johankoi91/monitor/runtime/internal/center"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/notify"
+	"github.com/johankoi91/monitor/runtime/internal/testfixture"
 	"github.com/johankoi91/monitor/runtime/web"
 )
 
@@ -134,7 +135,7 @@ func main() {
 	assets, _ := fs.Sub(web.Files, "static")
 	handler := (&center.Server{Store: store, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets)), Notifier: notifier, Access: keys}).Handler()
 	if os.Getenv("AVOPS_UI_ACCOUNT_FIXTURE") == "1" {
-		handler = accountFixture(handler)
+		handler = testfixture.AccountAuth(handler)
 	}
 	server := &http.Server{Addr: "127.0.0.1:18088", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	go func() { <-ctx.Done(); server.Close() }()

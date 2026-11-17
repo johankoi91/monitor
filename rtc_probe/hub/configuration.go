@@ -1,0 +1,226 @@
+package hub
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/johankoi91/monitor/rtc-probe/protocol"
+)
+
+// Plan is editable business configuration; machine credentials stay in deployment config.
+type Plan struct {
+	Targets []protocol.Target `json:"targets"`
+	Tasks   []protocol.Task   `json:"tasks"`
+}
+
+func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
+	var err error
+	plan, err = promoteTaskSettings(plan, nil)
+	if err != nil {
+		return Plan{}, err
+	}
+	registered := map[string]bool{}
+	for _, p := range probes {
+		registered[p.ID] = true
+	}
+	targets := map[string]bool{}
+	drivers := map[string]string{}
+	for i := range plan.Targets {
+		v := &plan.Targets[i]
+		if !protocol.ValidID(v.ID) || v.Name == "" || len(v.Name) > 128 || (v.Driver != "mock" && v.Driver != "agora") || targets[v.ID] {
+			return Plan{}, errors.New("目标名称、标识或模拟模式无效")
+		}
+		targets[v.ID] = true
+		drivers[v.ID] = v.Driver
+		if v.RTC != nil {
+			if v.Driver != "agora" {
+				return Plan{}, errors.New("仅 RTC SDK 目标可配置接入参数")
+			}
+			if err := v.RTC.Normalize(); err != nil {
+				return Plan{}, err
+			}
+		}
+	}
+	tasks := map[string]bool{}
+	for i := range plan.Tasks {
+		v := &plan.Tasks[i]
+		if v.Scenario == "" {
+			v.Scenario = "success"
+		}
+		if v.IntervalSeconds == 0 {
+			v.IntervalSeconds = 60
+		}
+		if v.TimeoutSeconds == 0 {
+			v.TimeoutSeconds = 30
+		}
+		if v.FailureThreshold == 0 {
+			v.FailureThreshold = 3
+		}
+		if v.RecoveryThreshold == 0 {
+			v.RecoveryThreshold = 2
+		}
+		if v.UnknownNotifySeconds == 0 {
+			v.UnknownNotifySeconds = 120
+		}
+		if v.FailureThreshold < 1 || v.FailureThreshold > 10 || v.RecoveryThreshold < 1 || v.RecoveryThreshold > 10 || v.UnknownNotifySeconds < 30 || v.UnknownNotifySeconds > 3600 || len(v.Description) > 1000 {
+			return Plan{}, errors.New("失败/恢复次数、未知通知时长或描述无效")
+		}
+		if !protocol.ValidID(v.ID) || tasks[v.ID] || !targets[v.TargetID] || !registered[v.Sender] || !registered[v.Receiver] || v.IntervalSeconds < 5 || v.IntervalSeconds > 3600 || v.TimeoutSeconds < 3 || v.TimeoutSeconds >= v.IntervalSeconds {
+			return Plan{}, errors.New("任务目标、双端探针、周期或超时配置无效")
+		}
+		if drivers[v.TargetID] == "agora" {
+			if v.IntervalSeconds < 30 || v.TimeoutSeconds < 5 || v.TimeoutSeconds > 120 {
+				return Plan{}, errors.New("真实 RTC 周期为 30–3600 秒，业务超时为 5–120 秒且须短于周期")
+			}
+			if v.Sender != v.Receiver {
+				return Plan{}, errors.New("真实 SDK 任务请选择同一探测服务，由内部两个连接分别收发")
+			}
+			var target *protocol.Target
+			for j := range plan.Targets {
+				if plan.Targets[j].ID == v.TargetID {
+					target = &plan.Targets[j]
+					break
+				}
+			}
+			if target == nil || target.RTC == nil {
+				return Plan{}, errors.New("请先在目标服务配置 RTC 接入与鉴权")
+			}
+			v.RTC = cloneRTC(target.RTC)
+			v.CredentialVersion = target.CredentialVersion
+			v.Credentials = nil
+			v.HasCertificate = false
+			v.HasSenderToken = false
+			v.HasReceiverToken = false
+			if v.RTC.MediaDurationMS+2000 > v.TimeoutSeconds*1000 {
+				return Plan{}, errors.New("业务超时应至少比媒体发送时长多 2 秒")
+			}
+		} else if v.Sender == v.Receiver || !scenarios[v.Scenario] {
+			return Plan{}, errors.New("旧模拟任务双端或场景无效")
+		}
+		tasks[v.ID] = true
+	}
+	if len(plan.Targets) > 50 || len(plan.Tasks) > 100 {
+		return Plan{}, errors.New("目标或任务数量达到框架上限")
+	}
+	return plan, nil
+}
+func (h *Hub) planLocked() Plan {
+	p := Plan{}
+	for _, target := range h.config.Targets {
+		p.Targets = append(p.Targets, h.publicTarget(target))
+	}
+	for _, t := range h.config.Tasks {
+		t.Enabled = h.enabled(t)
+		t = h.publicTask(t)
+		p.Tasks = append(p.Tasks, t)
+	}
+	return p
+}
+func planRevision(p Plan) string {
+	b, _ := json.Marshal(p)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])[:24]
+}
+func (h *Hub) UpdatePlan(expected string, plan Plan) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if expected == "" || expected != planRevision(h.planLocked()) {
+		return errors.New("配置已变化，请刷新后重试")
+	}
+	p, err := normalizePlan(h.probesLocked(), plan)
+	if err != nil {
+		return err
+	}
+	secrets := map[string]protocol.Credentials{}
+	for i := range p.Targets {
+		target := &p.Targets[i]
+		previous := h.target(target.ID)
+		old := h.state.TargetCredentials[target.ID]
+		if credentialScopeChanged(previous.RTC, target.RTC) {
+			old = protocol.Credentials{}
+		}
+		next := overlayCredentials(old, target.Credentials)
+		next, err = validateCredentials(target.RTC, next)
+		if err != nil {
+			return err
+		}
+		if next != h.state.TargetCredentials[target.ID] || credentialScopeChanged(previous.RTC, target.RTC) {
+			target.CredentialVersion = protocol.ID()
+		} else {
+			target.CredentialVersion = previous.CredentialVersion
+		}
+		target.Credentials = nil
+		target.HasCertificate = false
+		target.HasSenderToken = false
+		target.HasReceiverToken = false
+		secrets[target.ID] = next
+	}
+	for i := range p.Tasks {
+		for _, target := range p.Targets {
+			if target.ID == p.Tasks[i].TargetID {
+				p.Tasks[i].RTC = cloneRTC(target.RTC)
+				p.Tasks[i].CredentialVersion = target.CredentialVersion
+				break
+			}
+		}
+	}
+	affected := map[string]bool{}
+	for _, old := range h.config.Tasks {
+		found := false
+		for _, next := range p.Tasks {
+			if next.ID == old.ID {
+				found = true
+				var target protocol.Target
+				for _, v := range p.Targets {
+					if v.ID == next.TargetID {
+						target = v
+						break
+					}
+				}
+				if revision(old, h.target(old.TargetID)) != revision(next, target) || h.enabled(old) != next.Enabled {
+					affected[old.ID] = true
+				}
+				break
+			}
+		}
+		if !found {
+			affected[old.ID] = true
+		}
+	}
+	now := time.Now().UTC()
+	if err = h.change(func(s *state) error {
+		stored := storagePlan(p)
+		s.Plan = &stored
+		s.TargetCredentials = secrets
+		s.Credentials = nil
+		s.Enabled = map[string]bool{}
+		for id := range s.Health {
+			if affected[id] {
+				delete(s.Health, id)
+			}
+		}
+		for _, run := range s.Runs {
+			if affected[run.TaskID] && !terminal(run.Status) {
+				run.Status = "CANCELLED"
+				run.Reason = "CONFIG_CHANGED"
+				run.FinishedAt = &now
+				if run.Kind == edgeSweepKind {
+					h.stopSweep(s, run, now, "CONFIG_CHANGED", "CANCELLED")
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	h.config.Targets, h.config.Tasks = p.Targets, p.Tasks
+	for _, t := range p.Tasks {
+		if affected[t.ID] || h.next[t.ID].IsZero() {
+			h.next[t.ID] = now.Add(time.Duration(t.IntervalSeconds) * time.Second)
+		}
+	}
+	return nil
+}

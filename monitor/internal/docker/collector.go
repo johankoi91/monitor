@@ -233,8 +233,11 @@ func startup(raw inspect, at time.Time, policy Policy) *model.Startup {
 }
 
 type Collector struct {
-	client *http.Client
-	policy Policy
+	versionMu      sync.Mutex
+	version        string
+	versionChecked time.Time
+	client         *http.Client
+	policy         Policy
 }
 
 func New(socket string, policy Policy) *Collector {
@@ -244,26 +247,15 @@ func New(socket string, policy Policy) *Collector {
 	return &Collector{client: &http.Client{Transport: transport, Timeout: 5 * time.Second}, policy: policy}
 }
 
-func (c *Collector) Startup(ctx context.Context, request model.StartupRequest) model.StartupResult {
-	result := model.StartupResult{Type: "startup_result", RequestID: request.RequestID, ContainerID: request.ContainerID, ContainerName: request.ContainerName}
-	if request.RequestID == "" || request.ContainerID == "" || strings.ContainsAny(request.ContainerID, "/?#") {
-		result.Error = "INVALID_TARGET"
-		return result
-	}
-	var raw inspect
-	if c.get(ctx, "/containers/"+request.ContainerID+"/json", &raw) != nil {
-		result.Error = "DOCKER_READ_FAILED"
-		return result
-	}
-	if raw.ID != request.ContainerID || strings.TrimPrefix(raw.Name, "/") != request.ContainerName {
-		result.Error = "CONTAINER_IDENTITY_CHANGED"
-		return result
-	}
-	result.Startup = startup(raw, time.Now().UTC(), Policy{RawStartup: true})
-	return result
-}
 func (c *Collector) get(ctx context.Context, path string, target any) error {
-	r, err := http.NewRequestWithContext(ctx, "GET", "http://docker/v1.39"+path, nil)
+	return c.getVersioned(ctx, path, target, true)
+}
+func (c *Collector) getVersioned(ctx context.Context, path string, target any, retry bool) error {
+	version, err := c.apiVersion(ctx)
+	if err != nil {
+		return err
+	}
+	r, err := http.NewRequestWithContext(ctx, "GET", "http://docker/v"+version+path, nil)
 	if err != nil {
 		return err
 	}
@@ -272,8 +264,13 @@ func (c *Collector) get(ctx context.Context, path string, target any) error {
 		return errors.New("Docker socket unavailable")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 400 && retry {
+		resp.Body.Close()
+		c.invalidateVersion(version)
+		return c.getVersioned(ctx, path, target, false)
+	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("Docker returned HTTP %d", resp.StatusCode)
+		return fmt.Errorf("Docker API %s returned HTTP %d", version, resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	if err != nil || len(data) > 4<<20 {

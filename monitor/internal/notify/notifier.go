@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,15 +34,22 @@ type Config struct {
 	MaxPending       int                    `yaml:"max_pending"`
 }
 type Fact struct {
-	Key         string     `json:"key"`
-	Cluster     string     `json:"cluster"`
-	Service     string     `json:"service"`
-	Node        string     `json:"node,omitempty"`
-	Status      string     `json:"status"`
-	ReasonCode  string     `json:"reason_code"`
-	Reason      string     `json:"reason"`
-	CollectedAt *time.Time `json:"collected_at"`
-	Stale       bool       `json:"stale"`
+	Business       bool       `json:"business,omitempty"`
+	TaskID         string     `json:"task_id,omitempty"`
+	TargetID       string     `json:"target_id,omitempty"`
+	RunID          string     `json:"run_id,omitempty"`
+	ConfigRevision string     `json:"config_revision,omitempty"`
+	Path           string     `json:"path,omitempty"`
+	Notify         bool       `json:"notify,omitempty"`
+	Key            string     `json:"key"`
+	Cluster        string     `json:"cluster"`
+	Service        string     `json:"service"`
+	Node           string     `json:"node,omitempty"`
+	Status         string     `json:"status"`
+	ReasonCode     string     `json:"reason_code"`
+	Reason         string     `json:"reason"`
+	CollectedAt    *time.Time `json:"collected_at"`
+	Stale          bool       `json:"stale"`
 }
 type Delivery struct {
 	NormalEpoch      string             `json:"normal_epoch,omitempty"`
@@ -282,6 +290,9 @@ func (n *Notifier) Observe(revision string, facts []Fact) {
 		}
 	}
 	for key := range n.facts {
+		if strings.HasPrefix(key, "rtc/") {
+			continue
+		}
 		if !current[key] {
 			batch.Removed = append(batch.Removed, key)
 			if len(batch.Removed) >= 32 && !flush() {
@@ -361,6 +372,10 @@ func (n *Notifier) sendOne(ctx context.Context, retryID string) {
 		return
 	}
 	n.inflightCancel = nil
+	if current, ok := n.deliveries[deliveryKey(d)]; !ok || current.Status != "INFLIGHT" || current.Attempts != d.Attempts {
+		n.mu.Unlock()
+		return
+	}
 	if success {
 		d.Status = "DELIVERED"
 		d.LastError = ""

@@ -32,10 +32,5 @@ printf '%s\n' "$task_version" > "$task_release/VERSION"
 cd "$task_repo"
 tar --no-xattrs -cf - --exclude=.git --exclude=node_modules --exclude=__pycache__ --exclude=.DS_Store --exclude=build --exclude=dist --exclude=releases --exclude=data --exclude='*.pem' --exclude='*.key' --exclude='*.env' --exclude='.env*' --exclude='*.jsonl' --exclude='*.log' --exclude='*.pid' --exclude='*.tar' --exclude='*.tar.gz' --exclude='*.mp4' --exclude='*.wav' --exclude='*.m4a' --exclude='*.mov' --exclude=admin-curl.conf --exclude=receiver-curl.conf --exclude=center.yaml --exclude='./notification_receiver/notification-receiver' . | tar -xf - -C "$task_release/source"
 cp "$task_module/deploy/OFFLINE-INSTALL.md" "$task_release/README.md"
-cd "$task_release"
-python3 "$task_module/deploy/verify-bundle-images.py" "$task_release"
-find bin images deploy source -type f -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS
-shasum -a 256 VERSION README.md >> SHA256SUMS
-cd "$(dirname "$task_release")"
-tar --no-xattrs -czf "monitor-$task_version-linux-amd64.tar.gz" "monitor-$task_version-linux-amd64"
+bash "$task_module/deploy/seal-release.sh" "$task_release"
 printf '%s\n' "$task_module/build/release/monitor-$task_version-linux-amd64.tar.gz"

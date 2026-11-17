@@ -51,7 +51,7 @@ func main() {
 	files := map[string]string{
 		"center.env":      fmt.Sprintf("AVOPS_ADMIN_ID=rtc-admin\nAVOPS_ADMIN_SECRET=%s\nAVOPS_CENTER_ADDR=0.0.0.0:19443\nAVOPS_CENTER_LOCAL_ADDR=127.0.0.1:18084\nAVOPS_CENTER_CONFIG=/etc/avops-monitor/center.yaml\nAVOPS_DATA_DIR=/var/lib/avops-monitor\nAVOPS_TLS_CERT=/etc/avops-monitor/server.pem\nAVOPS_TLS_KEY=/etc/avops-monitor/server-key.pem\nAVOPS_ALLOWED_IPS=111.230.192.59,111.230.108.76,127.0.0.1,::1\n", admin),
 		"center.yaml":     fmt.Sprintf("site:\n  code: rtc-pilot\n  name: RTC 首期试点\nagents:\n  - id: rtc-192-59\n    secret: %s\n    host_name: rtc-192-59\n    host_address: 111.230.192.59\n", agent),
-		"agent.env":       fmt.Sprintf("AVOPS_AGENT_ID=rtc-192-59\nAVOPS_AGENT_SECRET=%s\nAVOPS_CENTER_URL=wss://111.230.108.76:19443/api/v1/agent/connect\nAVOPS_TLS_SERVER_NAME=edge.rtcdevelopers.com\nAVOPS_DOCKER_SOCKET=/var/run/docker.sock\nAVOPS_COLLECT_SECONDS=15\nAVOPS_PUBLIC_ARGS=port,listen,host,bind,log-level,config,threads\nAVOPS_AGENT_DATA_DIR=/var/lib/avops-agent\n", agent),
+		"agent.env":       fmt.Sprintf("AVOPS_AGENT_ID=rtc-192-59\nAVOPS_AGENT_SECRET=%s\nAVOPS_CENTER_URL=wss://111.230.108.76:19443/api/v1/agent/connect\nAVOPS_TLS_SERVER_NAME=edge.rtcdevelopers.com\nAVOPS_DOCKER_SOCKET=/var/run/docker.sock\nAVOPS_COLLECT_SECONDS=15\nAVOPS_AGENT_DATA_DIR=/var/lib/avops-agent\n", agent),
 		"admin-curl.conf": fmt.Sprintf("user = \"rtc-admin:%s\"\n", admin),
 	}
 	if *acceptance {
@@ -64,7 +64,7 @@ func main() {
 		files["center.yaml"] = string(data)
 		files["restarts.yaml"] = string(rules)
 		files["center.env"] = fmt.Sprintf("AVOPS_ADMIN_ID=rtc-qa-admin\nAVOPS_ADMIN_SECRET=%s\nAVOPS_CENTER_ADDR=0.0.0.0:29443\nAVOPS_CENTER_LOCAL_ADDR=127.0.0.1:28084\nAVOPS_CENTER_CONFIG=/etc/avops-monitor-acceptance/center.yaml\nAVOPS_DATA_DIR=/var/lib/avops-monitor-acceptance\nAVOPS_TLS_CERT=/etc/avops-monitor/server.pem\nAVOPS_TLS_KEY=/etc/avops-monitor/server-key.pem\nAVOPS_ALLOWED_IPS=111.230.192.59,111.230.108.76,127.0.0.1,::1\n", admin)
-		files["agent.env"] = fmt.Sprintf("AVOPS_AGENT_ID=rtc-v1-qa\nAVOPS_AGENT_SECRET=%s\nAVOPS_CENTER_URL=wss://111.230.108.76:29443/api/v1/agent/connect\nAVOPS_TLS_SERVER_NAME=edge.rtcdevelopers.com\nAVOPS_DOCKER_SOCKET=/var/run/docker.sock\nAVOPS_COLLECT_SECONDS=10\nAVOPS_AGENT_DATA_DIR=/var/lib/avops-agent-acceptance\nAVOPS_RESTART_RULES_FILE=/etc/avops-monitor-acceptance/restarts.yaml\nAVOPS_PUBLIC_ARGS=port,listen,host,bind,log-level,config,threads\n", agent)
+		files["agent.env"] = fmt.Sprintf("AVOPS_AGENT_ID=rtc-v1-qa\nAVOPS_AGENT_SECRET=%s\nAVOPS_CENTER_URL=wss://111.230.108.76:29443/api/v1/agent/connect\nAVOPS_TLS_SERVER_NAME=edge.rtcdevelopers.com\nAVOPS_DOCKER_SOCKET=/var/run/docker.sock\nAVOPS_COLLECT_SECONDS=10\nAVOPS_AGENT_DATA_DIR=/var/lib/avops-agent-acceptance\nAVOPS_RESTART_RULES_FILE=/etc/avops-monitor-acceptance/restarts.yaml\n", agent)
 		files["admin-curl.conf"] = fmt.Sprintf("user = \"rtc-qa-admin:%s\"\n", admin)
 	}
 	// Do not overwrite an existing deployment's credentials on a repeated run.

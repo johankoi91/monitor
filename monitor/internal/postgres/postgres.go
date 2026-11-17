@@ -10,10 +10,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/johankoi91/monitor/runtime/internal/storage"
 	_ "github.com/lib/pq"
-	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -26,6 +24,9 @@ var schema string
 
 //go:embed resource_history.sql
 var resourceHistorySchema string
+
+//go:embed rtc_history.sql
+var rtcHistorySchema string
 
 type DB struct {
 	Pool        *sql.DB
@@ -67,7 +68,7 @@ func Open(dsn string, key []byte, migrate bool) (*DB, error) {
 			pool.Close()
 			return nil, e
 		}
-		if _, e = tx.ExecContext(ctx, schema+"\n"+resourceHistorySchema); e == nil {
+		if _, e = tx.ExecContext(ctx, schema+"\n"+resourceHistorySchema+"\n"+rtcHistorySchema); e == nil {
 			e = tx.Commit()
 		} else {
 			tx.Rollback()
@@ -185,7 +186,7 @@ func (d *DB) saveDocument(ctx context.Context, tx *sql.Tx, name string, data []b
 	}
 	var body any = string(data)
 	var encrypted any
-	if name == "notification_settings" || strings.HasPrefix(name, "startup/") {
+	if name == "notification_settings" || strings.HasPrefix(name, "startup/") || strings.HasPrefix(name, "rtc-probe/") {
 		b, err := d.seal(name, data)
 		if err != nil {
 			return err
@@ -322,4 +323,3 @@ func (d *DB) LoadSnapshots() (map[string]json.RawMessage, error) {
 	return result, rows.Err()
 }
 func jsonText(value any) string { b, _ := json.Marshal(value); return string(b) }
-func randomID() string          { var b [16]byte; io.ReadFull(rand.Reader, b[:]); return fmt.Sprintf("%x", b) }

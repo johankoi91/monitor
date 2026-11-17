@@ -177,17 +177,6 @@ func (s *Service) UpdateUser(uid string, r UserUpdate, actor, ip string) (User, 
 	return s.User(uid)
 }
 
-type RoleUpdate struct {
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	Permissions     []string `json:"permissions"`
-	ExpectedVersion int      `json:"expected_version"`
-	Reason          string   `json:"reason"`
-}
-
-func (s *Service) SaveRole(roleID string, r RoleUpdate, actor, ip string) (Role, error) {
-	return Role{}, problem(409, "FIXED_ROLES", "角色固定为 管理者和使用者，不支持新增或修改角色权限")
-}
 func (s *Service) AuditList(action, actor string, limit, offset int) (any, error) {
 	if limit < 1 || limit > 100 || offset < 0 {
 		return nil, problem(400, "INVALID_PAGE", "分页参数无效")

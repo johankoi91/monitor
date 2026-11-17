@@ -89,7 +89,7 @@ try:
     (config/"restart-rules.yaml").write_text(json.dumps([rule]))
     write_env(config/"database.env",runtime)
     write_env(config/"center.env",{"AVOPS_ADMIN_ID":"offline-admin","AVOPS_ADMIN_SECRET":admin,"AVOPS_CENTER_ADDR":"127.0.0.1:29444","AVOPS_CENTER_LOCAL_ADDR":"127.0.0.1:28085","AVOPS_ALLOWED_IPS":"127.0.0.1"})
-    write_env(config/"agent.env",{"AVOPS_AGENT_ID":"offline-agent","AVOPS_AGENT_SECRET":agent_secret,"AVOPS_CENTER_URL":"wss://127.0.0.1:29444/api/v1/agent/connect","AVOPS_TLS_SERVER_NAME":args.tls_name,"AVOPS_COLLECT_SECONDS":"10","AVOPS_RAW_STARTUP":"1"})
+    write_env(config/"agent.env",{"AVOPS_AGENT_ID":"offline-agent","AVOPS_AGENT_SECRET":agent_secret,"AVOPS_CENTER_URL":"wss://127.0.0.1:29444/api/v1/agent/connect","AVOPS_TLS_SERVER_NAME":args.tls_name,"AVOPS_COLLECT_SECONDS":"10"})
     installer=str(bundle/"deploy/docker-install.sh")
     center_name,agent_name=prefix+"-center",prefix+"-agent"
     containers.extend([center_name,agent_name])
@@ -139,7 +139,11 @@ try:
     assert status==200
     mark("new baseline defaults to restart denied; only isolated canary explicitly enabled")
     wait(lambda:any(n.get("restart_allowed") for s in api("GET","/api/v1/services/status",auth=token)[1].get("services",[]) for n in s["nodes"]))
-    startup=api("GET","/api/v1/nodes/startup?node_id="+urllib.parse.quote("offline-agent/"+canary,safe=""),auth=token)
+    def startup_record():
+        code,data=api("GET","/api/v1/services/status?include_startup=true",auth=token)
+        node=next(n for service in data.get("services",[]) for n in service["nodes"] if n["node_id"]==node_id)
+        return code,node["startup_record"]
+    startup=startup_record()
     assert startup[0]==200 and startup[1]["startup"] and startup[1]['source']=='agent_report' and startup[1]['reported_at']
     assert sql("SELECT count(*) FROM avops.containers WHERE payload ? 'startup'")=="0"
     assert sql("SELECT count(*) FROM avops.documents WHERE name='startup/offline-agent' AND payload IS NULL AND encrypted_payload IS NOT NULL")=="1"
@@ -149,7 +153,7 @@ try:
         return code==200 and len([s for s in d.get('samples',[]) if s.get('cpu') is not None])>=2
     wait(history_ready,90)
     docker('stop',agent_name)
-    cached=api('GET','/api/v1/nodes/startup?node_id='+urllib.parse.quote(node_id,safe=''),auth=token)
+    cached=startup_record()
     assert cached[0]==200 and cached[1]['startup'] and cached[1]['stale'] and cached[1]['reported_at']
     docker('start',agent_name)
     wait(lambda:any(n.get('restart_allowed') for s in api('GET','/api/v1/services/status',auth=token)[1].get('services',[]) for n in s['nodes']))
@@ -171,7 +175,7 @@ try:
     assert sql("SELECT count(*) FROM avops.nodes WHERE active")=="1"
     status,login=api('POST','/api/v1/auth/login',{'username':'admin','password':runtime['AVOPS_BOOTSTRAP_PASSWORD']})
     token='Bearer '+login['token']
-    assert api('GET','/api/v1/nodes/startup?node_id='+urllib.parse.quote(node_id,safe=''),auth=token)[1]['startup']
+    assert startup_record()[1]['startup']
     assert len(api('GET','/api/v1/nodes/resource-history?node_id='+urllib.parse.quote(node_id,safe='')+'&range=15m',auth=token)[1]['samples'])>=2
     mark('startup and resource history survive center restart')
     actual_version=sql("SHOW server_version")

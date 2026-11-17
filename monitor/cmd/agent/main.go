@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,15 +30,6 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-func allow(key string) map[string]bool {
-	result := map[string]bool{}
-	for _, item := range strings.Split(os.Getenv(key), ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			result[item] = true
-		}
-	}
-	return result
 }
 func main() {
 	endpoint := os.Getenv("AVOPS_CENTER_URL")
@@ -61,7 +51,7 @@ func main() {
 	if err != nil || seconds < 10 || seconds > 60 {
 		log.Fatal("collection period must be 10–60 seconds")
 	}
-	collector := docker.New(env("AVOPS_DOCKER_SOCKET", "/var/run/docker.sock"), docker.Policy{RawStartup: true, EnvAllow: allow("AVOPS_PUBLIC_ENV"), ArgAllow: allow("AVOPS_PUBLIC_ARGS")})
+	collector := docker.New(env("AVOPS_DOCKER_SOCKET", "/var/run/docker.sock"), docker.Policy{RawStartup: true})
 	resources, err := cadvisor.New(os.Getenv("AVOPS_CADVISOR_URL"))
 	if err != nil {
 		log.Fatal(err)
@@ -199,16 +189,14 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 		ticker := time.NewTicker(period)
 		defer ticker.Stop()
 		var sequence uint64
+		startupReports := startupReporter{}
 		for {
 			mu.RLock()
 			current := plan
 			mu.RUnlock()
 			passCtx, cancel := context.WithTimeout(collectionCtx, 25*time.Second)
 			report := collector.Collect(passCtx, current)
-			for i := range report.Containers {
-				o := &report.Containers[i]
-				o.StartupValid = o.Startup != nil && !o.Startup.Incomplete && !o.Startup.Truncated
-			}
+			startupReports.filter(&report, time.Now().UTC())
 			cancel()
 			if len(resourceClients) > 0 && resourceClients[0] != nil {
 				resourceClients[0].Enrich(collectionCtx, &report)
@@ -221,10 +209,11 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 				data, _ = json.Marshal(report)
 			}
 			if !report.Complete {
-				log.Print("collection incomplete; last snapshot will age instead of reporting missing containers")
+				log.Printf("collection incomplete: %s; last snapshot will age instead of reporting missing containers", report.Error)
 			}
 			select {
 			case outbound <- json.RawMessage(data):
+				startupReports.sent(report, time.Now().UTC())
 			case <-collectionCtx.Done():
 				return
 			}

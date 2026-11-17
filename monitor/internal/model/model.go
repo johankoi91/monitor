@@ -2,6 +2,8 @@ package model
 
 import "time"
 
+const StartupReportInterval = 10 * time.Minute
+
 type Check struct {
 	Type      string `json:"type" yaml:"type"`
 	Host      string `json:"host" yaml:"host"`

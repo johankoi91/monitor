@@ -9,6 +9,9 @@ const ContainerAbnormal = "CONTAINER_ABNORMAL"
 const CollectionAbnormal = "COLLECTION_ABNORMAL"
 const Recovered = "RECOVERED"
 const Normal = "NORMAL"
+const RTCAbnormal = "RTC_ABNORMAL"
+const RTCRecovered = "RTC_RECOVERED"
+const RTCUnknown = "RTC_UNKNOWN"
 
 // Routes are ordered and fixed-size so settings remain comparable and revisions
 // protect pending deliveries when any destination changes.

@@ -1,6 +1,6 @@
 services:
   avops-agent:
-    image: avops-agent:1.0.0
+    image: avops-agent:${AVOPS_RELEASE_VERSION:-1.0.4}
     container_name: avops-agent
     restart: unless-stopped
     network_mode: host
@@ -10,12 +10,11 @@ services:
       AVOPS_DOCKER_SOCKET: /var/run/docker.sock
       AVOPS_AGENT_DATA_DIR: /var/lib/avops-agent
       AVOPS_CADVISOR_URL: http://127.0.0.1:18089
-      AVOPS_RAW_STARTUP: "1"
       AVOPS_RESTART_RULES_FILE: /etc/avops-monitor/restart-rules.yaml
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /var/lib/avops-agent:/var/lib/avops-agent
-      - /etc/avops-monitor/restart-demo-agent-rules.yaml:/etc/avops-monitor/restart-rules.yaml:ro
+      - /etc/avops-monitor/restart-rules.yaml:/etc/avops-monitor/restart-rules.yaml:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777

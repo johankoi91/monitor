@@ -1,6 +1,5 @@
 import { useState, type ReactNode } from "react";
 import Tabs from "antd/es/tabs";
-import Empty from "antd/es/empty";
 import Typography from "antd/es/typography";
 import Table from "antd/es/table";
 import type {
@@ -53,8 +52,6 @@ function bytes(v: number | null | undefined) {
     if (v >= size) return `${(v / size).toFixed(1)} ${unit}`;
   return `${v.toFixed(0)} B`;
 }
-const rate = (v: number | null | undefined) =>
-  v == null ? "—" : `${bytes(v)}/s`;
 const cores = (v: number | null | undefined) =>
   v == null ? "—" : `${v > 0 && v < 0.001 ? "<0.001" : v.toFixed(3)} 核`;
 function duration(start: string | null | undefined) {
@@ -75,13 +72,11 @@ function OverviewItem({
   label,
   value,
   note,
-  ratio,
 }: {
   icon: Parameters<typeof MetricIcon>[0]["name"];
   label: string;
   value: ReactNode;
   note: string;
-  ratio?: number | null;
 }) {
   return (
     <div className="resource-inline-metric" title={note}>
@@ -226,30 +221,24 @@ export default function Resources({
   api,
   nodeID,
   value,
-  compact = false,
   lifecycle,
   runtime,
   updatedAt,
   dataStale = false,
   startup,
   detailsOpen,
-  onDetailsOpenChange,
 }: {
   api: API;
   nodeID: string;
   value?: ResourceMetrics | null;
-  compact?: boolean;
   lifecycle?: ContainerLifecycle | null;
   runtime?: string;
   updatedAt?: string | null;
   dataStale?: boolean;
   startup?: ReactNode;
-  detailsOpen?: boolean;
-  onDetailsOpenChange?: (open: boolean) => void;
+  detailsOpen: boolean;
 }) {
-  const [tab, setTab] = useState("resources"),
-    [internalDetailsOpen, setInternalDetailsOpen] = useState(false);
-  const isDetailsOpen = detailsOpen ?? internalDetailsOpen;
+  const [tab, setTab] = useState("resources");
   const current = !!value && !value.stale && value.status !== "UNAVAILABLE";
   const f = value?.host_filesystem;
   const storageCurrent =
@@ -261,7 +250,7 @@ export default function Resources({
       ? duration(lifecycle.started_at)
       : "—";
   return (
-    <div className={`resource-view ${compact ? "resource-view-compact" : ""}`}>
+    <div className="resource-view">
       <div className="resource-overview">
         <OverviewItem
           icon="cpu"
@@ -290,7 +279,6 @@ export default function Resources({
                   ? "未设置内存限额"
                   : "限额未知"
           }
-          ratio={current ? value?.memory_working_set_ratio : undefined}
         />
         <OverviewItem
           icon="clock"
@@ -307,18 +295,16 @@ export default function Resources({
               : "暂无有效采集时间"
           }
         />
-        {!compact && (
-          <OverviewItem
-            icon="clock"
-            label="本次运行"
-            value={liveDuration}
-            note={
-              lifecycle?.stale
-                ? "生命周期已过期"
-                : `自动重启 ${number(lifecycle?.restart_count, 0)} 次`
-            }
-          />
-        )}
+        <OverviewItem
+          icon="clock"
+          label="本次运行"
+          value={liveDuration}
+          note={
+            lifecycle?.stale
+              ? "生命周期已过期"
+              : `自动重启 ${number(lifecycle?.restart_count, 0)} 次`
+          }
+        />
       </div>
       {!current && (
         <div className="resource-unavailable">
@@ -337,7 +323,7 @@ export default function Resources({
           </div>
         </div>
       )}
-      {isDetailsOpen && (
+      {detailsOpen && (
         <div className="resource-details">
           <Tabs
             destroyOnHidden

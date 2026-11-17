@@ -169,6 +169,7 @@ export interface NotificationSettings {
   storage_available: boolean;
 }
 export interface NodeStatus {
+  startup_record?: StartupRecord;
   node_id: string;
   host_name: string;
   host_address: string;
@@ -250,4 +251,41 @@ export interface Notifications {
   dropped?: number;
   storage_available?: boolean;
   recent?: Delivery[];
+}
+
+export type Startup = {
+  collected_at: string;
+  incomplete: boolean;
+  truncated: boolean;
+  redacted_fields: string[];
+  config: {
+    image: string;
+    entrypoint: string[];
+    cmd: string[];
+    path: string;
+    args: string[];
+    working_dir: string;
+    user: string;
+    network_mode: string;
+    restart_policy: { name: string };
+    env: Array<{ name: string; value: string }>;
+    mounts: Array<{
+      source: string;
+      target: string;
+      type: string;
+      read_only: boolean;
+    }>;
+    port_bindings: Array<{
+      container_port: string;
+      host_ip: string;
+      host_port: string;
+    }>;
+  };
+};
+
+export interface StartupRecord {
+  startup: Startup | null;
+  stale: boolean;
+  reported_at?: string;
+  container_id?: string;
 }

@@ -119,7 +119,7 @@ func TestNormalWaitsForFreshFactsAndQueueCapacity(t *testing.T) {
 	// same persisted endpoint configuration produced by UpdateSettings.
 	n.config.EndpointMode = true
 	n.config.Enabled = true
-	n.config.Endpoints[0] = Endpoint{ID: "a", Enabled: true, URL: "https://example.com", Secret: "test", Events: [4]bool{false, false, false, true}, NormalEpoch: "activation-1"}
+	n.config.Endpoints[0] = Endpoint{ID: "a", Enabled: true, URL: "https://example.com", Secret: "test", Events: [7]bool{false, false, false, true}, NormalEpoch: "activation-1"}
 	old := fact("HEALTHY")
 	at := time.Now().Add(-time.Minute)
 	old.CollectedAt = &at

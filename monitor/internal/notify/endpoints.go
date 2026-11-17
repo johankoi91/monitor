@@ -12,7 +12,7 @@ import (
 
 const maxEndpoints = 20
 
-var eventCategories = [4]string{ContainerAbnormal, CollectionAbnormal, Recovered, Normal}
+var eventCategories = [7]string{ContainerAbnormal, CollectionAbnormal, Recovered, Normal, RTCAbnormal, RTCRecovered, RTCUnknown}
 
 // Fixed-size values keep configuration comparisons and revision checks exact.
 type Endpoint struct {
@@ -21,7 +21,7 @@ type Endpoint struct {
 	URL           string
 	TLSServerName string
 	Secret        string
-	Events        [4]bool
+	Events        [7]bool
 	NormalEpoch   string
 }
 type EndpointSettings struct {
@@ -107,6 +107,9 @@ type destination struct {
 func destinations(c Config, category string) []destination {
 	result := []destination{}
 	if !c.EndpointMode {
+		if category == RTCAbnormal || category == RTCRecovered || category == RTCUnknown {
+			return result
+		}
 		target, on := routeConfig(c, category)
 		if on {
 			result = append(result, destination{Config: target})
@@ -162,7 +165,7 @@ func validateEndpoints(c Config) error {
 		}
 		ids[e.ID] = true
 		urls[e.URL+"|"+e.TLSServerName] = true
-		if e.URL == "" || e.Secret == "" || len(e.Secret) > 4096 || e.Events == [4]bool{} {
+		if e.URL == "" || e.Secret == "" || len(e.Secret) > 4096 || e.Events == [7]bool{} {
 			return errors.New("请填写接收地址、签名密钥并至少选择一种事件")
 		}
 		if err := validSettings(endpointConfig(c, e)); err != nil {

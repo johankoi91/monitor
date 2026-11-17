@@ -7,12 +7,6 @@ export class APIError extends Error {
     super(message);
   }
 }
-export function basic(id: string, secret: string) {
-  const bytes = new TextEncoder().encode(`${id}:${secret}`);
-  return (
-    "Basic " + btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""))
-  );
-}
 export function client(authorization: string, onUnauthorized: () => void) {
   const request = async (
     path: string,
@@ -31,7 +25,7 @@ export function client(authorization: string, onUnauthorized: () => void) {
       throw new APIError("暂时无法连接监控中心", 0, "NETWORK_ERROR");
     }
     if (!response.ok) {
-      let data: { message?: string; code?: string } = {};
+      let data: { message?: string; error?: string; code?: string } = {};
       try {
         data = await response.json();
       } catch {}
@@ -41,7 +35,7 @@ export function client(authorization: string, onUnauthorized: () => void) {
           window.dispatchEvent(new CustomEvent("session-replaced"));
       }
       throw new APIError(
-        data.message || `请求失败（${response.status}）`,
+        data.message || data.error || `请求失败（${response.status}）`,
         response.status,
         data.code || "HTTP_ERROR",
       );
@@ -91,12 +85,12 @@ export function client(authorization: string, onUnauthorized: () => void) {
         )
       ).json();
     },
-    download: async (path: string) => {
+    download: async (path: string, filename = "services.yaml") => {
       const response = await request(path);
       const url = URL.createObjectURL(await response.blob());
       const a = document.createElement("a");
       a.href = url;
-      a.download = "services.yaml";
+      a.download = filename;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     },

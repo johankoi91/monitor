@@ -462,7 +462,7 @@ export function OperationDetails({
             />
           ) : (
             <Timeline
-              items={steps.map((step, index) => ({
+              items={steps.map((step) => ({
                 color:
                   step.status === "SUCCESS"
                     ? "green"

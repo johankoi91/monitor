@@ -1,7 +1,6 @@
 package center
 
 import (
-	"context"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"testing"
 	"time"
@@ -14,11 +13,7 @@ func TestReportedStartupSurvivesOfflineMissingAndRecreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	read := func() map[string]any {
-		v, err := s.NodeStartup(context.Background(), "rtc-a/ap")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return v.(map[string]any)
+		return s.StatusesWithStartup("", "").(map[string]any)["services"].([]map[string]any)[0]["nodes"].([]map[string]any)[0]["startup_record"].(map[string]any)
 	}
 	if read()["startup"] == nil || read()["stale"] != false {
 		t.Fatal("valid pushed record missing")
@@ -62,8 +57,22 @@ func TestReportedStartupSurvivesOfflineMissingAndRecreation(t *testing.T) {
 	if read()["startup"].(*model.Startup).Incomplete {
 		t.Fatal("incomplete inspect replaced valid record")
 	}
-	if _, err := s.NodeStartup(context.Background(), "rtc-a/not-managed"); err == nil {
-		t.Fatal("unmanaged history exposed")
+	standard := s.Statuses("", "").(map[string]any)["services"].([]map[string]any)[0]["nodes"].([]map[string]any)[0]
+	if _, ok := standard["startup_record"]; ok {
+		t.Fatal("default status exposes startup parameters")
+	}
+	page := s.StatusesWithStartup("", "").(map[string]any)["services"].([]map[string]any)
+	if len(page) != 1 || len(page[0]["nodes"].([]map[string]any)) != 1 {
+		t.Fatal("page parameters include unmanaged containers")
+	}
+	record := page[0]["nodes"].([]map[string]any)[0]["startup_record"].(map[string]any)
+	if record["container_id"] != "new-id" || record["startup"] == nil || record["reported_at"] == nil {
+		t.Fatal("page poll missing last report")
+	}
+	s.Disconnect("rtc-a", session)
+	offline := s.StatusesWithStartup("", "").(map[string]any)["services"].([]map[string]any)[0]["nodes"].([]map[string]any)[0]["startup_record"].(map[string]any)
+	if offline["startup"] == nil || offline["stale"] != true || offline["reported_at"] != record["reported_at"] {
+		t.Fatal("offline page lost cached parameters or changed report time")
 	}
 
 }

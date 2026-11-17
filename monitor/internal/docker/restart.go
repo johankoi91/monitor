@@ -31,7 +31,11 @@ func (c *Collector) InspectTarget(ctx context.Context, id string) (Target, error
 // RestartOriginal is the only Docker write exposed by this module. Callers must
 // journal EXECUTING and verify exact identity before invoking it. Never retry it.
 func (c *Collector) RestartOriginal(ctx context.Context, id string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/v1.39/containers/"+url.PathEscape(id)+"/restart?t=10", nil)
+	version, err := c.apiVersion(ctx)
+	if err != nil {
+		return "FAILED", errors.New("Docker API negotiation failed before restart")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker/v"+version+"/containers/"+url.PathEscape(id)+"/restart?t=10", nil)
 	if err != nil {
 		return "FAILED", errors.New("cannot form restart request")
 	}

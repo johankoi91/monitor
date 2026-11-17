@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/runtime/internal/cadvisor"
 	"github.com/johankoi91/monitor/runtime/internal/credential"
 	"github.com/johankoi91/monitor/runtime/internal/history"
@@ -34,6 +35,7 @@ type AgentConfig struct {
 	HostAddress string `yaml:"host_address"`
 }
 type Config struct {
+	RTCProbe      *hub.Config         `yaml:"rtc_probe"`
 	Site          model.Site          `yaml:"site"`
 	Agents        []AgentConfig       `yaml:"agents"`
 	RestartRules  []model.RestartRule `yaml:"restart_rules"`

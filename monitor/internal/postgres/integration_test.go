@@ -406,7 +406,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	}
 	originalHandler := handler
 	handler = (&center.Server{Store: customerStore, Access: registry, Accounts: accounts, Database: db, Notifier: notifier}).Handler()
-	if w := get("/api/v1/nodes/startup?node_id=qa%2Fcanary", token); w.Code != 200 || !strings.Contains(w.Body.String(), "startup") {
+	if w := get("/api/v1/services/status?include_startup=true", token); w.Code != 200 || !strings.Contains(w.Body.String(), "startup_record") {
 		t.Fatalf("customer managed startup denied: %d", w.Code)
 	}
 	if w := get("/api/v1/nodes/startup?node_id=qa%2Funmanaged", token); w.Code != 404 {
@@ -480,11 +480,14 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = accounts.SaveRole("", identity.RoleUpdate{Name: "配置查看", Description: "只看监控", Permissions: []string{"monitor.read"}, Reason: "custom role test"}, admin.ID, "fixture")
-	if e == nil {
+	policySession, _, _, e := accounts.Login("admin", "strong-admin-password", "fixture")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if w := post("/api/v1/roles", map[string]any{"name": "配置查看", "permissions": []string{"monitor.read"}}, policySession, access.Issued{}); w.Code != 409 || !strings.Contains(w.Body.String(), "FIXED_ROLES") {
 		t.Fatal("custom role created despite fixed role policy")
 	}
-	if _, e = accounts.SaveRole(identity.AgoraRole, identity.RoleUpdate{Name: "bad", Permissions: []string{"monitor.read"}, ExpectedVersion: 1, Reason: "protect built in"}, admin.ID, "fixture"); e == nil {
+	if w := post("/api/v1/roles/"+identity.AgoraRole, map[string]any{"name": "bad", "permissions": []string{"monitor.read"}}, policySession, access.Issued{}); w.Code != 409 {
 		t.Fatal("builtin role overwritten")
 	}
 	opToken, _, _, e := accounts.Login("operator", "strong-operator-password", "fixture")
@@ -561,7 +564,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	notificationLog.Close()
 	// Persist a normal subscription and its initialization receipt. Reopening
 	// the notifier on PostgreSQL must not queue the same current state again.
-	normalConfig := notify.Config{AuthScheme: "webhook_hmac", EndpointMode: true, Enabled: true, Endpoints: [20]notify.Endpoint{{ID: "normal-pg", Enabled: true, URL: "https://example.com/events", Secret: "normal-pg-independent", NormalEpoch: "pg-activation", Events: [4]bool{false, false, false, true}}}}
+	normalConfig := notify.Config{AuthScheme: "webhook_hmac", EndpointMode: true, Enabled: true, Endpoints: [20]notify.Endpoint{{ID: "normal-pg", Enabled: true, URL: "https://example.com/events", Secret: "normal-pg-independent", NormalEpoch: "pg-activation", Events: [7]bool{false, false, false, true}}}}
 	normalSettings, _ := json.Marshal(map[string]any{"version": 1, "revision": "pg-normal-settings", "config": normalConfig})
 	if err = db.SaveDocument("notification_settings", normalSettings); err != nil {
 		t.Fatal(err)
@@ -699,11 +702,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer copy.Close()
-	startupView, e := copy.NodeStartup(context.Background(), "qa/canary")
-	if e != nil {
-		t.Fatal(e)
-	}
-	startupCache := startupView.(map[string]any)
+	startupCache := copy.StatusesWithStartup("", "").(map[string]any)["services"].([]map[string]any)[0]["nodes"].([]map[string]any)[0]["startup_record"].(map[string]any)
 	if startupCache["startup"] == nil || startupCache["stale"] != true || startupCache["container_id"] != strings.Repeat("a", 64) {
 		t.Fatal("offline startup cache did not survive reopening")
 	}

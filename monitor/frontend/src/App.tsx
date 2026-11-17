@@ -3,7 +3,6 @@ import AutoComplete from "antd/es/auto-complete";
 import Pagination from "antd/es/pagination";
 import Form from "antd/es/form";
 import Checkbox from "antd/es/checkbox";
-import Radio from "antd/es/radio";
 import Select from "antd/es/select";
 import {
   useCallback,
@@ -29,13 +28,14 @@ import Typography from "antd/es/typography";
 import Dropdown from "antd/es/dropdown";
 import Tabs from "antd/es/tabs";
 import Layout from "antd/es/layout";
-import Space from "antd/es/space";
 import { DownOutlined, CloudServerOutlined } from "@ant-design/icons";
-import { basic, client, type API } from "./api";
+import { client, type API } from "./api";
 import { checksForPorts } from "./checks";
 import { resolveGroup } from "./groups";
 import NotificationSettingsForm from "./NotificationSettings";
 import StorageStatus from "./StorageStatus";
+import RTCProbes from "./RTCProbes";
+import RTCOverview from "./RTCOverview";
 import AccessKeys from "./AccessKeys";
 import Resources from "./Resources";
 import Operations, { OperationDetails } from "./Operations";
@@ -122,10 +122,9 @@ function Login({
   onLogin,
   error,
 }: {
-  onLogin: (id: string, secret: string, mode: string) => Promise<void>;
+  onLogin: (id: string, secret: string) => Promise<void>;
   error: string;
 }) {
-  const [mode] = useState("ACCOUNT");
   const [id, setID] = useState(""),
     [secret, setSecret] = useState(""),
     [busy, setBusy] = useState(false),
@@ -142,7 +141,7 @@ function Login({
     const value = secret;
     setSecret("");
     try {
-      await onLogin(id.trim(), value, mode);
+      await onLogin(id.trim(), value);
     } catch (e) {
       setError(message(e));
     } finally {
@@ -167,7 +166,6 @@ function Login({
           <Input.Password
             id="app-field-2"
             autoComplete="current-password"
-            minLength={6}
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
             required
@@ -234,19 +232,16 @@ export default function App() {
       }
     })();
   }, []);
-  async function login(id: string, secret: string, mode: string) {
-    let token = basic(id, secret);
-    if (mode === "ACCOUNT") {
-      const response = await fetch("/api/v1/auth/login", {
-        method: "POST",
-        credentials: "omit",
-        headers: { "Content-Type": "application/json", "X-AVOPS-Request": "1" },
-        body: JSON.stringify({ username: id, password: secret }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.message || "账号登录失败");
-      token = `Bearer ${result.token}`;
-    }
+  async function login(id: string, secret: string) {
+    const response = await fetch("/api/v1/auth/login", {
+      method: "POST",
+      credentials: "omit",
+      headers: { "Content-Type": "application/json", "X-AVOPS-Request": "1" },
+      body: JSON.stringify({ username: id, password: secret }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || "账号登录失败");
+    const token = `Bearer ${result.token}`;
     const version = await client(token, () => {}).get<{
       credential_purpose?: string;
       can_manage_keys?: boolean;
@@ -407,6 +402,7 @@ function Workspace({
     [resolve, setResolve] = useState<Operation | null>(null);
   const draft = useRef(false),
     requestGeneration = useRef(0),
+    operationsInFlight = useRef(false),
     busy = useRef(false);
   draft.current = chosen.size + additions.size + removals.size > 0;
   busy.current = saving;
@@ -414,6 +410,32 @@ function Workspace({
     setNoticeType(type);
     setNotice(value);
   };
+  const loadOperations = useCallback(async () => {
+    if (operationsInFlight.current) return;
+    const path = permissions.includes("operations.read")
+      ? "/api/v1/operations?limit=50"
+      : permissions.includes("restart.result")
+        ? "/api/v1/operations/mine"
+        : "";
+    if (!path) return;
+    operationsInFlight.current = true;
+    try {
+      const result = await api.get<{ operations: Operation[] }>(path);
+      setOperations(result.operations);
+      setOperation((old) =>
+        old
+          ? result.operations.find(
+              (item) => item.operation_id === old.operation_id,
+            ) || old
+          : null,
+      );
+    } catch (e) {
+      setNoticeType("error");
+      setNotice(message(e));
+    } finally {
+      operationsInFlight.current = false;
+    }
+  }, [api, permissions]);
   const reload = useCallback(async () => {
     if (!permissions.includes("monitor.read")) return;
     const generation = ++requestGeneration.current;
@@ -424,68 +446,77 @@ function Workspace({
         page: String(page),
         page_size: "50",
       });
-      const [b, a, s, c, o, n] = await Promise.all([
-        permissions.includes("baseline.read")
+      const [b, a, s, c, , n] = await Promise.all([
+        tab === "inventory" && permissions.includes("baseline.read")
           ? api.get<Baseline>("/api/v1/baseline")
           : Promise.resolve(null),
-        api.get<{ agents: Agent[] }>("/api/v1/agents"),
-        api.get<{ services: ServiceStatus[] }>("/api/v1/services/status"),
-        permissions.includes("inventory.read")
+        tab === "inventory"
+          ? api.get<{ agents: Agent[] }>("/api/v1/agents")
+          : Promise.resolve(null),
+        ["status", "inventory", "operations"].includes(tab)
+          ? api.get<{ services: ServiceStatus[] }>(
+              tab === "status"
+                ? "/api/v1/services/status?include_startup=true"
+                : "/api/v1/services/status",
+            )
+          : Promise.resolve(null),
+        tab === "inventory" && permissions.includes("inventory.read")
           ? api.get<{ containers: Container[]; total: number }>(
               `/api/v1/containers?${params}`,
             )
-          : Promise.resolve({ containers: [] as Container[], total: 0 }),
-        permissions.includes("operations.read")
-          ? api.get<{ operations: Operation[] }>("/api/v1/operations?limit=50")
-          : permissions.includes("restart.result")
-            ? api.get<{ operations: Operation[] }>("/api/v1/operations/mine")
-            : Promise.resolve({ operations: [] as Operation[] }),
-        api.get<Notifications>("/api/v1/notifications/status"),
+          : Promise.resolve(null),
+        tab === "operations" ? loadOperations() : Promise.resolve(),
+        tab === "notifications"
+          ? api.get<Notifications>("/api/v1/notifications/status")
+          : Promise.resolve(null),
       ]);
       if (generation !== requestGeneration.current) return;
-      const lastPage = Math.max(1, Math.ceil(c.total / 50));
-      if (page > lastPage) setPage(lastPage);
-      setBaseline((old) => {
-        if (!b) return null;
-        if (!old || !draft.current) return b;
-        if (old.revision !== b.revision)
-          showNotice(
-            "基准已被其他请求更新。请清空变更并刷新后重新确认。",
-            "error",
-          );
-        return old;
-      });
-      setAgents(a.agents);
-      setStatus(s.services);
-      setContainers(c.containers);
-      setTotal(c.total);
-      setOperations(o.operations);
-      setNotifications(n);
-      setOperation((old) =>
-        old
-          ? o.operations.find(
-              (item) => item.operation_id === old.operation_id,
-            ) || old
-          : null,
-      );
+      if (c) {
+        const lastPage = Math.max(1, Math.ceil(c.total / 50));
+        if (page > lastPage) setPage(lastPage);
+        setContainers(c.containers);
+        setTotal(c.total);
+      }
+      if (b)
+        setBaseline((old) => {
+          if (!old || !draft.current) return b;
+          if (old.revision !== b.revision)
+            showNotice(
+              "基准已被其他请求更新。请清空变更并刷新后重新确认。",
+              "error",
+            );
+          return old;
+        });
+      if (a) setAgents(a.agents);
+      if (s) setStatus(s.services);
+      if (n) setNotifications(n);
     } catch (e) {
       showNotice(message(e), "error");
     }
-  }, [api, query, page, permissions]);
+  }, [api, query, page, permissions, tab, loadOperations]);
   useEffect(() => {
+    if (!["status", "inventory", "operations", "notifications"].includes(tab))
+      return;
     void reload();
     const timer = setInterval(() => {
       if (!document.hidden && !busy.current) void reload();
     }, 15000);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [reload, tab]);
   useEffect(() => {
-    if (!operations.some((o) => o.node_locked)) return;
+    if (tab !== "operations" && !operation?.node_locked) return;
+    if (!operations.some((o) => o.node_locked) && !operation?.node_locked)
+      return;
     const timer = setInterval(() => {
-      void reload();
+      if (!document.hidden) void loadOperations();
     }, 2000);
     return () => clearInterval(timer);
-  }, [reload, operations.some((o) => o.node_locked)]);
+  }, [
+    loadOperations,
+    tab,
+    operations.some((o) => o.node_locked),
+    operation?.node_locked,
+  ]);
   const members =
     baseline?.definition?.clusters.flatMap((c) =>
       c.services.flatMap((s) =>
@@ -698,6 +729,7 @@ function Workspace({
           ...(can("monitor.read")
             ? [
                 ["status", "服务状态"],
+                ["rtc", "RTC 业务探测"],
                 ["notifications", "通知投递"],
               ]
             : []),
@@ -728,8 +760,9 @@ function Workspace({
         <section>
           <Typography.Title level={2}>服务状态</Typography.Title>
           <Typography.Paragraph type="secondary">
-            容器与就绪检查 · 业务链路状态需另行验证
+            容器与就绪检查
           </Typography.Paragraph>
+          {can("monitor.read") && <RTCOverview api={api} onOpen={() => setTab("rtc")} />}
           <Form layout="vertical" className="filters status-filters">
             <Form.Item label="主机 IP">
               <Select
@@ -883,18 +916,8 @@ function Workspace({
                         runtime={n.runtime_status}
                         updatedAt={n.collected_at}
                         dataStale={n.stale}
-                        startup={
-                          <StartupParameters api={api} nodeID={n.node_id} />
-                        }
+                        startup={<StartupParameters data={n.startup_record} />}
                         detailsOpen={expandedStatusDetails.has(n.node_id)}
-                        onDetailsOpenChange={(open) =>
-                          setExpandedStatusDetails((previous) => {
-                            const next = new Set(previous);
-                            if (open) next.add(n.node_id);
-                            else next.delete(n.node_id);
-                            return next;
-                          })
-                        }
                       />
                     </div>
                   ))}
@@ -903,6 +926,13 @@ function Workspace({
             </Card>
           ))}
         </section>
+      )}
+      {tab === "rtc" && can("monitor.read") && (
+        <RTCProbes
+          api={api}
+          canManage={can("rtc.manage")}
+          canDiagnose={can("rtc.diagnostics")}
+        />
       )}
       {tab === "inventory" && can("inventory.read") && (
         <section className="inventory-screen">
@@ -1487,6 +1517,9 @@ function Workspace({
                   { value: "CONTAINER_ABNORMAL", label: "容器异常" },
                   { value: "COLLECTION_ABNORMAL", label: "采集异常" },
                   { value: "RECOVERED", label: "恢复正常" },
+                  { value: "RTC_ABNORMAL", label: "RTC 业务异常" },
+                  { value: "RTC_RECOVERED", label: "RTC 业务恢复" },
+                  { value: "RTC_UNKNOWN", label: "RTC 持续未知" },
                 ]}
               />
             }
@@ -1507,7 +1540,7 @@ function Workspace({
                     title={
                       d.event.event_type === "WEBHOOK_TEST"
                         ? "Webhook 健康检查"
-                        : `${({ NORMAL: "正常状态", CONTAINER_ABNORMAL: "容器异常", COLLECTION_ABNORMAL: "采集异常", RECOVERED: "恢复正常" } as Record<string, string>)[d.event.event_category || ""] || "状态通知"} · ${d.event.node_id || d.event.service_code}`
+                        : `${({ NORMAL: "正常状态", CONTAINER_ABNORMAL: "容器异常", COLLECTION_ABNORMAL: "采集异常", RECOVERED: "恢复正常", RTC_ABNORMAL: "RTC 业务异常", RTC_RECOVERED: "RTC 业务恢复", RTC_UNKNOWN: "RTC 持续未知" } as Record<string, string>)[d.event.event_category || ""] || "状态通知"} · ${d.event.node_id || d.event.service_code}`
                     }
                     description={`${d.event.previous_status} → ${d.event.current_status} · ${stamp(d.event.occurred_at)} · 已尝试 ${d.attempts} 次${d.last_error ? ` · ${d.last_error}` : ""}`}
                   />
@@ -1521,7 +1554,6 @@ function Workspace({
         <NodeSettingsModal
           api={api}
           node={portsNode}
-          revision={baseline.revision}
           onClose={() => setPortsNode(null)}
           onSaved={(b) => {
             setBaseline(b);
@@ -1579,88 +1611,15 @@ function Workspace({
     </>
   );
 }
-function PortsModal({
-  api,
-  node,
-  revision,
-  onClose,
-  onSaved,
-}: {
-  api: API;
-  node: Node;
-  revision: string;
-  onClose: () => void;
-  onSaved: (b: Baseline) => void;
-}) {
-  const [ports, setPorts] = useState(
-      [...new Set(node.checks.map((c) => c.port))].join(", "),
-    ),
-    [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  async function submit(e: FormEvent) {
-    e.preventDefault();
-    if (busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      const checks = checksForPorts(ports, node.checks);
-      const b = await api.post<Baseline>("/api/v1/baseline/checks", {
-        expected_revision: revision,
-        node_id: node.id,
-        checks,
-      });
-      onSaved(b);
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <Modal
-      title="配置容器 TCP 端口"
-      onClose={() => {
-        if (!busy) onClose();
-      }}
-    >
-      <p>
-        {node.host_address} / {node.container_name}
-      </p>
-      <Form layout="vertical" onSubmitCapture={submit}>
-        <Form.Item label="TCP 端口（可选）" htmlFor="app-field-7">
-          <Input
-            id="app-field-7"
-            autoFocus
-            value={ports}
-            placeholder="例如 443, 8002, 8003"
-            onChange={(e) => setPorts(e.target.value)}
-          />
-        </Form.Item>
-        <p>
-          多个端口用逗号分隔，最多 8 个。空值只使用容器状态和已有
-          Healthcheck，纯 UDP 端口不填写。
-        </p>
-        {error && (
-          <Alert showIcon type="error" message={error} className="page-alert" />
-        )}
-        <Button htmlType="submit" type="primary" disabled={busy}>
-          {busy ? "正在保存…" : "保存端口"}
-        </Button>
-      </Form>
-    </Modal>
-  );
-}
 function NodeSettingsModal({
   api,
   node,
-  revision,
   onClose,
   onSaved,
   onRemove,
 }: {
   api: API;
   node: Node;
-  revision: string;
   onClose: () => void;
   onSaved: (b: Baseline) => void;
   onRemove: () => void;

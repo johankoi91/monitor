@@ -1,8 +1,4 @@
 import type { ReactNode } from "react";
-import Card from "antd/es/card";
-import Descriptions from "antd/es/descriptions";
-import Progress from "antd/es/progress";
-import Tag from "antd/es/tag";
 
 export function MetricIcon({
   name,
@@ -64,79 +60,5 @@ export function MetricIcon({
     >
       {paths[name]}
     </svg>
-  );
-}
-
-export function MetricRow({
-  label,
-  value,
-  muted = false,
-}: {
-  label: string;
-  value: ReactNode;
-  muted?: boolean;
-}) {
-  return (
-    <Descriptions
-      size="small"
-      column={1}
-      items={[{ key: label, label, children: value }]}
-      styles={{
-        label: { color: "#8c8c8c" },
-        content: {
-          justifyContent: "flex-end",
-          color: muted ? "#8c8c8c" : undefined,
-        },
-      }}
-    />
-  );
-}
-export function MetricPanel({
-  title,
-  icon,
-  tag,
-  children,
-  note,
-}: {
-  title: string;
-  icon: Parameters<typeof MetricIcon>[0]["name"];
-  tag?: string;
-  children: ReactNode;
-  note?: ReactNode;
-}) {
-  return (
-    <Card
-      size="small"
-      className="metric-panel"
-      title={
-        <>
-          <MetricIcon name={icon} /> {title}
-        </>
-      }
-      extra={tag && <Tag>{tag}</Tag>}
-    >
-      {children}
-      {note && <p className="metric-panel-note">{note}</p>}
-    </Card>
-  );
-}
-export function Meter({
-  ratio,
-  label,
-}: {
-  ratio?: number | null;
-  label: string;
-}) {
-  if (ratio == null) return null;
-  return (
-    <Progress
-      aria-label={label}
-      percent={Math.min(100, Math.max(0, ratio * 100))}
-      showInfo={false}
-      size="small"
-      strokeColor={
-        ratio >= 0.9 ? "#ff4d4f" : ratio >= 0.8 ? "#faad14" : "#1677ff"
-      }
-    />
   );
 }

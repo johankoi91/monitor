@@ -39,6 +39,8 @@ func TestRealWireProtocolRestartsOnceAndVerifies(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/version":
+			w.Write([]byte(`{"ApiVersion":"1.39","MinAPIVersion":"1.12"}`))
 		case r.Method == "GET" && r.URL.Path == "/v1.39/containers/json":
 			json.NewEncoder(w).Encode([]map[string]string{{"Id": id}})
 		case r.Method == "GET" && r.URL.Path == "/v1.39/containers/"+id+"/json":

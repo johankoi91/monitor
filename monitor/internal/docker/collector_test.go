@@ -144,6 +144,8 @@ func TestDockerSocketDiscoveryIncludesStoppedAndFailsClosed(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
+		case "/version":
+			w.Write([]byte(`{"ApiVersion":"1.39","MinAPIVersion":"1.12"}`))
 		case "/v1.39/containers/json":
 			if r.URL.Query().Get("all") != "true" {
 				t.Error("didn't include stopped containers")

@@ -17,8 +17,8 @@ type StartupRecord struct {
 func (s *Store) startupViewLocked(agent, name string, observed *model.Observation) map[string]any {
 	r, ok := s.lastStartups[agent][name]
 	stale := true
-	if ok && observed != nil {
-		stale = !fresh(s.agents[agent], time.Now().UTC()) || observed.Container.ContainerID != r.ContainerID || observed.Container.RuntimeStatus != "running" || time.Since(r.ReportedAt) > 45*time.Second
+	if ok && r.Startup != nil && observed != nil {
+		stale = !fresh(s.agents[agent], time.Now().UTC()) || observed.Container.ContainerID != r.ContainerID || observed.Container.SnapshotID != r.Startup.SnapshotID || observed.Container.RuntimeStatus != "running" || time.Since(r.ReportedAt) > model.StartupReportInterval+time.Minute
 	}
 	if !ok {
 		return map[string]any{"startup": nil, "stale": true}

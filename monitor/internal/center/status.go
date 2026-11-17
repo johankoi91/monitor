@@ -118,6 +118,21 @@ func (s *Store) Statuses(serviceFilter, statusFilter string) any {
 	defer s.mu.RUnlock()
 	return s.statusesLocked(serviceFilter, statusFilter, time.Now().UTC())
 }
+
+// Page polling includes the saved parameters in the existing authenticated
+// response; notification facts and default REST polling stay numeric/status only.
+func (s *Store) StatusesWithStartup(serviceFilter, statusFilter string) any {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	view := s.statusesLocked(serviceFilter, statusFilter, time.Now().UTC())
+	for _, service := range view["services"].([]map[string]any) {
+		for _, node := range service["nodes"].([]map[string]any) {
+			n, _, observed := s.findNodeLocked(node["node_id"].(string))
+			node["startup_record"] = s.startupViewLocked(n.AgentID, n.ContainerName, observed)
+		}
+	}
+	return view
+}
 func (s *Store) statusesLocked(serviceFilter, statusFilter string, now time.Time) map[string]any {
 	services := []map[string]any{}
 	if d := s.record.Baseline.Definition; d != nil {

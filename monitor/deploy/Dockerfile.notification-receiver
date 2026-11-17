@@ -1,0 +1,5 @@
+FROM scratch
+COPY ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
+COPY notification-receiver /notification-receiver
+USER 65532:65532
+ENTRYPOINT ["/notification-receiver"]

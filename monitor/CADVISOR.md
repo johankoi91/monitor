@@ -105,3 +105,7 @@ cAdvisor 为获取宿主机 cgroup 和容器文件系统，独立服务使用受
 当前在中心内存与PostgreSQL最新快照中保存指标，中心重启后先标离线/过期并等待新采集，不增加历史曲线、时序数据库或告警规则。后续历史指标可另外接入 Prometheus/VictoriaMetrics。
 
 Docker 升级前须有业务停机授权，按 [upgrade-rtc-docker.sh](deploy/upgrade-rtc-docker.sh) 的前置检查、在线预拷贝、停机一致备份、原 ID 恢复及配置对比执行。[rollback-rtc-docker.sh](deploy/rollback-rtc-docker.sh) 用一致旧数据回退，并保留升级后的目录供诊断；不能只换回旧二进制读取已迁移数据。
+
+## 2026-11-17 Docker 29 兼容与恢复
+
+现场现为 Docker 29.9.3（API 1.56，最低 1.40）。Agent 已改为从 /version 协商兼容版本，不再固定 v1.39；旧 Docker 18.09 的 1.39 兼容路径仍有测试。Docker 变更后须同时检查 Agent 完整快照和本机 18089 采样，不以 Agent 的 WSS 在线代替采集成功。资源服务与基础 Docker 发现相互独立，详见 [本次恢复记录](INVENTORY-RECOVERY-2026-11-17.md)。

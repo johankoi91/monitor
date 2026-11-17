@@ -2,21 +2,6 @@ package model
 
 import "time"
 
-type StartupRequest struct {
-	Type          string `json:"type"`
-	RequestID     string `json:"request_id"`
-	ContainerID   string `json:"container_id"`
-	ContainerName string `json:"container_name"`
-}
-type StartupResult struct {
-	Type          string   `json:"type"`
-	RequestID     string   `json:"request_id"`
-	ContainerID   string   `json:"container_id"`
-	ContainerName string   `json:"container_name"`
-	Startup       *Startup `json:"startup,omitempty"`
-	Error         string   `json:"error,omitempty"`
-}
-
 type RestartRule struct {
 	AgentID       string `json:"agent_id" yaml:"agent_id"`
 	ContainerName string `json:"container_name" yaml:"container_name"`
@@ -123,6 +108,12 @@ type ResolveRequest struct {
 	Evidence string `json:"evidence"`
 }
 type Notification struct {
+	Layer          string     `json:"evidence_layer,omitempty"`
+	TaskID         string     `json:"task_id,omitempty"`
+	TargetID       string     `json:"target_id,omitempty"`
+	RunID          string     `json:"run_id,omitempty"`
+	ConfigRevision string     `json:"config_revision,omitempty"`
+	Path           string     `json:"path,omitempty"`
 	ID             string     `json:"event_id"`
 	Type           string     `json:"event_type"`
 	Category       string     `json:"event_category,omitempty"`

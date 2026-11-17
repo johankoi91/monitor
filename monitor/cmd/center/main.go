@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/runtime/internal/access"
 	"github.com/johankoi91/monitor/runtime/internal/center"
 	"github.com/johankoi91/monitor/runtime/internal/identity"
@@ -103,6 +105,23 @@ func main() {
 		log.Fatal(err)
 	}
 	defer accessRegistry.Close()
+	var probes *hub.Hub
+	if config.RTCProbe != nil {
+		for _, p := range config.RTCProbe.Probes {
+			if p.ID == id || p.Secret == secret || p.Secret == config.Notifications.Secret {
+				log.Fatal("RTC probe credentials must be independent")
+			}
+			for _, a := range config.Agents {
+				if p.ID == a.ID || p.Secret == a.Secret {
+					log.Fatal("RTC probe and Docker Agent credentials must be independent")
+				}
+			}
+		}
+		probes, err = hub.New(filepath.Join(env("AVOPS_DATA_DIR", "data"), "rtc-probe"), *config.RTCProbe, backend)
+		if err != nil {
+			log.Fatal("cannot initialize RTC probe framework: ", err)
+		}
+	}
 	assets, _ := fs.Sub(web.Files, "static")
 	allowed := []string{}
 	for _, ip := range strings.Split(os.Getenv("AVOPS_ALLOWED_IPS"), ",") {
@@ -117,7 +136,7 @@ func main() {
 	if err != nil || storageWarning <= 0 {
 		log.Fatal("invalid database warning threshold")
 	}
-	handler := (&center.Server{Store: store, AdminID: id, AdminSecret: secret, Assets: http.FileServer(http.FS(assets)), AllowedIPs: allowed, Notifier: notifier, Access: accessRegistry, Accounts: accounts, Database: database, StorageWarningBytes: storageWarning, StorageDiskPath: env("AVOPS_STORAGE_DISK_PATH", "/var/lib")}).Handler()
+	handler := (&center.Server{Store: store, Probes: probes, AdminID: id, AdminSecret: secret, Assets: http.FileServer(http.FS(assets)), AllowedIPs: allowed, Notifier: notifier, Access: accessRegistry, Accounts: accounts, Database: database, StorageWarningBytes: storageWarning, StorageDiskPath: env("AVOPS_STORAGE_DISK_PATH", "/var/lib")}).Handler()
 	addr := env("AVOPS_CENTER_ADDR", "127.0.0.1:19443")
 	cert, key := os.Getenv("AVOPS_TLS_CERT"), os.Getenv("AVOPS_TLS_KEY")
 	dev := os.Getenv("AVOPS_DEV_HTTP") == "1"
@@ -155,6 +174,10 @@ func main() {
 	runtimeCtx, stopRuntime := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	workers.Add(3)
+	if probes != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); probes.Run(runtimeCtx) }()
+	}
 	go func() { defer workers.Done(); store.RunResourceHistory(runtimeCtx) }()
 	if database != nil {
 		workers.Add(1)
@@ -175,6 +198,13 @@ func main() {
 				store.TickOperations(time.Now().UTC())
 				revision, facts := store.NotificationFacts()
 				notifier.Observe(revision, facts)
+				if probes != nil {
+					business := []notify.Fact{}
+					for _, f := range probes.BusinessFacts() {
+						business = append(business, notify.Fact{Key: "rtc/" + f.TaskID, Business: true, TaskID: f.TaskID, TargetID: f.TargetID, RunID: f.RunID, ConfigRevision: f.Revision, Path: f.Path, Cluster: f.Cluster, Service: f.TargetID, Status: f.State, ReasonCode: f.Reason, Reason: f.Reason, CollectedAt: f.At, Notify: f.Notify})
+					}
+					notifier.ObserveRTC(business)
+				}
 			}
 		}
 	}()

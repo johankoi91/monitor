@@ -8,7 +8,7 @@
 
 当前启动参数模式已改为按需读取：点击页签/重新获取时，中心通过WSS下发startup_request，Agent读取精确容器ID并返回startup_result，参数只在请求与页面内存中使用，不写中心PG、Agent任务WAL或浏览器存储。周期采集仍读取Docker身份并计算配置指纹，但只上报指纹与完整性标记，不上报参数内容。Agent离线直接失败，8秒未回复提示超时；不回退历史缓存。当前数据库旧参数字段已清除，既有独立备份未清空。
 
-2026-10-09 用户要求原值展示启动参数，RTC Agent现通过systemd覆盖配置启用AVOPS_RAW_STARTUP=1，真实采集Entrypoint/Cmd/Args/环境/路径原值并经WSS上报，不做参数脱敏。默认未设置时仍沿用脱敏策略；部署后须等待新快照，旧记录不能反向还原。详情仅授权账号/接口可读，不把启动参数放进健康通知、YAML台账或普通日志；不读取挂载文件内容。Raw模式变化会更新配置指纹，重启仍核验新快照。
+当前Agent固定原值采集启动参数，经WSS主动上报；不再读取RAW或PUBLIC环境开关。最后有效参数在中心加密保存，随服务状态返回，不能当作重启现场核验依据；不读取挂载文件内容。
 
 为新环境生成私有配置：`go run ./cmd/provision -out /私有目录`。这属于部署材料生成器，不提供产品 CLI 管理能力。生成器不会覆盖既有密钥；实际机器、地址、来源和证书按环境修改。
 
@@ -37,7 +37,7 @@ notifications:
 
 中心环境必填 AVOPS_ADMIN_ID/SECRET、AVOPS_CENTER_CONFIG、AVOPS_DATA_DIR、AVOPS_TLS_CERT/KEY；公网监听 AVOPS_CENTER_ADDR=0.0.0.0:19443，AVOPS_ALLOWED_IPS 为批准的 IP 列表。可选 AVOPS_CENTER_LOCAL_ADDR 只接受回环，供现场访问；当前试点使用 TLS 校验的 viewer，SSH 不支持端口转发。
 
-Agent 必填 AVOPS_AGENT_ID/SECRET、WSS 的 AVOPS_CENTER_URL，配置 AVOPS_AGENT_DATA_DIR=/var/lib/avops-agent；可选 AVOPS_TLS_SERVER_NAME 仅调整验证域名，不关闭证书校验。Docker Socket 默认 /var/run/docker.sock。AVOPS_COLLECT_SECONDS=15（10–60），AVOPS_PUBLIC_ENV 默认为空，AVOPS_PUBLIC_ARGS 只列经过确认的非敏感标志值。Agent 不开放入站端口。
+Agent 必填 AVOPS_AGENT_ID/SECRET、WSS 的 AVOPS_CENTER_URL，配置 AVOPS_AGENT_DATA_DIR=/var/lib/avops-agent；可选 AVOPS_TLS_SERVER_NAME 仅调整验证域名，不关闭证书校验。Docker Socket 默认 /var/run/docker.sock。AVOPS_COLLECT_SECONDS=15（10–60）。Agent 不开放入站端口。
 
 中心安装材料目录包含 center、center.env、center.yaml、server.pem、server-key.pem、avops-center.service，执行 [install-center.sh](deploy/install-center.sh)。Agent 目录包含 agent、agent.env、avops-agent.service，执行 [install-agent.sh](deploy/install-agent.sh)。密钥/凭证独立交付；不要把模板占位符当作正式凭证。
 
@@ -122,3 +122,7 @@ systemd 使用 Restart=on-failure，中心 MemoryMax=256M/CPUQuota=50%，Agent 1
 交付包提供 center/agent 静态二进制、内嵌 React、部署脚本、源代码/锁文件、OpenAPI、模板和 Docker 离线镜像。通过 `docker load -i avops-images-linux-amd64.tar` 加载，不使用强制 pull。
 
 Docker 中心以非 root 运行（镜像默认 UID/GID 65532），配置/私钥必须对所选 UID 只读、数据目录可写。Agent 需本机 Socket、host 网络用于本机探测，以及独立可写任务目录；不要让两个 Agent 共用同一任务账本。完整参数及私有 env 由对应安装方式注入。系统试点采用 systemd 二进制部署，Docker 方式在独立验收环境检查。
+
+## Docker API 兼容排查（2026-11-17）
+
+Agent 在线但台账快照不刷新时，先看采集失败日志并通过 Docker Unix Socket 的 /version 对照 ApiVersion/MinAPIVersion。当前采集器自动协商，读请求可在版本变化后重新协商，受控重启不自动重试写操作。若资源列仍不可用，另查 avops-cadvisor.service 及回环 18089。现场原因、修复版本和回退见 [59 主机采集恢复](INVENTORY-RECOVERY-2026-11-17.md)。

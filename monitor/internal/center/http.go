@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/runtime/internal/access"
 	"github.com/johankoi91/monitor/runtime/internal/identity"
 	"github.com/johankoi91/monitor/runtime/internal/model"
@@ -22,6 +23,7 @@ import (
 )
 
 type Server struct {
+	Probes               *hub.Hub
 	Store                *Store
 	AdminID, AdminSecret string
 	Assets               http.Handler
@@ -90,6 +92,14 @@ func (s *Server) Handler() http.Handler {
 		// Load the login shell without a native Basic challenge. The shell contains
 		// no monitoring data or credentials; every API still requires Basic Auth.
 		path := r.URL.Path
+		if strings.HasPrefix(path, "/api/v1/probe/") {
+			if s.Probes == nil {
+				failure(w, 503, "RTC_PROBE_DISABLED", "RTC 探测服务尚未配置")
+			} else {
+				s.Probes.ServeProbe(w, r)
+			}
+			return
+		}
 		if path == "/" || path == "/index.html" || path == "/app.js" || path == "/style.css" || path == "/favicon.ico" || strings.HasPrefix(path, "/assets/") {
 			if r.Method != "GET" && r.Method != "HEAD" {
 				method(w)
@@ -260,6 +270,28 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		if s.accountRoutes(w, r, account, id, ip) {
+			return
+		}
+		if strings.HasPrefix(path, "/api/v1/rtc/") {
+			if s.Probes == nil {
+				failure(w, 503, "RTC_PROBE_DISABLED", "RTC 探测服务尚未配置")
+			} else {
+				if r.Method != "GET" || strings.Contains(path, "/logs/") {
+					if err := s.Probes.RecordAudit(id, "RTC_"+r.Method, path, "REQUESTED"); err != nil && path != "/api/v1/rtc/settings" {
+						failure(w, 503, "RTC_AUDIT_UNAVAILABLE", "RTC 操作审计不可用，请检查存储容量")
+						return
+					}
+					audit := &rtcAuditWriter{ResponseWriter: w}
+					s.Probes.ServeAdmin(audit, r)
+					outcome := "SUCCESS"
+					if audit.status >= 400 {
+						outcome = "FAILED"
+					}
+					_ = s.Probes.RecordAudit(id, "RTC_"+r.Method, path, outcome)
+				} else {
+					s.Probes.ServeAdmin(w, r)
+				}
+			}
 			return
 		}
 		switch {
@@ -642,17 +674,6 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			send(w, 200, view)
-		case path == "/api/v1/nodes/startup":
-			if r.Method != "GET" {
-				method(w)
-				return
-			}
-			view, err := s.Store.NodeStartup(r.Context(), r.URL.Query().Get("node_id"))
-			if err != nil {
-				writeProblem(w, err)
-				return
-			}
-			send(w, 200, view)
 		case path == "/api/v1/services/status":
 			if r.Method != "GET" {
 				method(w)
@@ -663,7 +684,11 @@ func (s *Server) Handler() http.Handler {
 				failure(w, 400, "INVALID_FILTER", "状态筛选不合法")
 				return
 			}
-			send(w, 200, s.Store.Statuses(r.URL.Query().Get("service_code"), status))
+			if r.URL.Query().Get("include_startup") == "true" {
+				send(w, 200, s.Store.StatusesWithStartup(r.URL.Query().Get("service_code"), status))
+			} else {
+				send(w, 200, s.Store.Statuses(r.URL.Query().Get("service_code"), status))
+			}
 		case path == "/api/v1/storage/status":
 			if r.Method != "GET" {
 				method(w)

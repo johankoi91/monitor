@@ -4,10 +4,14 @@ go 1.21
 
 require (
 	github.com/gorilla/websocket v1.5.3
+	github.com/johankoi91/monitor/rtc-probe v0.0.0
+	github.com/lib/pq v1.10.9
+	golang.org/x/crypto v0.24.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
-require (
-	github.com/lib/pq v1.10.9 // indirect
-	golang.org/x/crypto v0.24.0 // indirect
-)
+replace github.com/johankoi91/monitor/rtc-probe => ../rtc_probe
+
+replace github.com/AgoraIO-Extensions/Agora-Golang-Server-SDK/v2 => ../Agora-Golang-Server-SDK-2.6.6
+
+require github.com/AgoraIO/Tools/DynamicKey/AgoraDynamicKey/go/src v0.0.0-20240807100336-95d820182fef // indirect

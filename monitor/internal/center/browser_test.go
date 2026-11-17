@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/johankoi91/monitor/runtime/internal/testfixture"
 	"github.com/johankoi91/monitor/runtime/web"
 )
 
@@ -28,7 +29,7 @@ func TestBrowserSelectionWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer((&Server{Store: s, AdminID: "admin", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets))}).Handler())
+	server := httptest.NewServer(testfixture.AccountAuth((&Server{Store: s, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets))}).Handler()))
 	defer server.Close()
 	script, err := filepath.Abs("../../tests/ui.cjs")
 	if err != nil {

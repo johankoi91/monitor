@@ -1,6 +1,6 @@
 services:
   avops-center:
-    image: avops-center:1.0.0
+    image: avops-center:${AVOPS_RELEASE_VERSION:-1.0.4}
     container_name: avops-center
     restart: unless-stopped
     network_mode: host

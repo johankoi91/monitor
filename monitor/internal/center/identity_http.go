@@ -132,20 +132,7 @@ func (s *Server) accountRoutes(w http.ResponseWriter, r *http.Request, user *ide
 			method(w)
 			return true
 		}
-		id := strings.TrimPrefix(path, "/api/v1/roles/")
-		if path == "/api/v1/roles" {
-			id = ""
-		}
-		var input identity.RoleUpdate
-		if !decode(w, r, &input) {
-			return true
-		}
-		role, err := s.Accounts.SaveRole(id, input, actor, ip)
-		if err != nil {
-			identityProblem(w, err)
-		} else {
-			send(w, 200, role)
-		}
+		failure(w, 409, "FIXED_ROLES", "角色固定为 管理者和使用者，不支持新增或修改角色权限")
 		return true
 	}
 	if strings.HasPrefix(path, "/api/v1/users/") {
@@ -197,6 +184,15 @@ func (s *Server) accountRoutes(w http.ResponseWriter, r *http.Request, user *ide
 	return true
 }
 func routePermission(path, method string) string {
+	if strings.HasPrefix(path, "/api/v1/rtc/") {
+		if strings.Contains(path, "/logs") {
+			return "rtc.diagnostics"
+		}
+		if method == "GET" {
+			return "monitor.read"
+		}
+		return "rtc.manage"
+	}
 	switch {
 	case path == "/version" || path == "/health/live" || path == "/health/ready" || strings.HasPrefix(path, "/api/v1/auth/"):
 		return ""

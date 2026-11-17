@@ -20,6 +20,9 @@ const events = [
   { value: "CONTAINER_ABNORMAL", label: "容器异常" },
   { value: "COLLECTION_ABNORMAL", label: "Agent 离线 / 数据过期" },
   { value: "RECOVERED", label: "恢复正常" },
+  { value: "RTC_ABNORMAL", label: "RTC 业务异常" },
+  { value: "RTC_RECOVERED", label: "RTC 业务恢复" },
+  { value: "RTC_UNKNOWN", label: "RTC 持续未知" },
 ];
 const labels = Object.fromEntries(events.map((e) => [e.value, e.label]));
 const message = (e: unknown) => (e instanceof Error ? e.message : "请求未完成");
