@@ -10,10 +10,13 @@ import Input from "antd/es/input";
 import InputNumber from "antd/es/input-number";
 import Modal from "antd/es/modal";
 import Select from "antd/es/select";
+import Skeleton from "antd/es/skeleton";
 import Space from "antd/es/space";
 import Switch from "antd/es/switch";
 import Table from "antd/es/table";
 import Tabs from "antd/es/tabs";
+import Subpages from "./Subpages";
+import type { RTCPane } from "./navigation";
 import Tag from "antd/es/tag";
 import Typography from "antd/es/typography";
 import { APIError, type API } from "./api";
@@ -261,20 +264,24 @@ export default function RTCProbes({
   api,
   canManage,
   canDiagnose,
+  pane,
 }: {
   api: API;
   canManage: boolean;
   canDiagnose: boolean;
+  pane: RTCPane;
 }) {
   const [data, setData] = useState<Snapshot | null>(null),
     [error, setError] = useState(""),
     [disabled, setDisabled] = useState(false),
     [busy, setBusy] = useState(""),
     [selected, setSelected] = useState<string | null>(null),
-    [edit, setEdit] = useState<Edit | null>(null),
-    [pane, setPane] = useState("tasks");
+    [edit, setEdit] = useState<Edit | null>(null);
   const [registerProbe, setRegisterProbe] = useState(false);
  const [nativeTask,setNativeTask]=useState<string|null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyRetry, setHistoryRetry] = useState(0);
   const [history, setHistory] = useState<Run[]>([]),
     [historyTotal, setHistoryTotal] = useState(0),
     [historyPage, setHistoryPage] = useState(1);
@@ -350,6 +357,7 @@ export default function RTCProbes({
   useEffect(() => {
     if (pane !== "history") return;
     let live = true;
+    setHistoryLoading(true);
     api
       .get<{ runs: Run[]; total: number }>(
         `/api/v1/rtc/history?limit=10&offset=${(historyPage - 1) * 10}`,
@@ -358,22 +366,18 @@ export default function RTCProbes({
         if (live) {
           setHistory(v.runs);
           setHistoryTotal(v.total);
+          setHistoryError("");
         }
       })
       .catch((e) => {
-        if (live) setError(errorText(e));
-      });
+        if (live) setHistoryError(errorText(e));
+      }).finally(() => { if (live) setHistoryLoading(false); });
     return () => {
       live = false;
     };
-  }, [api, pane, historyPage, data?.runs.length]);
+  }, [api, pane, historyPage, historyRetry, data?.runs.length]);
   return (
     <section className="rtc-screen">
-      <div className="rtc-heading">
-        <div>
-          <Typography.Title level={2}>RTC 业务探测</Typography.Title>
-        </div>
-      </div>
       {disabled ? (
         <Card>
           <Empty description="尚未配置 RTC 探测服务" />
@@ -381,6 +385,8 @@ export default function RTCProbes({
             登记独立探针身份后，可在这里创建整体服务目标与探测任务。
           </Typography.Paragraph>
         </Card>
+      ) : !data ? (
+        <Card>{error ? <Alert type="error" showIcon message={error} action={<Button onClick={() => void refresh()}>重试</Button>} /> : <Skeleton active />}</Card>
       ) : (
         <>
           {error && (
@@ -439,14 +445,13 @@ export default function RTCProbes({
               <Typography.Text type="secondary">最近执行记录</Typography.Text>
               <div className="rtc-summary-value">{data?.runs.filter(r=>!r.parent_run_id).length || 0}</div>
               <Typography.Text type="secondary">
-                按路径保留双端证据
+                最近轮次缓存；持久历史见执行记录
               </Typography.Text>
             </Card>
           </div>
           <Card className="rtc-content-card">
-            <Tabs
+            <Subpages
               activeKey={pane}
-              onChange={setPane}
               items={[
                 {
                   key: "tasks",
@@ -729,6 +734,8 @@ export default function RTCProbes({
                     <Table<Run>
                       rowKey="run_id"
                       dataSource={history}
+                      loading={historyLoading}
+                      title={historyError ? () => <Alert type="error" showIcon message={historyError} action={<Button onClick={() => setHistoryRetry(n => n + 1)}>重试历史读取</Button>} /> : undefined}
                       scroll={{ x: 900 }}
                       pagination={{
                         pageSize: 10,
@@ -736,7 +743,7 @@ export default function RTCProbes({
                         current: historyPage,
                         onChange: setHistoryPage,
                       }}
-                      locale={{ emptyText: "暂无执行记录" }}
+                      locale={{ emptyText: historyLoading ? "正在读取执行历史…" : historyError ? "执行历史暂不可读" : "当前持久历史无记录；最近轮次缓存见探测任务" }}
                       columns={[
                         {
                           title: "任务 / 整体服务",
@@ -920,12 +927,12 @@ export default function RTCProbes({
                           {
                             key: "received",
                             label: "有效接收帧",
-                            children: evidence?.received_frames ?? "—",
+                            children: role === "sender" ? "发送角色不适用" : evidence?.received_frames ?? "—",
                           },
                           {
                             key: "duration",
                             label: "有效音频",
-                            children: evidence
+                            children: role === "sender" ? "发送角色不适用" : evidence
                               ? `${evidence.media_duration_ms} ms`
                               : "—",
                           },
@@ -940,15 +947,15 @@ export default function RTCProbes({
                               : "secondary"
                           }
                         >
-                          {reasons[ep.result.reason] || ep.result.reason}
+                          {role === "sender" && ep.result.outcome === "SUCCESS" ? "发送端执行完成；音视频接收结果见接收端 B。" : reasons[ep.result.reason] || ep.result.reason}
                         </Typography.Paragraph>
                       )}
                       <Descriptions
                         size="small"
                         column={3}
                         items={[
-                          {key:"first-audio",label:"音频首帧",children:evidence?.first_frame_elapsed_ms?`${evidence.first_frame_elapsed_ms} ms`:"—"},
-                          {key:"first-video",label:"视频首帧",children:evidence?.first_video_elapsed_ms?`${evidence.first_video_elapsed_ms} ms`:"—"},
+                          {key:"first-audio",label:"音频首帧",children:role === "sender" ? "发送角色不适用" : evidence?.first_frame_elapsed_ms?`${evidence.first_frame_elapsed_ms} ms`:"—"},
+                          {key:"first-video",label:"视频首帧",children:role === "sender" ? "发送角色不适用" : evidence?.first_video_elapsed_ms?`${evidence.first_video_elapsed_ms} ms`:"—"},
                           {
                             key: "sv",
                             label: "发送视频帧",
@@ -957,12 +964,12 @@ export default function RTCProbes({
                           {
                             key: "rv",
                             label: "接收视频帧",
-                            children: evidence?.received_video_frames ?? "—",
+                            children: role === "sender" ? "发送角色不适用" : evidence?.received_video_frames ?? "—",
                           },
                           {
                             key: "size",
                             label: "接收分辨率",
-                            children: evidence?.video_width
+                            children: role === "sender" ? "发送角色不适用" : evidence?.video_width
                               ? `${evidence.video_width} × ${evidence.video_height}`
                               : "—",
                           },

@@ -212,12 +212,27 @@ export default function ResourceTrends({
   nodeID: string;
   value?: ResourceMetrics | null;
 }) {
-  const [window, setWindow] = useState("1h"),
+  const [window, setWindow] = useState(() => {
+      const value =
+        new URLSearchParams(globalThis.window.location.search).get("range") ||
+        "1h";
+      return ["15m", "1h", "6h", "24h"].includes(value) ? value : "1h";
+    }),
     [data, setData] = useState<History | null>(null),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(false),
     [device, setDevice] = useState("total"),
     [ioMetric, setIOMetric] = useState("rate");
+  useEffect(() => {
+    const restore = () => {
+      const value =
+        new URLSearchParams(globalThis.window.location.search).get("range") ||
+        "1h";
+      setWindow(["15m", "1h", "6h", "24h"].includes(value) ? value : "1h");
+    };
+    globalThis.window.addEventListener("popstate", restore);
+    return () => globalThis.window.removeEventListener("popstate", restore);
+  }, []);
   const group = `resources:${nodeID}`;
   useEffect(() => () => disconnect(group), [group]);
   useEffect(() => {
@@ -340,7 +355,17 @@ export default function ResourceTrends({
             { value: "24h", label: "24 小时" },
           ]}
           value={window}
-          onChange={(v) => setWindow(String(v))}
+          onChange={(v) => {
+            const range = String(v);
+            const url = new URL(globalThis.window.location.href);
+            url.searchParams.set("range", range);
+            globalThis.window.history.pushState(
+              null,
+              "",
+              `${url.pathname}${url.search}${url.hash}`,
+            );
+            setWindow(range);
+          }}
         />
         <Typography.Text type="secondary">
           {loading

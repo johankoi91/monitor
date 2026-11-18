@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import Alert from "antd/es/alert";
 import Card from "antd/es/card";
+import Empty from "antd/es/empty";
+import Skeleton from "antd/es/skeleton";
 import Descriptions from "antd/es/descriptions";
 import Progress from "antd/es/progress";
 import Table from "antd/es/table";
@@ -55,10 +57,16 @@ export default function StorageStatus({ api }: { api: API }) {
       clearInterval(timer);
     };
   }, [api]);
-  if (usage?.backend === "file-dev") return null;
+  if (usage?.backend === "file-dev")
+    return (
+      <Card title="中心容量">
+        <Empty description="当前为文件开发存储，不提供 PostgreSQL 容量统计" />
+      </Card>
+    );
   return (
     <Card title="存储容量" className="page-card">
       {error && <Alert type="warning" showIcon message={error} />}
+      {!usage && !error && <Skeleton active />}
       {usage && (
         <>
           {usage.warnings.map((code) => (
@@ -99,19 +107,18 @@ export default function StorageStatus({ api }: { api: API }) {
               },
             ]}
           />
-          <Progress
-            percent={Math.min(
-              100,
-              Number(
-                ((usage.database_bytes / usage.warning_bytes) * 100).toFixed(1),
-              ),
-            )}
-            status={
-              usage.database_bytes >= usage.warning_bytes
-                ? "exception"
-                : "normal"
-            }
-          />
+          {usage.disk_capacity_bytes > 0 && (
+            <Progress
+              percent={Number(
+                (
+                  100 *
+                  (1 - usage.disk_available_bytes / usage.disk_capacity_bytes)
+                ).toFixed(1),
+              )}
+              status="normal"
+              format={(value) => `数据盘使用 ${value}%`}
+            />
+          )}
           <p>
             容量阈值用于提示，不是硬配额。每小时清理过期超过 24
             小时的会话；通知、审计和重启幂等记录保留。

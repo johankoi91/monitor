@@ -216,10 +216,12 @@ export default function Accounts({
   api,
   canUsers,
   canRoles,
+  pane,
 }: {
   api: API;
   canUsers: boolean;
   canRoles: boolean;
+  pane: "users" | "roles";
 }) {
   const [users, setUsers] = useState<AccountUser[]>([]),
     [roles, setRoles] = useState<Role[]>([]),
@@ -234,7 +236,7 @@ export default function Accounts({
     [busy, setBusy] = useState(false);
   async function load() {
     try {
-      if (canUsers) {
+      if (canUsers && pane === "users") {
         const result = await api.get<{ users: AccountUser[]; total: number }>(
           `/api/v1/users?limit=30&offset=${offset}&status=${filter}`,
         );
@@ -251,7 +253,7 @@ export default function Accounts({
   }
   useEffect(() => {
     void load();
-  }, [api, filter, offset]);
+  }, [api, filter, offset, pane]);
   async function saveUser(e: FormEvent) {
     e.preventDefault();
     if (!selected) return;
@@ -276,7 +278,6 @@ export default function Accounts({
   const names = Object.fromEntries(roles.map((r) => [r.role_id, r.name]));
   return (
     <section>
-      <Typography.Title level={2}>账号与角色权限</Typography.Title>
       <p>
         固定两类角色：管理者管理台账、操作、审计、密钥和账号授权；使用者查看服务状态与资源、配置通知并执行受控重启。重启仍须独立
         Token 和节点白名单。
@@ -284,7 +285,7 @@ export default function Accounts({
       {notice && (
         <Alert showIcon type="info" message={notice} className="page-alert" />
       )}
-      {canUsers && (
+      {canUsers && pane === "users" && (
         <>
           <Form layout="vertical" component="div" className="filters">
             <Form.Item label="账号状态" htmlFor="accounts-field-7">
@@ -436,7 +437,7 @@ export default function Accounts({
           )}
         </>
       )}
-      {canRoles && (
+      {canRoles && pane === "roles" && (
         <Card className="page-card">
           <Typography.Title level={3}>角色权限</Typography.Title>
           <p>角色权限固定，不支持创建自定义角色。每个账号只能分配一类角色。</p>

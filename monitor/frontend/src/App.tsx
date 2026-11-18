@@ -26,16 +26,20 @@ import Row from "antd/es/row";
 import Statistic from "antd/es/statistic";
 import Typography from "antd/es/typography";
 import Dropdown from "antd/es/dropdown";
-import Tabs from "antd/es/tabs";
+import Breadcrumb from "antd/es/breadcrumb";
+import Skeleton from "antd/es/skeleton";
+import WorkspaceNavigation from "./WorkspaceNavigation";
+import Subpages from "./Subpages";
+import Overview from "./Overview";
+import { useWorkspaceNavigation, type RTCPane } from "./navigation";
 import Layout from "antd/es/layout";
-import { DownOutlined, CloudServerOutlined } from "@ant-design/icons";
+import { DownOutlined } from "@ant-design/icons";
 import { client, type API } from "./api";
 import { checksForPorts } from "./checks";
 import { resolveGroup } from "./groups";
 import NotificationSettingsForm from "./NotificationSettings";
 import StorageStatus from "./StorageStatus";
 import RTCProbes from "./RTCProbes";
-import RTCOverview from "./RTCOverview";
 import AccessKeys from "./AccessKeys";
 import Resources from "./Resources";
 import Operations, { OperationDetails } from "./Operations";
@@ -73,10 +77,18 @@ const operationLabels: Record<string, string> = {
   REJECTED: "已拒绝",
   TIMEOUT: "超时",
   MANUALLY_CLOSED: "已现场核实关闭",
+  DELIVERED: "已送达",
+  PENDING: "待发",
+  INFLIGHT: "投递中",
+  DROPPED: "容量丢弃",
 };
 function Badge({ value, label }: { value: string; label?: string }) {
   const colors: Record<string, string> = {
     HEALTHY: "success",
+    DELIVERED: "success",
+    FAILED: "error",
+    PENDING: "processing",
+    INFLIGHT: "processing",
     RUNNING: "success",
     running: "success",
     UNHEALTHY: "error",
@@ -358,14 +370,21 @@ function Workspace({
   permissions: string[];
 }) {
   const can = (p: string) => permissions.includes(p);
-  const [tab, setTab] = useState(
-      can("monitor.read")
-        ? "status"
-        : can("users.manage") || can("roles.manage")
-          ? "accounts"
-          : "access",
-    ),
-    [notice, setNotice] = useState(""),
+  const { route, sections, current, section, navigate } =
+    useWorkspaceNavigation(permissions, canManageKeys);
+  const tab = route.view;
+  const setTab = (view: typeof tab) => {
+    const item = sections
+      .flatMap((section) => section.items)
+      .find((item) => item.route.view === view);
+    if (view === "overview") navigate({ view, page: "" });
+    else if (item) navigate(item.route);
+  };
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState<Record<string, boolean>>({});
+  const [updatedAt, setUpdatedAt] = useState<Record<string, string>>({});
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({});
+  const [notice, setNotice] = useState(""),
     [noticeType, setNoticeType] = useState<"info" | "error">("info"),
     [baseline, setBaseline] = useState<Baseline | null>(null),
     [agents, setAgents] = useState<Agent[]>([]),
@@ -373,6 +392,8 @@ function Workspace({
     [statusGroup, setStatusGroup] = useState(""),
     [notificationCategory, setNotificationCategory] = useState(""),
     [statusHost, setStatusHost] = useState(""),
+    [serviceSearch, setServiceSearch] = useState(""),
+    [notificationResult, setNotificationResult] = useState(""),
     [operations, setOperations] = useState<Operation[]>([]),
     [notifications, setNotifications] = useState<Notifications>({
       enabled: false,
@@ -389,17 +410,40 @@ function Workspace({
     [additions, setAdditions] = useState<Map<string, Addition>>(new Map()),
     [removals, setRemovals] = useState<Set<string>>(new Set()),
     [expandedStatusDetails, setExpandedStatusDetails] = useState<Set<string>>(
-      new Set(),
+      new Set(
+        new URLSearchParams(window.location.search).get("node")
+          ? [new URLSearchParams(window.location.search).get("node")!]
+          : [],
+      ),
     ),
     [saving, setSaving] = useState(false);
   const [groupName, setGroupName] = useState("");
-  const [inventoryPane, setInventoryPane] = useState("discovery");
+  const inventoryPane = route.page;
   const [tcpPort, setTCPPort] = useState("");
   const [detail, setDetail] = useState<unknown>(null),
     [portsNode, setPortsNode] = useState<Node | null>(null),
     [restart, setRestart] = useState<NodeStatus | null>(null),
     [operation, setOperation] = useState<Operation | null>(null),
     [resolve, setResolve] = useState<Operation | null>(null);
+  useEffect(() => {
+    const restore = () => {
+      const node = new URLSearchParams(window.location.search).get("node");
+      setExpandedStatusDetails(new Set(node ? [node] : []));
+    };
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
+  function openNode(id: string | null) {
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("node", id);
+    else url.searchParams.delete("node");
+    window.history.pushState(
+      null,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+    setExpandedStatusDetails(new Set(id ? [id] : []));
+  }
   const draft = useRef(false),
     requestGeneration = useRef(0),
     operationsInFlight = useRef(false),
@@ -439,6 +483,7 @@ function Workspace({
   const reload = useCallback(async () => {
     if (!permissions.includes("monitor.read")) return;
     const generation = ++requestGeneration.current;
+    setLoading(true);
     try {
       const params = new URLSearchParams({
         ...query,
@@ -453,7 +498,7 @@ function Workspace({
         tab === "inventory"
           ? api.get<{ agents: Agent[] }>("/api/v1/agents")
           : Promise.resolve(null),
-        ["status", "inventory", "operations"].includes(tab)
+        ["overview", "status", "inventory", "operations"].includes(tab)
           ? api.get<{ services: ServiceStatus[] }>(
               tab === "status"
                 ? "/api/v1/services/status?include_startup=true"
@@ -466,7 +511,7 @@ function Workspace({
             )
           : Promise.resolve(null),
         tab === "operations" ? loadOperations() : Promise.resolve(),
-        tab === "notifications"
+        ["notifications", "overview"].includes(tab)
           ? api.get<Notifications>("/api/v1/notifications/status")
           : Promise.resolve(null),
       ]);
@@ -490,18 +535,35 @@ function Workspace({
       if (a) setAgents(a.agents);
       if (s) setStatus(s.services);
       if (n) setNotifications(n);
+      setLoaded((old) => ({ ...old, [tab]: true }));
+      setUpdatedAt((old) => ({ ...old, [tab]: new Date().toISOString() }));
+      setLoadErrors((old) => ({ ...old, [tab]: "" }));
     } catch (e) {
-      showNotice(message(e), "error");
+      if (generation === requestGeneration.current)
+        setLoadErrors((old) => ({ ...old, [tab]: message(e) }));
+    } finally {
+      if (generation === requestGeneration.current) setLoading(false);
     }
   }, [api, query, page, permissions, tab, loadOperations]);
   useEffect(() => {
-    if (!["status", "inventory", "operations", "notifications"].includes(tab))
+    if (
+      ![
+        "overview",
+        "status",
+        "inventory",
+        "operations",
+        "notifications",
+      ].includes(tab)
+    )
       return;
     void reload();
     const timer = setInterval(() => {
       if (!document.hidden && !busy.current) void reload();
     }, 15000);
-    return () => clearInterval(timer);
+    return () => {
+      requestGeneration.current++;
+      clearInterval(timer);
+    };
   }, [reload, tab]);
   useEffect(() => {
     if (tab !== "operations" && !operation?.node_locked) return;
@@ -517,20 +579,42 @@ function Workspace({
     operations.some((o) => o.node_locked),
     operation?.node_locked,
   ]);
+  useEffect(() => {
+    setNotice("");
+  }, [tab, route.page]);
+  useEffect(() => {
+    if (!notice || noticeType === "error") return;
+    const timer = window.setTimeout(() => setNotice(""), 6000);
+    return () => window.clearTimeout(timer);
+  }, [notice, noticeType]);
   const members =
     baseline?.definition?.clusters.flatMap((c) =>
       c.services.flatMap((s) =>
         s.nodes.map((n) => ({ ...n, cluster: c, service: s })),
       ),
     ) || [];
+  const observedStatus = loadErrors[tab]
+    ? status.map((service) => ({
+        ...service,
+        status: "UNKNOWN",
+        nodes: service.nodes.map((node) => ({
+          ...node,
+          stale: true,
+          status: "UNKNOWN",
+          resources: node.resources
+            ? { ...node.resources, stale: true }
+            : node.resources,
+        })),
+      }))
+    : status;
   const nodeStatuses = new Map(
-    status.flatMap((s) => s.nodes.map((n) => [n.node_id, n] as const)),
+    observedStatus.flatMap((s) => s.nodes.map((n) => [n.node_id, n] as const)),
   );
   const memberGroups = new Map(
     members.map((n) => [n.id, n.cluster.name || n.cluster.code]),
   );
   const statusGroups = [
-    ...status
+    ...observedStatus
       .reduce((groups, service) => {
         const group = groups.get(service.cluster_code);
         if (group) group.nodes.push(...service.nodes);
@@ -544,7 +628,9 @@ function Workspace({
       .values(),
   ].filter((group) => group.nodes.length > 0);
   const statusHosts = [
-    ...new Set(status.flatMap((s) => s.nodes.map((n) => n.host_address))),
+    ...new Set(
+      observedStatus.flatMap((s) => s.nodes.map((n) => n.host_address)),
+    ),
   ].sort();
   const visibleStatus = statusGroups
     .filter((s) => !statusGroup || s.cluster_code === statusGroup)
@@ -665,6 +751,8 @@ function Workspace({
     setAdditions(new Map());
     setRemovals(new Set());
     draft.current = false;
+    setGroupName("");
+    setTCPPort("");
     setNotice("变更已清空");
     void reload();
   }
@@ -721,190 +809,313 @@ function Workspace({
   }
   return (
     <>
-      <Tabs
-        className="workspace-tabs"
-        activeKey={tab}
-        onChange={setTab}
-        items={[
-          ...(can("monitor.read")
-            ? [
-                ["status", "服务状态"],
-                ["rtc", "RTC 业务探测"],
-                ["notifications", "通知投递"],
-              ]
-            : []),
-          ...(can("inventory.read") ? [["inventory", "容器与基准台账"]] : []),
-          ...(can("operations.read") || can("restart.result")
-            ? [
-                [
-                  "operations",
-                  can("operations.read") ? "操作与审计" : "我的重启",
-                ],
-              ]
-            : []),
-          ...(canManageKeys ? [["access", "接入密钥"]] : []),
-          ...(can("users.manage") || can("roles.manage")
-            ? [["accounts", "账号与权限"]]
-            : []),
-        ].map(([key, label]) => ({ key, label }))}
-      />
-      {notice && (noticeType === "info" || tab !== "inventory") && (
-        <Alert
-          message={notice}
-          type={noticeType}
-          showIcon
-          className="page-alert"
+      <div className="workspace-shell">
+        <WorkspaceNavigation
+          sections={sections}
+          route={route}
+          activeSection={section?.id}
+          canOverview={can("monitor.read")}
+          onNavigate={navigate}
         />
-      )}
-      {tab === "status" && (
-        <section>
-          <Typography.Title level={2}>服务状态</Typography.Title>
-          <Typography.Paragraph type="secondary">
-            容器与就绪检查
-          </Typography.Paragraph>
-          {can("monitor.read") && <RTCOverview api={api} onOpen={() => setTab("rtc")} />}
-          <Form layout="vertical" className="filters status-filters">
-            <Form.Item label="主机 IP">
-              <Select
-                style={{ minWidth: 200 }}
-                value={statusHost}
-                onChange={setStatusHost}
-                options={[
-                  { value: "", label: "全部主机" },
-                  ...statusHosts.map((value) => ({ value, label: value })),
-                ]}
-              />
-            </Form.Item>
-            <Form.Item label="分组名" htmlFor="app-field-status-group">
-              <Select
-                id="app-field-status-group"
-                style={{ minWidth: 240, width: "100%" }}
-                value={statusGroup}
-                onChange={setStatusGroup}
+        <main className="workspace-main" id="workspace-main">
+          <Breadcrumb
+            items={[
+              {
+                title: can("monitor.read") ? (
+                  <Button type="link" onClick={() => setTab("overview")}>
+                    工作台
+                  </Button>
+                ) : (
+                  "工作台"
+                ),
+              },
+              ...(section ? [{ title: section.label }] : []),
+              { title: current?.label || "运行总览" },
+            ]}
+          />
+          <div className="workspace-page-heading">
+            <div>
+              <Typography.Title
+                level={2}
+                id="workspace-page-title"
+                tabIndex={-1}
               >
-                <Select.Option value="">全部分组</Select.Option>
-                {statusGroups.map((group) => (
-                  <Select.Option
-                    key={group.cluster_code}
-                    value={group.cluster_code}
-                  >
-                    {group.group_name || group.cluster_code}
-                  </Select.Option>
-                ))}
-              </Select>
-            </Form.Item>
-          </Form>
-          {!status.length && (
-            <Empty>尚未保存基准。进入“容器与基准台账”选择要监控的容器。</Empty>
-          )}
-          {status.length > 0 && !visibleStatus.length && (
-            <Empty>没有匹配的分组状态。</Empty>
-          )}
-          {visibleStatus.map((s) => (
-            <Card className="page-card service-panel" key={s.cluster_code}>
-              <div className="section-title">
-                <Typography.Title level={3}>
-                  {s.group_name || s.cluster_code}
-                </Typography.Title>
+                {current?.label || "运行总览"}
+              </Typography.Title>
+              <Typography.Paragraph type="secondary">
+                {current?.description ||
+                  "分开判断容器状态、RTC 业务证据与通知投递结果。"}
+              </Typography.Paragraph>
+            </div>
+            {[
+              "overview",
+              "status",
+              "inventory",
+              "notifications",
+              "operations",
+            ].includes(tab) && (
+              <div className="workspace-refresh">
+                <Typography.Text type="secondary">
+                  {updatedAt[tab]
+                    ? `读取于 ${stamp(updatedAt[tab])}`
+                    : "等待首次读取"}
+                </Typography.Text>
+                <Button loading={loading} onClick={() => void reload()}>
+                  刷新
+                </Button>
               </div>
-              <p className="service-counts">
-                {s.nodes.length} 个容器 · 正常 {s.healthy_node_count} · 异常{" "}
-                <span
-                  className={
-                    s.unhealthy_node_count > 0
-                      ? "service-count-danger"
-                      : undefined
-                  }
-                >
-                  {s.unhealthy_node_count}
-                </span>{" "}
-                · 未知{" "}
-                <span
-                  className={
-                    s.unknown_node_count > 0
-                      ? "service-count-danger"
-                      : undefined
-                  }
-                >
-                  {s.unknown_node_count}
-                </span>
-              </p>
-              {s.hosts.map((host) => (
-                <section
-                  className="host-group"
-                  key={host.address}
-                  aria-label={`主机 ${host.address}`}
-                >
-                  <div className="host-group-header">
-                    <CloudServerOutlined />
-                    <Typography.Text strong className="host-group-address">
-                      {host.address}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
-                      {host.nodes.length} 个容器
-                    </Typography.Text>
-                  </div>
-                  {host.nodes.map((n) => (
-                    <div className="node-card" key={n.node_id}>
-                      <div className="node-card-header">
-                        <div className="node-identity">
-                          <div className="node-service-row">
-                            <div className="node-service-info">
-                              <Typography.Title level={4}>
-                                {n.container_name}
-                              </Typography.Title>
-                            </div>
-                            <div className="node-actions node-action-group">
-                              <Badge
-                                value={n.status}
-                                label={
-                                  {
+            )}
+          </div>
+          {[
+            "overview",
+            "status",
+            "inventory",
+            "notifications",
+            "operations",
+          ].includes(tab) &&
+          !loaded[tab] &&
+          loading ? (
+            <Skeleton active paragraph={{ rows: 5 }} />
+          ) : null}
+          {loadErrors[tab] && (
+            <Alert
+              className="page-alert"
+              type="error"
+              showIcon
+              message={loadErrors[tab]}
+              description={
+                loaded[tab]
+                  ? "当前状态待确认，下方保留最后一次成功读取的快照。恢复读取后再判断当前健康状态。"
+                  : "尚未读到有效数据，请重试。"
+              }
+              action={<Button onClick={() => void reload()}>重试</Button>}
+            />
+          )}
+          <div
+            className="workspace-page"
+            hidden={
+              [
+                "overview",
+                "status",
+                "inventory",
+                "notifications",
+                "operations",
+              ].includes(tab) && !loaded[tab]
+            }
+          >
+            {tab === "overview" && can("monitor.read") && (
+              <Overview
+                api={api}
+                services={observedStatus}
+                notifications={notifications}
+                onNavigate={navigate}
+              />
+            )}
+            {notice && (noticeType === "info" || tab !== "inventory") && (
+              <Alert
+                message={notice}
+                type={noticeType}
+                showIcon
+                className="page-alert"
+              />
+            )}
+            {tab === "status" && (
+              <section>
+                <Form layout="vertical" className="filters status-filters">
+                  <Form.Item
+                    label="搜索容器、主机或分组"
+                    htmlFor="service-search"
+                  >
+                    <Input
+                      id="service-search"
+                      allowClear
+                      value={serviceSearch}
+                      onChange={(e) => setServiceSearch(e.target.value)}
+                    />
+                  </Form.Item>
+
+                  <Form.Item label="主机 IP">
+                    <Select
+                      style={{ minWidth: 200 }}
+                      value={statusHost}
+                      onChange={setStatusHost}
+                      options={[
+                        { value: "", label: "全部主机" },
+                        ...statusHosts.map((value) => ({
+                          value,
+                          label: value,
+                        })),
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item label="分组名" htmlFor="app-field-status-group">
+                    <Select
+                      id="app-field-status-group"
+                      style={{ minWidth: 240, width: "100%" }}
+                      value={statusGroup}
+                      onChange={setStatusGroup}
+                    >
+                      <Select.Option value="">全部分组</Select.Option>
+                      {statusGroups.map((group) => (
+                        <Select.Option
+                          key={group.cluster_code}
+                          value={group.cluster_code}
+                        >
+                          {group.group_name || group.cluster_code}
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+                </Form>
+                {!status.length && (
+                  <Empty>
+                    尚未保存基准。进入“容器与基准台账”选择要监控的容器。
+                  </Empty>
+                )}
+                {status.length > 0 && !visibleStatus.length && (
+                  <Empty>没有匹配的分组状态。</Empty>
+                )}
+                <Card className="page-card">
+                  <Table<NodeStatus & { groupLabel: string }>
+                    size="small"
+                    rowKey="node_id"
+                    scroll={{ x: 760 }}
+                    pagination={{
+                      defaultPageSize: 20,
+                      showSizeChanger: true,
+                      showTotal: (total) => `共 ${total} 个容器`,
+                    }}
+                    dataSource={visibleStatus
+                      .flatMap((s) =>
+                        s.nodes.map((n) => ({
+                          ...n,
+                          groupLabel: s.group_name || s.cluster_code,
+                        })),
+                      )
+                      .filter((n) =>
+                        `${n.container_name} ${n.host_address} ${n.groupLabel}`
+                          .toLowerCase()
+                          .includes(serviceSearch.toLowerCase()),
+                      )}
+                    columns={[
+                      {
+                        title: "容器 / 分组",
+                        render: (_, n) => (
+                          <>
+                            <span className="workspace-service-name">
+                              {n.container_name}
+                            </span>
+                            <span className="workspace-service-note">
+                              {n.groupLabel}
+                            </span>
+                          </>
+                        ),
+                      },
+                      {
+                        title: "主机 IP",
+                        dataIndex: "host_address",
+                        width: 160,
+                      },
+                      {
+                        title: "检查状态",
+                        width: 180,
+                        render: (_, n) => (
+                          <>
+                            <Badge
+                              value={n.stale ? "UNKNOWN" : n.status}
+                              label={
+                                n.stale
+                                  ? "数据过期 · 待确认"
+                                  : {
+                                      HEALTHY: "正常",
+                                      UNHEALTHY: "异常",
+                                      DEGRADED: "部分异常",
+                                      UNKNOWN: "待确认",
+                                    }[n.status] || n.status
+                              }
+                            />
+                            <span className="workspace-service-note">
+                              {n.reason}
+                            </span>
+                          </>
+                        ),
+                      },
+                      {
+                        title: "资源 / 采样",
+                        width: 180,
+                        render: (_, n) => (
+                          <>
+                            <span>
+                              {n.resources &&
+                              !n.resources.stale &&
+                              n.resources.status !== "UNAVAILABLE"
+                                ? `${n.resources.cpu_usage_cores == null ? "—" : n.resources.cpu_usage_cores.toFixed(4)} 核 · ${n.resources.memory_working_set_bytes == null ? "—" : (n.resources.memory_working_set_bytes / 1048576).toFixed(1)} MiB`
+                                : "等待有效资源采样"}
+                            </span>
+                            <span className="workspace-service-note">
+                              {stamp(n.collected_at)}
+                            </span>
+                          </>
+                        ),
+                      },
+                      {
+                        title: "操作",
+                        width: 100,
+                        render: (_, n) => (
+                          <Button
+                            type="link"
+                            onClick={() => openNode(n.node_id)}
+                          >
+                            查看详情
+                          </Button>
+                        ),
+                      },
+                    ]}
+                  />
+                </Card>
+                {observedStatus
+                  .flatMap((s) => s.nodes)
+                  .filter((n) => expandedStatusDetails.has(n.node_id))
+                  .map((n) => (
+                    <Card
+                      key={n.node_id}
+                      className="workspace-diagnostic"
+                      title={n.container_name}
+                      extra={
+                        <Button onClick={() => openNode(null)}>
+                          返回容器列表
+                        </Button>
+                      }
+                    >
+                      <div className="section-title">
+                        <div>
+                          <Typography.Text>{n.host_address}</Typography.Text>
+                          <span className="workspace-service-note">
+                            {n.reason}
+                          </span>
+                        </div>
+                        <div>
+                          <Badge
+                            value={n.stale ? "UNKNOWN" : n.status}
+                            label={
+                              n.stale
+                                ? "待确认"
+                                : {
                                     HEALTHY: "正常",
                                     UNHEALTHY: "异常",
                                     DEGRADED: "部分异常",
-                                    UNKNOWN: "未知",
+                                    UNKNOWN: "待确认",
                                   }[n.status] || n.status
-                                }
-                              />
-                              {can("restart.execute") && (
-                                <Button
-                                  className="node-restart-button"
-                                  disabled={
-                                    !n.restart_enabled ||
-                                    !can("restart.execute")
-                                  }
-                                  title={
-                                    !can("restart.execute")
-                                      ? "当前角色无重启权限"
-                                      : !n.restart_enabled
-                                        ? "当前基准未开放重启"
-                                        : n.restart_allowed
-                                          ? "需要独立重启 Token"
-                                          : n.restart_block_reason ||
-                                            "当前暂不可重启"
-                                  }
-                                  onClick={() => setRestart(n)}
-                                >
-                                  重启
-                                </Button>
-                              )}
-                              <Button
-                                onClick={() =>
-                                  setExpandedStatusDetails((previous) => {
-                                    const next = new Set(previous);
-                                    if (next.has(n.node_id))
-                                      next.delete(n.node_id);
-                                    else next.add(n.node_id);
-                                    return next;
-                                  })
-                                }
-                              >
-                                查看详情
-                              </Button>
-                            </div>
-                          </div>
-                          {n.status !== "HEALTHY" && (
-                            <div className="node-observation">{n.reason}</div>
+                            }
+                          />
+                          {can("restart.execute") && (
+                            <Button
+                              danger
+                              disabled={!n.restart_enabled}
+                              onClick={() => setRestart(n)}
+                            >
+                              重启
+                            </Button>
                           )}
                         </div>
                       </div>
@@ -917,639 +1128,700 @@ function Workspace({
                         updatedAt={n.collected_at}
                         dataStale={n.stale}
                         startup={<StartupParameters data={n.startup_record} />}
-                        detailsOpen={expandedStatusDetails.has(n.node_id)}
+                        detailsOpen
                       />
-                    </div>
+                    </Card>
                   ))}
-                </section>
-              ))}
-            </Card>
-          ))}
-        </section>
-      )}
-      {tab === "rtc" && can("monitor.read") && (
-        <RTCProbes
-          api={api}
-          canManage={can("rtc.manage")}
-          canDiagnose={can("rtc.diagnostics")}
-        />
-      )}
-      {tab === "inventory" && can("inventory.read") && (
-        <section className="inventory-screen">
-          <div className="section-title inventory-heading">
-            <Typography.Title level={2}>容器与基准台账</Typography.Title>
-            <Typography.Text type="secondary">
-              选择容器 → 设置分组 → 保存
-            </Typography.Text>
-          </div>
-          <div className="inventory-layout">
-            <Card className="inventory-main">
-              <Tabs
-                activeKey={inventoryPane}
-                onChange={setInventoryPane}
-                items={[
-                  {
-                    key: "discovery",
-                    label: "容器发现",
-                    children: (
-                      <>
-                        {" "}
-                        <Form
-                          layout="vertical"
-                          className="filters inventory-filters"
-                          onSubmitCapture={(e) => {
-                            e.preventDefault();
-                            setPage(1);
-                            setQuery({ ...filters });
-                          }}
-                        >
-                          <Form.Item label="主机 IP" htmlFor="app-field-3">
-                            <Select
-                              id="app-field-3"
-                              style={{ minWidth: 180, width: "100%" }}
-                              value={filters.agent_id}
-                              onChange={(value) =>
-                                setFilters({ ...filters, agent_id: value })
-                              }
-                            >
-                              <Select.Option value="">全部机器</Select.Option>
-                              {agents.map((a) => (
-                                <Select.Option
-                                  key={a.agent_id}
-                                  value={a.agent_id}
+              </section>
+            )}
+            {tab === "rtc" && can("monitor.read") && (
+              <RTCProbes
+                api={api}
+                canManage={can("rtc.manage")}
+                canDiagnose={can("rtc.diagnostics")}
+                pane={route.page as RTCPane}
+              />
+            )}
+            {tab === "inventory" && can("inventory.read") && (
+              <section className="inventory-screen">
+                <div className="inventory-layout">
+                  <Card className="inventory-main">
+                    <Subpages
+                      activeKey={inventoryPane}
+                      items={[
+                        {
+                          key: "discovery",
+                          label: "容器发现",
+                          children: (
+                            <>
+                              {" "}
+                              <Form
+                                layout="vertical"
+                                className="filters inventory-filters"
+                                onSubmitCapture={(e) => {
+                                  e.preventDefault();
+                                  setPage(1);
+                                  setQuery({ ...filters });
+                                }}
+                              >
+                                <Form.Item
+                                  label="主机 IP"
+                                  htmlFor="app-field-3"
                                 >
-                                  {a.host_address}
-                                </Select.Option>
-                              ))}
-                            </Select>
-                          </Form.Item>
-                          <Form.Item label="运行态" htmlFor="app-field-4">
-                            <Select
-                              id="app-field-4"
-                              style={{ minWidth: 180, width: "100%" }}
-                              value={filters.runtime_status}
-                              onChange={(value) =>
-                                setFilters({
-                                  ...filters,
-                                  runtime_status: value,
+                                  <Select
+                                    id="app-field-3"
+                                    style={{ minWidth: 180, width: "100%" }}
+                                    value={filters.agent_id}
+                                    onChange={(value) =>
+                                      setFilters({
+                                        ...filters,
+                                        agent_id: value,
+                                      })
+                                    }
+                                  >
+                                    <Select.Option value="">
+                                      全部机器
+                                    </Select.Option>
+                                    {agents.map((a) => (
+                                      <Select.Option
+                                        key={a.agent_id}
+                                        value={a.agent_id}
+                                      >
+                                        {a.host_address}
+                                      </Select.Option>
+                                    ))}
+                                  </Select>
+                                </Form.Item>
+                                <Form.Item label="运行态" htmlFor="app-field-4">
+                                  <Select
+                                    id="app-field-4"
+                                    style={{ minWidth: 180, width: "100%" }}
+                                    value={filters.runtime_status}
+                                    onChange={(value) =>
+                                      setFilters({
+                                        ...filters,
+                                        runtime_status: value,
+                                      })
+                                    }
+                                  >
+                                    {[
+                                      ["", "全部状态"],
+                                      ["running", "运行中"],
+                                      ["created", "已创建"],
+                                      ["exited", "已停止"],
+                                      ["paused", "已暂停"],
+                                      ["restarting", "重启中"],
+                                    ].map(([v, label]) => (
+                                      <Select.Option key={v} value={v}>
+                                        {label}
+                                      </Select.Option>
+                                    ))}
+                                  </Select>
+                                </Form.Item>
+                                <Button htmlType="submit">筛选</Button>
+                              </Form>
+                              <Table<Container>
+                                rowKey={key}
+                                dataSource={containers}
+                                locale={{
+                                  emptyText: "暂无符合筛选条件的未纳管容器",
+                                }}
+                                pagination={false}
+                                size="small"
+                                scroll={{
+                                  x: 840,
+                                  y: "max(220px, calc(100vh - 410px))",
+                                }}
+                                rowSelection={{
+                                  selectedRowKeys: [...chosen.keys()],
+                                  preserveSelectedRowKeys: true,
+                                  getCheckboxProps: (c) => ({
+                                    disabled:
+                                      saving ||
+                                      (!eligible(c) && !chosen.has(key(c))),
+                                  }),
+                                  onSelect: (c, checked) => select(c, checked),
+                                  onSelectAll: (checked, _selected, changed) =>
+                                    changed.forEach((c) => select(c, checked)),
+                                }}
+                                columns={[
+                                  {
+                                    title: "主机 IP",
+                                    dataIndex: "host_address",
+                                    width: 160,
+                                  },
+                                  {
+                                    title: "容器 / 镜像",
+                                    key: "container",
+                                    width: 260,
+                                    ellipsis: true,
+                                    render: (_, c) => (
+                                      <>
+                                        <Typography.Text strong>
+                                          {c.container_name}
+                                        </Typography.Text>
+                                        <div>
+                                          <Typography.Text type="secondary">
+                                            {c.image}
+                                          </Typography.Text>
+                                        </div>
+                                      </>
+                                    ),
+                                  },
+                                  {
+                                    title: "运行态",
+                                    key: "state",
+                                    width: 120,
+                                    render: (_, c) => (
+                                      <>
+                                        <Badge
+                                          value={c.runtime_status}
+                                          label={
+                                            (
+                                              {
+                                                running: "运行中",
+                                                created: "已创建",
+                                                exited: "已停止",
+                                                paused: "已暂停",
+                                                restarting: "重启中",
+                                                removing: "未运行",
+                                                dead: "未运行",
+                                              } as Record<string, string>
+                                            )[c.runtime_status] ||
+                                            c.runtime_status
+                                          }
+                                        />
+                                        {c.stale && <Tag>离线 / 过期</Tag>}
+                                      </>
+                                    ),
+                                  },
+                                  {
+                                    title: "采集时间",
+                                    dataIndex: "collected_at",
+                                    width: 180,
+                                    render: stamp,
+                                  },
+                                  {
+                                    title: "操作",
+                                    key: "actions",
+                                    width: 90,
+                                    render: (_, c) => (
+                                      <Button
+                                        type="link"
+                                        onClick={() => void showDetail(c)}
+                                      >
+                                        详情
+                                      </Button>
+                                    ),
+                                  },
+                                ]}
+                              />
+                              <div className="table-footer">
+                                <Typography.Text type="secondary">
+                                  已勾选 {chosen.size} 个 · 跨筛选和分页保留
+                                </Typography.Text>
+                                <Pagination
+                                  current={page}
+                                  total={total}
+                                  pageSize={50}
+                                  showSizeChanger={false}
+                                  disabled={saving}
+                                  onChange={setPage}
+                                  showTotal={(n) => "共 " + n + " 个容器"}
+                                />
+                              </div>
+                            </>
+                          ),
+                        },
+                        {
+                          key: "baseline",
+                          label: `当前基准（${members.length}）`,
+                          children: (
+                            <div className="inventory-baseline">
+                              <div className="section-title">
+                                <Typography.Text strong>
+                                  已纳管 {members.length} 个容器
+                                </Typography.Text>
+                                {baseline?.yaml_url && (
+                                  <Button
+                                    onClick={() =>
+                                      void api
+                                        .download(baseline.yaml_url!)
+                                        .catch((e) =>
+                                          showNotice(message(e), "error"),
+                                        )
+                                    }
+                                  >
+                                    下载 YAML
+                                  </Button>
+                                )}
+                              </div>
+                              <p>
+                                {baseline?.active
+                                  ? `版本 ${baseline.revision} · 保存于 ${stamp(baseline.saved_at)}`
+                                  : "尚未建立基准"}
+                              </p>
+                              <Table<Node>
+                                rowKey="id"
+                                dataSource={members}
+                                pagination={false}
+                                size="small"
+                                scroll={{
+                                  x: 760,
+                                  y: "max(220px, calc(100vh - 410px))",
+                                }}
+                                columns={[
+                                  {
+                                    title: "主机 IP",
+                                    dataIndex: "host_address",
+                                    width: 160,
+                                  },
+                                  {
+                                    title: "容器",
+                                    dataIndex: "container_name",
+                                    render: (value) => (
+                                      <Typography.Text strong>
+                                        {value}
+                                      </Typography.Text>
+                                    ),
+                                  },
+                                  {
+                                    title: "分组名",
+                                    key: "group",
+                                    width: 140,
+                                    render: (_, n) => memberGroups.get(n.id),
+                                  },
+                                  {
+                                    title: "状态",
+                                    key: "state",
+                                    width: 100,
+                                    render: (_, n) => {
+                                      const value =
+                                        nodeStatuses.get(n.id)?.status ||
+                                        "UNKNOWN";
+                                      return (
+                                        <Badge
+                                          value={value}
+                                          label={
+                                            value === "HEALTHY"
+                                              ? "正常"
+                                              : value === "UNHEALTHY"
+                                                ? "异常"
+                                                : value === "DEGRADED"
+                                                  ? "部分异常"
+                                                  : "未知"
+                                          }
+                                        />
+                                      );
+                                    },
+                                  },
+                                  {
+                                    title: "观测说明",
+                                    key: "reason",
+                                    render: (_, n) => (
+                                      <Typography.Text type="secondary">
+                                        {nodeStatuses.get(n.id)?.reason ||
+                                          "等待有效快照"}
+                                      </Typography.Text>
+                                    ),
+                                  },
+                                  {
+                                    title: "操作",
+                                    key: "settings",
+                                    width: 90,
+                                    render: (_, n) => (
+                                      <Button
+                                        type="link"
+                                        disabled={
+                                          !can("baseline.write") ||
+                                          saving ||
+                                          draft.current ||
+                                          !!nodeStatuses.get(n.id)
+                                            ?.active_operation_id
+                                        }
+                                        onClick={() => setPortsNode(n)}
+                                      >
+                                        设置
+                                      </Button>
+                                    ),
+                                  },
+                                ]}
+                              />
+                            </div>
+                          ),
+                        },
+                      ]}
+                    />
+                  </Card>
+                  <Card
+                    className={`inventory-workbench${chosen.size + additions.size + removals.size ? "" : " inventory-idle"}`}
+                    title="纳管设置"
+                    extra={
+                      <Tag color={chosen.size ? "blue" : "default"}>
+                        已选 {chosen.size} 个
+                      </Tag>
+                    }
+                  >
+                    <Form
+                      layout="vertical"
+                      component="div"
+                      className="inventory-assignment"
+                    >
+                      <Form.Item label="分组名" required htmlFor="app-field-5">
+                        <AutoComplete
+                          id="app-field-5"
+                          style={{ width: "100%" }}
+                          value={groupName}
+                          onChange={setGroupName}
+                          options={[...new Set(groups.map((g) => g.name))].map(
+                            (value) => ({ value }),
+                          )}
+                          placeholder="选择或输入分组名，支持中文"
+                          disabled={saving}
+                        />
+                      </Form.Item>
+                      <Form.Item label="TCP 端口（可选）" htmlFor="app-field-6">
+                        <Input
+                          id="app-field-6"
+                          value={tcpPort}
+                          placeholder="例如 443, 8002, 8003"
+                          disabled={saving}
+                          onChange={(e) => setTCPPort(e.target.value)}
+                        />
+                      </Form.Item>
+                      <div className="inventory-chosen">
+                        <Typography.Text type="secondary">
+                          已选 {chosen.size} 个容器
+                        </Typography.Text>
+                        <Button
+                          type="link"
+                          size="small"
+                          disabled={!chosen.size || saving}
+                          onClick={() => setChosen(new Map())}
+                        >
+                          取消勾选
+                        </Button>
+                      </div>
+                      <Button
+                        block
+                        disabled={
+                          !can("baseline.write") ||
+                          !chosen.size ||
+                          !groupName.trim() ||
+                          saving
+                        }
+                        onClick={() => void stage()}
+                      >
+                        加入待保存变更
+                      </Button>
+                    </Form>
+                    <div className="inventory-pending-heading">
+                      <Typography.Text strong>待保存变更</Typography.Text>
+                      <Typography.Text type="secondary">
+                        新增 {additions.size} · 移出 {removals.size}
+                      </Typography.Text>
+                    </div>
+                    <div className="inventory-pending-list">
+                      {!additions.size && !removals.size && (
+                        <AntEmpty
+                          image={AntEmpty.PRESENTED_IMAGE_SIMPLE}
+                          description="添加容器后，在这里确认变更"
+                        />
+                      )}
+                      {[...additions].map(([k, a]) => (
+                        <div className="inventory-pending-item" key={k}>
+                          <div className="inventory-pending-identity">
+                            <Typography.Text
+                              strong
+                              ellipsis
+                              title={a.container_name}
+                            >
+                              {a.container_name}
+                            </Typography.Text>
+                            <Button
+                              type="text"
+                              size="small"
+                              aria-label={`取消新增 ${a.container_name}`}
+                              disabled={saving}
+                              onClick={() =>
+                                setAdditions((old) => {
+                                  const next = new Map(old);
+                                  next.delete(k);
+                                  return next;
                                 })
                               }
                             >
-                              {[
-                                ["", "全部状态"],
-                                ["running", "运行中"],
-                                ["created", "已创建"],
-                                ["exited", "已停止"],
-                                ["paused", "已暂停"],
-                                ["restarting", "重启中"],
-                              ].map(([v, label]) => (
-                                <Select.Option key={v} value={v}>
-                                  {label}
-                                </Select.Option>
-                              ))}
-                            </Select>
-                          </Form.Item>
-                          <Button htmlType="submit">筛选</Button>
-                        </Form>
-                        <Table<Container>
-                          rowKey={key}
-                          dataSource={containers}
-                          locale={{ emptyText: "暂无符合筛选条件的未纳管容器" }}
-                          pagination={false}
-                          size="small"
-                          scroll={{
-                            x: 840,
-                            y: "max(220px, calc(100vh - 410px))",
-                          }}
-                          rowSelection={{
-                            selectedRowKeys: [...chosen.keys()],
-                            preserveSelectedRowKeys: true,
-                            getCheckboxProps: (c) => ({
-                              disabled:
-                                saving || (!eligible(c) && !chosen.has(key(c))),
-                            }),
-                            onSelect: (c, checked) => select(c, checked),
-                            onSelectAll: (checked, _selected, changed) =>
-                              changed.forEach((c) => select(c, checked)),
-                          }}
-                          columns={[
-                            {
-                              title: "主机 IP",
-                              dataIndex: "host_address",
-                              width: 160,
-                            },
-                            {
-                              title: "容器 / 镜像",
-                              key: "container",
-                              width: 260,
-                              ellipsis: true,
-                              render: (_, c) => (
-                                <>
-                                  <Typography.Text strong>
-                                    {c.container_name}
-                                  </Typography.Text>
-                                  <div>
-                                    <Typography.Text type="secondary">
-                                      {c.image}
-                                    </Typography.Text>
-                                  </div>
-                                </>
-                              ),
-                            },
-                            {
-                              title: "运行态",
-                              key: "state",
-                              width: 120,
-                              render: (_, c) => (
-                                <>
-                                  <Badge
-                                    value={c.runtime_status}
-                                    label={
-                                      (
-                                        {
-                                          running: "运行中",
-                                          created: "已创建",
-                                          exited: "已停止",
-                                          paused: "已暂停",
-                                          restarting: "重启中",
-                                          removing: "未运行",
-                                          dead: "未运行",
-                                        } as Record<string, string>
-                                      )[c.runtime_status] || c.runtime_status
-                                    }
-                                  />
-                                  {c.stale && <Tag>离线 / 过期</Tag>}
-                                </>
-                              ),
-                            },
-                            {
-                              title: "采集时间",
-                              dataIndex: "collected_at",
-                              width: 180,
-                              render: stamp,
-                            },
-                            {
-                              title: "操作",
-                              key: "actions",
-                              width: 90,
-                              render: (_, c) => (
-                                <Button
-                                  type="link"
-                                  onClick={() => void showDetail(c)}
-                                >
-                                  详情
-                                </Button>
-                              ),
-                            },
-                          ]}
-                        />
-                        <div className="table-footer">
-                          <Typography.Text type="secondary">
-                            已勾选 {chosen.size} 个 · 跨筛选和分页保留
-                          </Typography.Text>
-                          <Pagination
-                            current={page}
-                            total={total}
-                            pageSize={50}
-                            showSizeChanger={false}
-                            disabled={saving}
-                            onChange={setPage}
-                            showTotal={(n) => "共 " + n + " 个容器"}
-                          />
-                        </div>
-                      </>
-                    ),
-                  },
-                  {
-                    key: "baseline",
-                    label: `当前基准（${members.length}）`,
-                    children: (
-                      <div className="inventory-baseline">
-                        <div className="section-title">
-                          <Typography.Text strong>
-                            已纳管 {members.length} 个容器
-                          </Typography.Text>
-                          {baseline?.yaml_url && (
-                            <Button
-                              onClick={() =>
-                                void api
-                                  .download(baseline.yaml_url!)
-                                  .catch((e) => showNotice(message(e), "error"))
-                              }
-                            >
-                              下载 YAML
+                              ×
                             </Button>
-                          )}
+                          </div>
+                          <Typography.Text type="secondary">
+                            {a.host_address} ·{" "}
+                            {a.cluster_name || a.cluster_code}
+                          </Typography.Text>
+                          <Typography.Text type="secondary">
+                            TCP：
+                            {a.checks.map((c) => c.port).join(", ") || "未配置"}
+                          </Typography.Text>
                         </div>
-                        <p>
-                          {baseline?.active
-                            ? `版本 ${baseline.revision} · 保存于 ${stamp(baseline.saved_at)}`
-                            : "尚未建立基准"}
-                        </p>
-                        <Table<Node>
-                          rowKey="id"
-                          dataSource={members}
-                          pagination={false}
-                          size="small"
-                          scroll={{
-                            x: 760,
-                            y: "max(220px, calc(100vh - 410px))",
-                          }}
-                          columns={[
-                            {
-                              title: "主机 IP",
-                              dataIndex: "host_address",
-                              width: 160,
-                            },
-                            {
-                              title: "容器",
-                              dataIndex: "container_name",
-                              render: (value) => (
-                                <Typography.Text strong>
-                                  {value}
-                                </Typography.Text>
-                              ),
-                            },
-                            {
-                              title: "分组名",
-                              key: "group",
-                              width: 140,
-                              render: (_, n) => memberGroups.get(n.id),
-                            },
-                            {
-                              title: "状态",
-                              key: "state",
-                              width: 100,
-                              render: (_, n) => {
-                                const value =
-                                  nodeStatuses.get(n.id)?.status || "UNKNOWN";
-                                return (
-                                  <Badge
-                                    value={value}
-                                    label={
-                                      value === "HEALTHY"
-                                        ? "正常"
-                                        : value === "UNHEALTHY"
-                                          ? "异常"
-                                          : value === "DEGRADED"
-                                            ? "部分异常"
-                                            : "未知"
-                                    }
-                                  />
-                                );
-                              },
-                            },
-                            {
-                              title: "观测说明",
-                              key: "reason",
-                              render: (_, n) => (
-                                <Typography.Text type="secondary">
-                                  {nodeStatuses.get(n.id)?.reason ||
-                                    "等待有效快照"}
-                                </Typography.Text>
-                              ),
-                            },
-                            {
-                              title: "操作",
-                              key: "settings",
-                              width: 90,
-                              render: (_, n) => (
-                                <Button
-                                  type="link"
-                                  disabled={
-                                    !can("baseline.write") ||
-                                    saving ||
-                                    draft.current ||
-                                    !!nodeStatuses.get(n.id)
-                                      ?.active_operation_id
-                                  }
-                                  onClick={() => setPortsNode(n)}
-                                >
-                                  设置
-                                </Button>
-                              ),
-                            },
-                          ]}
-                        />
-                      </div>
-                    ),
-                  },
-                ]}
-              />
-            </Card>
-            <Card
-              className={`inventory-workbench${chosen.size + additions.size + removals.size ? "" : " inventory-idle"}`}
-              title="纳管设置"
-              extra={
-                <Tag color={chosen.size ? "blue" : "default"}>
-                  已选 {chosen.size} 个
-                </Tag>
-              }
-            >
-              <Form
-                layout="vertical"
-                component="div"
-                className="inventory-assignment"
-              >
-                <Form.Item label="分组名" required htmlFor="app-field-5">
-                  <AutoComplete
-                    id="app-field-5"
-                    style={{ width: "100%" }}
-                    value={groupName}
-                    onChange={setGroupName}
-                    options={[...new Set(groups.map((g) => g.name))].map(
-                      (value) => ({ value }),
+                      ))}
+                      {[...removals].map((id) => {
+                        const n = members.find((n) => n.id === id);
+                        return (
+                          <div className="inventory-pending-item" key={id}>
+                            <div className="inventory-pending-identity">
+                              <Typography.Text
+                                ellipsis
+                                title={n?.container_name || id}
+                              >
+                                移出：{n?.container_name || id}
+                              </Typography.Text>
+                              <Button
+                                type="text"
+                                size="small"
+                                aria-label={`取消移出 ${n?.container_name || id}`}
+                                disabled={saving}
+                                onClick={() => {
+                                  if (n)
+                                    remove(id, n.agent_id, n.container_name);
+                                }}
+                              >
+                                ×
+                              </Button>
+                            </div>
+                            <Typography.Text type="secondary">
+                              {n?.host_address}
+                            </Typography.Text>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {notice && noticeType === "error" && (
+                      <Alert type="error" message={notice} showIcon />
                     )}
-                    placeholder="选择或输入分组名，支持中文"
-                    disabled={saving}
-                  />
-                </Form.Item>
-                <Form.Item label="TCP 端口（可选）" htmlFor="app-field-6">
-                  <Input
-                    id="app-field-6"
-                    value={tcpPort}
-                    placeholder="例如 443, 8002, 8003"
-                    disabled={saving}
-                    onChange={(e) => setTCPPort(e.target.value)}
-                  />
-                </Form.Item>
-                <div className="inventory-chosen">
-                  <Typography.Text type="secondary">
-                    已选 {chosen.size} 个容器
-                  </Typography.Text>
-                  <Button
-                    type="link"
-                    size="small"
-                    disabled={!chosen.size || saving}
-                    onClick={() => setChosen(new Map())}
-                  >
-                    取消勾选
-                  </Button>
-                </div>
-                <Button
-                  block
-                  disabled={
-                    !can("baseline.write") ||
-                    !chosen.size ||
-                    !groupName.trim() ||
-                    saving
-                  }
-                  onClick={() => void stage()}
-                >
-                  加入待保存变更
-                </Button>
-              </Form>
-              <div className="inventory-pending-heading">
-                <Typography.Text strong>待保存变更</Typography.Text>
-                <Typography.Text type="secondary">
-                  新增 {additions.size} · 移出 {removals.size}
-                </Typography.Text>
-              </div>
-              <div className="inventory-pending-list">
-                {!additions.size && !removals.size && (
-                  <AntEmpty
-                    image={AntEmpty.PRESENTED_IMAGE_SIMPLE}
-                    description="添加容器后，在这里确认变更"
-                  />
-                )}
-                {[...additions].map(([k, a]) => (
-                  <div className="inventory-pending-item" key={k}>
-                    <div className="inventory-pending-identity">
-                      <Typography.Text strong ellipsis title={a.container_name}>
-                        {a.container_name}
-                      </Typography.Text>
+                    <div className="inventory-save-actions">
                       <Button
-                        type="text"
-                        size="small"
-                        aria-label={`取消新增 ${a.container_name}`}
-                        disabled={saving}
-                        onClick={() =>
-                          setAdditions((old) => {
-                            const next = new Map(old);
-                            next.delete(k);
-                            return next;
-                          })
+                        disabled={
+                          saving ||
+                          (!chosen.size && !additions.size && !removals.size)
                         }
+                        onClick={clear}
                       >
-                        ×
+                        清空变更
+                      </Button>
+                      <Button
+                        type="primary"
+                        loading={saving}
+                        disabled={
+                          !can("baseline.write") ||
+                          saving ||
+                          !baseline ||
+                          !!chosen.size ||
+                          (!additions.size && !removals.size)
+                        }
+                        onClick={() => void save()}
+                      >
+                        保存并生效
                       </Button>
                     </div>
-                    <Typography.Text type="secondary">
-                      {a.host_address} · {a.cluster_name || a.cluster_code}
-                    </Typography.Text>
-                    <Typography.Text type="secondary">
-                      TCP：{a.checks.map((c) => c.port).join(", ") || "未配置"}
-                    </Typography.Text>
-                  </div>
-                ))}
-                {[...removals].map((id) => {
-                  const n = members.find((n) => n.id === id);
-                  return (
-                    <div className="inventory-pending-item" key={id}>
-                      <div className="inventory-pending-identity">
-                        <Typography.Text
-                          ellipsis
-                          title={n?.container_name || id}
-                        >
-                          移出：{n?.container_name || id}
-                        </Typography.Text>
-                        <Button
-                          type="text"
-                          size="small"
-                          aria-label={`取消移出 ${n?.container_name || id}`}
-                          disabled={saving}
-                          onClick={() => {
-                            if (n) remove(id, n.agent_id, n.container_name);
-                          }}
-                        >
-                          ×
-                        </Button>
-                      </div>
-                      <Typography.Text type="secondary">
-                        {n?.host_address}
+                    {!!chosen.size && !!(additions.size + removals.size) && (
+                      <Typography.Text
+                        className="inventory-save-hint"
+                        type="secondary"
+                      >
+                        还有 {chosen.size} 个已选容器未加入待保存变更
                       </Typography.Text>
-                    </div>
-                  );
-                })}
-              </div>
-              {notice && noticeType === "error" && (
-                <Alert type="error" message={notice} showIcon />
-              )}
-              <div className="inventory-save-actions">
-                <Button
-                  disabled={
-                    saving ||
-                    (!chosen.size && !additions.size && !removals.size)
-                  }
-                  onClick={clear}
-                >
-                  清空变更
-                </Button>
-                <Button
-                  type="primary"
-                  loading={saving}
-                  disabled={
-                    !can("baseline.write") ||
-                    saving ||
-                    !baseline ||
-                    !!chosen.size ||
-                    (!additions.size && !removals.size)
-                  }
-                  onClick={() => void save()}
-                >
-                  保存并生效
-                </Button>
-              </div>
-              {!!chosen.size && !!(additions.size + removals.size) && (
-                <Typography.Text
-                  className="inventory-save-hint"
-                  type="secondary"
-                >
-                  还有 {chosen.size} 个已选容器未加入待保存变更
-                </Typography.Text>
-              )}
-            </Card>
-          </div>
-          {!!(chosen.size + additions.size + removals.size) && (
-            <Button
-              type="primary"
-              className="inventory-mobile-jump"
-              onClick={() =>
-                document
-                  .querySelector(".inventory-workbench")
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-            >
-              已选 {chosen.size} · 待保存 {additions.size + removals.size} ·
-              查看并保存
-            </Button>
-          )}
-        </section>
-      )}
-      {tab === "operations" &&
-        (can("operations.read") || can("restart.result")) && (
-          <>
-            <Operations
-              operations={operations}
-              services={status}
-              canAudit={can("audit.read")}
-              canResolve={can("restart.resolve")}
-              onOpen={(id) => void showOperation(id)}
-              onResolve={setResolve}
-              onRefresh={() => void reload()}
-            />
-            <StorageStatus api={api} />
-          </>
-        )}
-      {tab === "access" && canManageKeys && (
-        <AccessKeys api={api} canManage={canManageKeys} />
-      )}
-      {tab === "accounts" && can("users.manage") && (
-        <Accounts
-          api={api}
-          canUsers={can("users.manage")}
-          canRoles={can("roles.manage")}
-        />
-      )}
-      {tab === "notifications" && (
-        <section>
-          {can("notifications.write") ? (
-            <NotificationSettingsForm api={api} onSaved={() => void reload()} />
-          ) : (
-            <p>当前角色仅可查看通知投递结果。</p>
-          )}
-          <Card
-            title={notifications.enabled ? "通知已启用" : "通知未启用"}
-            className="page-card"
-          >
-            <Row gutter={[16, 16]}>
-              <Col xs={12} sm={6}>
-                <Card size="small">
-                  <Statistic title="待发" value={notifications.pending || 0} />
-                </Card>
-              </Col>
-              <Col xs={12} sm={6}>
-                <Card size="small">
-                  <Statistic
-                    title="已送达"
-                    value={notifications.delivered || 0}
-                    valueStyle={{ color: "#389e0d" }}
-                  />
-                </Card>
-              </Col>
-              <Col xs={12} sm={6}>
-                <Card size="small">
-                  <Statistic
-                    title="失败"
-                    value={notifications.failed || 0}
-                    valueStyle={{ color: "#cf1322" }}
-                  />
-                </Card>
-              </Col>
-              <Col xs={12} sm={6}>
-                <Card size="small">
-                  <Statistic
-                    title="容量丢弃"
-                    value={notifications.dropped || 0}
-                  />
-                </Card>
-              </Col>
-            </Row>
-            {notifications.storage_available === false && (
-              <Alert
-                message="通知存储不可用，请核查数据目录。"
-                type="error"
-                showIcon
-              />
-            )}
-          </Card>
-          <Card
-            title="最近投递"
-            className="page-card"
-            extra={
-              <Select
-                style={{ minWidth: 180 }}
-                value={notificationCategory}
-                onChange={setNotificationCategory}
-                options={[
-                  { value: "", label: "全部事件" },
-                  { value: "NORMAL", label: "正常状态" },
-                  { value: "CONTAINER_ABNORMAL", label: "容器异常" },
-                  { value: "COLLECTION_ABNORMAL", label: "采集异常" },
-                  { value: "RECOVERED", label: "恢复正常" },
-                  { value: "RTC_ABNORMAL", label: "RTC 业务异常" },
-                  { value: "RTC_RECOVERED", label: "RTC 业务恢复" },
-                  { value: "RTC_UNKNOWN", label: "RTC 持续未知" },
-                ]}
-              />
-            }
-          >
-            <List
-              dataSource={(notifications.recent || []).filter(
-                (d) =>
-                  !notificationCategory ||
-                  (notificationCategory === "NORMAL"
-                    ? d.event.current_status === "HEALTHY" &&
-                      d.event.event_type !== "WEBHOOK_TEST"
-                    : d.event.event_category === notificationCategory),
-              )}
-              locale={{ emptyText: "暂无投递记录" }}
-              renderItem={(d) => (
-                <List.Item extra={<Badge value={d.status} />}>
-                  <List.Item.Meta
-                    title={
-                      d.event.event_type === "WEBHOOK_TEST"
-                        ? "Webhook 健康检查"
-                        : `${({ NORMAL: "正常状态", CONTAINER_ABNORMAL: "容器异常", COLLECTION_ABNORMAL: "采集异常", RECOVERED: "恢复正常", RTC_ABNORMAL: "RTC 业务异常", RTC_RECOVERED: "RTC 业务恢复", RTC_UNKNOWN: "RTC 持续未知" } as Record<string, string>)[d.event.event_category || ""] || "状态通知"} · ${d.event.node_id || d.event.service_code}`
+                    )}
+                  </Card>
+                </div>
+                {!!(chosen.size + additions.size + removals.size) && (
+                  <Button
+                    type="primary"
+                    className="inventory-mobile-jump"
+                    onClick={() =>
+                      document
+                        .querySelector(".inventory-workbench")
+                        ?.scrollIntoView({ behavior: "smooth", block: "start" })
                     }
-                    description={`${d.event.previous_status} → ${d.event.current_status} · ${stamp(d.event.occurred_at)} · 已尝试 ${d.attempts} 次${d.last_error ? ` · ${d.last_error}` : ""}`}
+                  >
+                    已选 {chosen.size} · 待保存 {additions.size + removals.size}{" "}
+                    · 查看并保存
+                  </Button>
+                )}
+              </section>
+            )}
+            {tab === "operations" &&
+              (can("operations.read") || can("restart.result")) && (
+                <>
+                  <Operations
+                    operations={operations}
+                    services={status}
+                    canAudit={can("audit.read")}
+                    canResolve={can("restart.resolve")}
+                    onOpen={(id) => void showOperation(id)}
+                    onResolve={setResolve}
+                    onRefresh={() => void reload()}
                   />
-                </List.Item>
+                </>
               )}
-            />
-          </Card>
-        </section>
-      )}
+            {tab === "capacity" && can("monitor.read") && (
+              <StorageStatus api={api} />
+            )}
+            {tab === "access" && canManageKeys && (
+              <AccessKeys api={api} canManage={canManageKeys} />
+            )}
+            {tab === "accounts" &&
+              (can("users.manage") || can("roles.manage")) && (
+                <Accounts
+                  api={api}
+                  canUsers={can("users.manage")}
+                  canRoles={can("roles.manage")}
+                  pane={route.page === "roles" ? "roles" : "users"}
+                />
+              )}
+            {tab === "notifications" && (
+              <section>
+                {route.page === "config" && can("notifications.write") && (
+                  <NotificationSettingsForm
+                    api={api}
+                    onSaved={() => void reload()}
+                  />
+                )}
+                {route.page === "delivery" && (
+                  <>
+                    <Card
+                      title={
+                        notifications.enabled ? "通知已启用" : "通知未启用"
+                      }
+                      className="page-card"
+                    >
+                      <Row gutter={[16, 16]}>
+                        <Col xs={12} sm={6}>
+                          <Card size="small">
+                            <Statistic
+                              title="待发"
+                              value={notifications.pending || 0}
+                            />
+                          </Card>
+                        </Col>
+                        <Col xs={12} sm={6}>
+                          <Card size="small">
+                            <Statistic
+                              title="累计已送达"
+                              value={notifications.delivered || 0}
+                              valueStyle={{ color: "#389e0d" }}
+                            />
+                          </Card>
+                        </Col>
+                        <Col xs={12} sm={6}>
+                          <Card size="small">
+                            <Statistic
+                              title={
+                                <Button
+                                  type="link"
+                                  onClick={() =>
+                                    setNotificationResult("FAILED")
+                                  }
+                                >
+                                  累计失败
+                                </Button>
+                              }
+                              value={notifications.failed || 0}
+                              valueStyle={{ color: "#cf1322" }}
+                            />
+                          </Card>
+                        </Col>
+                        <Col xs={12} sm={6}>
+                          <Card size="small">
+                            <Statistic
+                              title="累计容量丢弃"
+                              value={notifications.dropped || 0}
+                            />
+                          </Card>
+                        </Col>
+                      </Row>
+                      {notifications.storage_available === false && (
+                        <Alert
+                          message="通知存储不可用，请核查数据目录。"
+                          type="error"
+                          showIcon
+                        />
+                      )}
+                    </Card>
+                    <Card
+                      title="最近投递"
+                      className="page-card"
+                      extra={
+                        <div className="notification-filters">
+                          <Select
+                            aria-label="投递结果"
+                            value={notificationResult}
+                            onChange={setNotificationResult}
+                            options={[
+                              { value: "", label: "全部结果" },
+                              { value: "DELIVERED", label: "已送达" },
+                              { value: "FAILED", label: "失败" },
+                              { value: "PENDING", label: "待发" },
+                            ]}
+                          />
+                          <Select
+                            aria-label="事件类型"
+                            style={{ minWidth: 180 }}
+                            value={notificationCategory}
+                            onChange={setNotificationCategory}
+                            options={[
+                              { value: "", label: "全部事件" },
+                              { value: "NORMAL", label: "正常状态" },
+                              {
+                                value: "CONTAINER_ABNORMAL",
+                                label: "容器异常",
+                              },
+                              {
+                                value: "COLLECTION_ABNORMAL",
+                                label: "采集异常",
+                              },
+                              { value: "RECOVERED", label: "恢复正常" },
+                              { value: "RTC_ABNORMAL", label: "RTC 业务异常" },
+                              { value: "RTC_RECOVERED", label: "RTC 业务恢复" },
+                              { value: "RTC_UNKNOWN", label: "RTC 持续未知" },
+                            ]}
+                          />
+                        </div>
+                      }
+                    >
+                      <List
+                        dataSource={(notifications.recent || []).filter(
+                          (d) =>
+                            (!notificationResult ||
+                              d.status === notificationResult) &&
+                            (!notificationCategory ||
+                              (notificationCategory === "NORMAL"
+                                ? d.event.current_status === "HEALTHY" &&
+                                  d.event.event_type !== "WEBHOOK_TEST"
+                                : d.event.event_category ===
+                                  notificationCategory)),
+                        )}
+                        locale={{ emptyText: "暂无投递记录" }}
+                        renderItem={(d) => (
+                          <List.Item extra={<Badge value={d.status} />}>
+                            <List.Item.Meta
+                              title={
+                                d.event.event_type === "WEBHOOK_TEST"
+                                  ? "Webhook 健康检查"
+                                  : `${({ NORMAL: "正常状态", CONTAINER_ABNORMAL: "容器异常", COLLECTION_ABNORMAL: "采集异常", RECOVERED: "恢复正常", RTC_ABNORMAL: "RTC 业务异常", RTC_RECOVERED: "RTC 业务恢复", RTC_UNKNOWN: "RTC 持续未知" } as Record<string, string>)[d.event.event_category || ""] || "状态通知"} · ${d.event.node_id || d.event.service_code}`
+                              }
+                              description={`${d.event.previous_status} → ${d.event.current_status} · ${stamp(d.event.occurred_at)} · 已尝试 ${d.attempts} 次${d.last_error ? ` · ${d.last_error}` : ""}`}
+                            />
+                          </List.Item>
+                        )}
+                      />
+                    </Card>
+                  </>
+                )}
+              </section>
+            )}
+          </div>
+        </main>
+      </div>
       {portsNode && baseline && (
         <NodeSettingsModal
           api={api}
