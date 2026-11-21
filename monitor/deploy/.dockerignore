@@ -1,7 +1,0 @@
-*.env
-*.yaml
-*.conf
-*.pem
-*.key
-*.jsonl
-*.log
