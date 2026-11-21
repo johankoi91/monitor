@@ -76,6 +76,7 @@ type Client struct {
 	workersWG      sync.WaitGroup
 	logsWG         sync.WaitGroup
 	stopping       bool
+	ackDirty       bool
 }
 
 func New(c Config) (*Client, error) {
@@ -146,7 +147,11 @@ func (c *Client) save() error {
 	if len(b) > 16<<20 {
 		return errors.New("probe outbox capacity exhausted")
 	}
-	return durable.Bytes(filepath.Join(c.config.DataDir, "outbox-v2.json"), b)
+	if err = durable.Bytes(filepath.Join(c.config.DataDir, "outbox-v2.json"), b); err != nil {
+		return err
+	}
+	c.ackDirty = false
+	return nil
 }
 func (c *Client) fail(err error) {
 	select {
@@ -307,6 +312,11 @@ func (c *Client) Run(parent context.Context) error {
 }
 func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 	defer conn.Close()
+	defer func() {
+		if err := c.flushAcknowledgements(); err != nil {
+			c.fail(err)
+		}
+	}()
 	conn.SetReadLimit(protocol.MaxMessage)
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPingHandler(func(data string) error {
@@ -358,11 +368,9 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 	defer tick.Stop()
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
-	type sentMessage struct {
-		signature string
-		at        time.Time
-	}
-	sent := map[string]sentMessage{}
+	ackFlush := time.NewTicker(time.Second)
+	defer ackFlush.Stop()
+	sent := deliveryWindow{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -372,6 +380,10 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 		case e := <-c.fatal:
 			c.fail(e)
 			return e
+		case <-ackFlush.C:
+			if err := c.flushAcknowledgements(); err != nil {
+				return err
+			}
 		case <-heartbeat.C:
 			m := protocol.Msg("heartbeat")
 			m.Driver = c.config.Driver
@@ -388,21 +400,13 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 			}
 		case <-tick.C:
 			for _, m := range c.pending() {
-				key := m.Type + "/" + m.RunID + "/" + m.Role
-				signature := "ready"
-				if m.Result != nil {
-					signature = m.Result.ID
-				} else if len(m.Events) > 0 {
-					signature = m.Events[0].ID + "/" + m.Events[len(m.Events)-1].ID
-				}
-				previous := sent[key]
-				if previous.signature == signature && time.Since(previous.at) < 2*time.Second {
+				if !sent.shouldSend(m) {
 					continue
 				}
 				if e := write(m); e != nil {
 					return e
 				}
-				sent[key] = sentMessage{signature, time.Now()}
+				sent.sent(m)
 			}
 		}
 	}
@@ -515,13 +519,15 @@ func (c *Client) handle(ctx context.Context, m protocol.Message) error {
 			}
 		}
 		r.Events = left
-		return c.save()
+		c.ackDirty = true
+		return nil
 	case "result_ack":
 		if r.Result == nil || r.Result.ID != m.ID {
 			return errors.New("result acknowledgement mismatch")
 		}
 		r.Acked = true
-		return c.save()
+		c.ackDirty = true
+		return nil
 	case "start_media", "finish_run", "cancel_run":
 		if p := c.workers[m.RunID]; p != nil {
 			p.writeMu.Lock()

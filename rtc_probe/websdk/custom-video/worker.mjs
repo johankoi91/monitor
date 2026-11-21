@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url';
 import {randomBytes,createHash} from 'node:crypto';
 import {chromium} from 'playwright';
 import {startRuntimeServer} from './server.mjs';
-import {sdkParameters,signalingRoute,browserFailureReason} from './contract.mjs';
+import {sdkParameters,signalingRoute,browserFailureReason,publishWithEvidence} from './contract.mjs';
 import {remoteStatsSample,evaluateRemoteStats} from './remote-stats.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url)), id=()=>randomBytes(16).toString('hex');
@@ -112,7 +112,10 @@ async function run(){
   advance('WAIT_START');await bounded(begin);
   if(deadline-Date.now()<rtc.media_duration_ms+(duplex?4000:1000))throw new Error('CONTROL_START_TOO_LATE');
   for(const role of roles)sdkBaseline[role]=remoteStatsSample(await bounded(snapshot(role)),peerUID(role),Date.now()-at);
-  advance('PUBLISH');for(const role of roles)if(duplex||role==='sender')await bounded(endpoints[role].page.evaluate(()=>session.publish()));
+  advance('PUBLISH');for(const role of roles)if(duplex||role==='sender'){
+   const proof=await publishWithEvidence(()=>bounded(endpoints[role].page.evaluate(()=>session.publish())),async()=>(await bounded(snapshot(role))).session,role==='sender'?10001:10002,()=>!abort.signal.aborted);
+   if(proof.recovered)record(role,{kind:'stage_event',name:'browser_publish_evaluation_recovered',fields:proof});
+  }
   if(duplex)for(const role of roles){receiveBaseline[role]=await bounded(snapshot(role));sdkBaseline[role]=remoteStatsSample(receiveBaseline[role],peerUID(role),Date.now()-at);}
   advance('MEDIA');const beginMedia=Date.now();let lastSample=0;
   while(Date.now()-beginMedia<rtc.media_duration_ms){
@@ -139,7 +142,7 @@ async function run(){
   const message=abort.signal.aborted?abort.signal.reason.message:error.message;
   reason=message==='DEADLINE'?(phase==='WAIT_START'?'CONTROL_START_TIMEOUT':phase==='JOIN'?'WEB_JOIN_TIMEOUT':'WEB_EXECUTION_TIMEOUT'):message;
   if(!/^[A-Z0-9_]+$/.test(reason))reason='WEB_'+phase+'_FAILED';
-  reason=browserFailureReason(error.message)||reason;
+  if(!abort.signal.aborted)reason=browserFailureReason(error.message)||reason;
   if(error.name==='NotSupportedError'||/captureStream|Media file must/.test(error.message))reason='WEB_LOCAL_MEDIA_UNAVAILABLE';
   outcome=reason==='CANCELLED'||reason==='CONTROL_CLOSED'?'CANCELLED':['JOIN','MEDIA','PUBLISH'].includes(phase)&&!['BROWSER_DISCONNECTED','BROWSER_CONTEXT_LOST','BROWSER_PAGE_CRASHED','CONTROL_START_TOO_LATE','DEVICE_CAPTURE_ATTEMPTED','WEB_LOCAL_MEDIA_UNAVAILABLE'].includes(reason)?'FAILED':'ERROR';
   for(const role of roles)record(role,{kind:'stage_event',name:'stage_failed',fields:{reason,detail:redact(error.message)}});

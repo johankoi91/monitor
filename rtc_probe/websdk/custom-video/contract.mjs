@@ -32,3 +32,16 @@ export function browserFailureReason(message) {
  if (/execution context was destroyed|cannot find context with specified id|target (?:page, context or browser has been closed|closed)/i.test(message)) return 'BROWSER_CONTEXT_LOST';
  return '';
 }
+
+// A CDP evaluation can lose its reply after publish has already completed.
+// Confirm the same live publisher's state; never repeat the SDK publication.
+export async function publishWithEvidence(publish, readSession, uid, canRecover=()=>true) {
+ try { await publish(); return {recovered:false}; }
+ catch(error) {
+  if(browserFailureReason(error.message)!=='BROWSER_CONTEXT_LOST'||!canRecover())throw error;
+  const state=await readSession().catch(()=>null);
+  const kinds=new Set((state?.localTracks||[]).filter(track=>track.readyState==='live').map(track=>track.kind));
+  if(!canRecover()||state?.state!=='connected'||String(state.uid)!==String(uid)||!state.events?.some(event=>event.type==='published')||!kinds.has('audio')||!kinds.has('video'))throw error;
+  return {recovered:true,reason:'SDK_PUBLISH_ALREADY_COMPLETED'};
+ }
+}

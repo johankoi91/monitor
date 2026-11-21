@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {sdkParameters,signalingRoute,edgeEndpoint,browserFailureReason} from './contract.mjs';
+import {sdkParameters,signalingRoute,edgeEndpoint,browserFailureReason,publishWithEvidence} from './contract.mjs';
 const rtc={access_ips:['183.131.59.146'],web_access:{port:443,report_port:6443,log_port:6444}};
 const route={case_kind:'CROSS_EDGE_MEDIA',ap_client_ips:rtc.access_ips,sender:{endpoint:'183.131.59.146:4501'},receiver:{endpoint:'183.131.59.146:4504'}};
 test('browser execution failures remain distinct from RTC publish failures',()=>{
@@ -44,4 +44,17 @@ test('three-field Edge addresses preserve gateway selection and AP routing',()=>
  assert.equal(signalingRoute(ap,'sender',[{endpoint:'183.131.59.146:4501',connected:true}],true).inventoryKnown,true);
  assert.equal(edgeEndpoint({edge_type:'web',ip_for_client:'2001:db8::1',user_port:4501}),'[2001:db8::1]:4501');
  for(const bad of [{...sender,user_port:'4501'},{...sender,user_port:0},{...sender,agent_id:'not-allowed'},{...sender,ip_for_client:'bad'}])assert.throws(()=>edgeEndpoint(bad));
+});
+
+const livePublisher={state:'connected',uid:10001,events:[{type:'published'}],localTracks:[{kind:'audio',readyState:'live'},{kind:'video',readyState:'live'}]};
+const contextLoss=()=>new Error('page.evaluate: Execution context was destroyed, most likely because of a navigation.');
+test('lost publication reply is recovered from confirmed live SDK state without another publish',async()=>{
+ let calls=0;
+ const result=await publishWithEvidence(async()=>{calls++;throw contextLoss();},async()=>livePublisher,10001);
+ assert.equal(result.recovered,true);assert.equal(calls,1);
+});
+test('recovery never accepts a wrong UID, missing media, absent publish confirmation or cancellation',async()=>{
+ for(const value of [{...livePublisher,uid:10002},{...livePublisher,localTracks:[]},{...livePublisher,events:[]},{...livePublisher,state:'disconnected'}])await assert.rejects(publishWithEvidence(async()=>{throw contextLoss();},async()=>value,10001),/Execution context/);
+ await assert.rejects(publishWithEvidence(async()=>{throw contextLoss();},async()=>livePublisher,10001,()=>false),/Execution context/);
+ await assert.rejects(publishWithEvidence(async()=>{throw new Error('SDK_PUBLISH_FAILED');},async()=>livePublisher,10001),/SDK_PUBLISH_FAILED/);
 });

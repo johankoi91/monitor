@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class RuntimeAssets(unittest.TestCase):
     def test_web_context_contains_all_relative_worker_imports(self):
-        spec = importlib.util.spec_from_file_location('build_web_runtime', ROOT / 'tools/build/build_web_runtime.py')
+        spec = importlib.util.spec_from_file_location('build_web_runtime', ROOT / 'tools/builders/build_web_runtime.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as temporary:
