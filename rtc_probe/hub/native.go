@@ -62,42 +62,55 @@ func (h *Hub) pairCommand(r *Run) (protocol.Message, bool) {
 	if kind == "prepare_run" {
 		job := a.Job
 		job.Role = "pair"
-		credentials := h.tokens[r.ID]
-		if credentials == nil {
-			c := h.state.TargetCredentials[r.TargetID]
-			credentials = &protocol.Credentials{}
-			if job.RTC != nil && job.RTC.AuthMode == "certificate" {
-				ttl := uint32(time.Until(r.Deadline).Seconds()) + 120
-				var err error
-				credentials.SenderToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, protocol.SenderUID, token.RolePublisher, ttl, ttl)
-				if err == nil {
-					credentials.ReceiverToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, protocol.ReceiverUID, token.RolePublisher, ttl, ttl)
-				}
-				if err != nil {
-					now := time.Now().UTC()
-					_ = h.change(func(s *state) error {
-						v := s.Runs[r.ID]
-						v.Status = "ERROR"
-						v.Reason = "TOKEN_SIGNING_FAILED"
-						v.FinishedAt = &now
-						return nil
-					})
-					return protocol.Message{}, false
-				}
-			}
-			h.tokens[r.ID] = credentials
+		credentials, err := h.runCredentials(r)
+		if err != nil {
+			return protocol.Message{}, false
 		}
 		job.Credentials = credentials
 		m.Job = &job
 	}
 	return m, true
 }
+func supportsTaskMedia(s *session, driver string) bool {
+	if driver != "agora-web" {
+		return supportsNativeMedia(s)
+	}
+	if s == nil || s.Driver != protocol.WebDriver {
+		return false
+	}
+	for _, capability := range s.Capabilities {
+		if capability == protocol.WebMediaCapability {
+			return true
+		}
+	}
+	return false
+}
 func verifiedEvidence(r *Run, a, b *protocol.Result) bool {
 	if !a.Evidence.Connected || !b.Evidence.Connected {
 		return false
 	}
-	if r.NativeCase != nil && (a.Route == nil || b.Route == nil || a.Route.Status != "VERIFIED" || b.Route.Status != "VERIFIED" || !a.Route.Guarded || !b.Route.Guarded) {
-		return false
+	for role, result := range map[string]*protocol.Result{"sender": a, "receiver": b} {
+		driver := r.Endpoints[role].Job.Target.Driver
+		if r.NativeCase != nil && driver == "agora" && (result.Route == nil || result.Route.Status != "VERIFIED" || !result.Route.Guarded) {
+			return false
+		}
+		if driver == protocol.WebDriver && (result.Browser == nil || result.Browser.DeviceCaptureCalls != 0 || !result.TraceComplete || (role == "receiver" || r.NativeCase != nil && r.NativeCase.Duplex) && !result.Evidence.BrowserMediaValidated || r.NativeCase != nil && (result.Route == nil || result.Route.Status != "VERIFIED")) {
+			return false
+		}
+	}
+	if r.NativeCase != nil && r.NativeCase.Duplex {
+		left, right := r.Endpoints["sender"].Job, r.Endpoints["receiver"].Job
+		if left.Channel != right.Channel || left.UID == right.UID || left.PublisherUID != right.UID || right.PublisherUID != left.UID {
+			return false
+		}
+		for role, result := range map[string]*protocol.Result{"sender": a, "receiver": b} {
+			p := r.Endpoints[role].Job.RTC
+			e := result.Evidence
+			if p == nil || !e.Published || !e.VideoPublished || e.SentFrames < 1 || e.SentVideoFrames < 1 || !e.Subscribed || !e.VideoSubscribed || e.MediaDurationMS < p.MinAudioMS || e.ReceivedVideoFrames < p.MinVideoFrames {
+				return false
+			}
+		}
+		return true
 	}
 	p := r.Endpoints["sender"].Job.RTC
 	if p == nil {
@@ -178,10 +191,6 @@ func supportsNativeMedia(s *session) bool {
 	if s == nil || s.Driver != "agora" {
 		return false
 	}
-	// Version 0.2 predates explicit capability negotiation and supports both media.
-	if len(s.Capabilities) == 0 {
-		return true
-	}
 	audio, video := false, false
 	for _, capability := range s.Capabilities {
 		if capability == "rtc_audio_v1" {
@@ -192,4 +201,34 @@ func supportsNativeMedia(s *session) bool {
 		}
 	}
 	return audio && video
+}
+
+func (h *Hub) runCredentials(r *Run) (*protocol.Credentials, error) {
+	job := r.Endpoints["sender"].Job
+	credentials := h.tokens[r.ID]
+	if credentials == nil {
+		c := h.state.TargetCredentials[r.TargetID]
+		credentials = &protocol.Credentials{}
+		if job.RTC != nil && job.RTC.AuthMode == "certificate" {
+			ttl := uint32(time.Until(r.Deadline).Seconds()) + 120
+			var err error
+			credentials.SenderToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, protocol.SenderUID, token.RolePublisher, ttl, ttl)
+			if err == nil {
+				credentials.ReceiverToken, err = token.BuildTokenWithUid(job.RTC.AppID, c.AppCertificate, job.Channel, protocol.ReceiverUID, token.RolePublisher, ttl, ttl)
+			}
+			if err != nil {
+				now := time.Now().UTC()
+				_ = h.change(func(s *state) error {
+					v := s.Runs[r.ID]
+					v.Status = "ERROR"
+					v.Reason = "TOKEN_SIGNING_FAILED"
+					v.FinishedAt = &now
+					return nil
+				})
+				return nil, err
+			}
+		}
+		h.tokens[r.ID] = credentials
+	}
+	return credentials, nil
 }

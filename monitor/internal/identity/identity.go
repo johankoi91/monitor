@@ -47,7 +47,7 @@ type Permission struct {
 const AgoraRole = "agora"
 const CustomerRole = "customer_ops"
 
-var Catalog = []Permission{{"monitor.read", "查看服务状态与资源"}, {"inventory.read", "查看容器发现及启动配置"}, {"baseline.read", "查看及导出台账"}, {"baseline.write", "维护基准台账"}, {"notifications.write", "配置通知"}, {"operations.read", "查看重启操作"}, {"restart.result", "查看自己的重启结果"}, {"restart.execute", "执行受控重启"}, {"restart.resolve", "核实未知操作"}, {"audit.read", "查询审计"}, {"keys.manage", "签发及停用 Key"}, {"users.manage", "开通账号及分配两类角色"}, {"roles.manage", "查看固定角色权限"}, {"rtc.manage", "管理 RTC 探测任务"}, {"rtc.diagnostics", "回捞及下载 RTC 探测日志"}}
+var Catalog = []Permission{{"probes.manage", "管理探测服务器与客户端"}, {"monitor.read", "查看服务状态与资源"}, {"inventory.read", "查看容器发现及启动配置"}, {"baseline.read", "查看及导出台账"}, {"baseline.write", "维护基准台账"}, {"notifications.write", "配置通知"}, {"operations.read", "查看重启操作"}, {"restart.result", "查看自己的重启结果"}, {"restart.execute", "执行受控重启"}, {"restart.resolve", "核实未知操作"}, {"audit.read", "查询审计"}, {"keys.manage", "签发及停用 Key"}, {"users.manage", "开通账号及分配两类角色"}, {"roles.manage", "查看固定角色权限"}, {"rtc.manage", "管理 RTC 探测任务"}, {"rtc.diagnostics", "回捞及下载 RTC 探测日志"}}
 
 func RolePermissions(role string) []string {
 	permissions := []string{}

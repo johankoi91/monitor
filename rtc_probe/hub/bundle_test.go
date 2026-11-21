@@ -31,8 +31,8 @@ func testDiagnostic(t *testing.T, request protocol.LogRequest, job protocol.Job,
 	return b.Bytes()
 }
 func TestDiagnosticChecksCRCFileDigestsAndExecutionAttribution(t *testing.T) {
-	job := protocol.Job{RunID: "run", ProbeID: "probe", Role: "sender", Revision: "v1", Target: protocol.Target{ID: "rtc"}, Channel: "current", UID: "10001", PublisherUID: "10001"}
-	req := protocol.LogRequest{ID: "request", RunID: job.RunID, ProbeID: job.ProbeID, Role: job.Role}
+	job := protocol.Job{RunID: "run", RuntimeID: "probe", Role: "sender", Revision: "v1", Target: protocol.Target{ID: "rtc"}, Channel: "current", UID: "10001", PublisherUID: "10001"}
+	req := protocol.LogRequest{ID: "request", RunID: job.RunID, RuntimeID: job.RuntimeID, Role: job.Role}
 	valid := testDiagnostic(t, req, job, false, false)
 	if partial, err := validateDiagnosticBundle(valid, req, job); err != nil || partial {
 		t.Fatal("valid bundle rejected", err)
@@ -61,8 +61,8 @@ func TestDiagnosticChecksCRCFileDigestsAndExecutionAttribution(t *testing.T) {
 }
 
 func TestSharedBundleRequiresBothEndpointIdentities(t *testing.T) {
-	job := protocol.Job{RunID: "run", ProbeID: "probe", Role: "pair", Revision: "revision", Channel: "channel", UID: "10001", PublisherUID: "10001", LogScope: protocol.ServiceLogScope, Target: protocol.Target{ID: "target"}}
-	req := protocol.LogRequest{ID: "request", RunID: job.RunID, ProbeID: job.ProbeID, Role: "pair", Scope: protocol.ServiceLogScope}
+	job := protocol.Job{RunID: "run", RuntimeID: "probe", Role: "pair", Revision: "revision", Channel: "channel", UID: "10001", PublisherUID: "10001", LogScope: protocol.ServiceLogScope, Target: protocol.Target{ID: "target"}}
+	req := protocol.LogRequest{ID: "request", RunID: job.RunID, RuntimeID: job.RuntimeID, Role: "pair", Scope: protocol.ServiceLogScope}
 	build := func(receiverChannel string, missing bool) []byte {
 		var buffer bytes.Buffer
 		writer := zip.NewWriter(&buffer)
@@ -83,5 +83,21 @@ func TestSharedBundleRequiresBothEndpointIdentities(t *testing.T) {
 	}
 	if _, err := validateDiagnosticBundle(build("channel", true), req, job); err == nil {
 		t.Fatal("receiver identity missing")
+	}
+}
+
+func TestNativeDiagnosticIgnoresBrowserOnlySettingsWithoutIgnoringNativeIdentity(t *testing.T) {
+	expected := &protocol.RTCParameters{AppID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", AuthMode: "none", WebAccess: &protocol.WebAccessConfiguration{Port: 443, IgnoreCertificates: true}}
+	legacy := *expected
+	legacy.WebAccess = nil
+	if !sameDiagnosticRTC(&legacy, expected, "agora") {
+		t.Fatal("browser-only fields broke old Native diagnostic")
+	}
+	if sameDiagnosticRTC(&legacy, expected, protocol.WebDriver) {
+		t.Fatal("Web access parameters ignored for browser diagnostic")
+	}
+	legacy.AppID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if sameDiagnosticRTC(&legacy, expected, "agora") {
+		t.Fatal("different AppID accepted")
 	}
 }

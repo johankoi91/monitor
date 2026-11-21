@@ -3,6 +3,7 @@ package probe
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
@@ -80,4 +81,24 @@ func (c *Client) readWorkerMessages(ctx context.Context, job protocol.Job, input
 		}
 	}
 	return nil
+}
+
+// The saved assignment is authoritative for transport context. Fill missing
+// transport context while rejecting events that claim another execution.
+func bindWorkerEvent(job protocol.Job, event protocol.Event) (protocol.Event, error) {
+	pairs := [][2]string{{event.RunID, job.RunID}, {event.Role, job.Role}, {event.Revision, job.Revision}, {event.RuntimeID, job.RuntimeID}, {event.TaskID, job.TaskID}, {event.TargetID, job.Target.ID}, {event.ParentRunID, job.ParentRunID}, {event.EdgeEndpoint, job.EdgeEndpoint}}
+	for _, pair := range pairs {
+		if pair[0] != "" && pair[0] != pair[1] {
+			return event, fmt.Errorf("worker event belongs to a different assignment")
+		}
+	}
+	event.RunID = job.RunID
+	event.Role = job.Role
+	event.Revision = job.Revision
+	event.RuntimeID = job.RuntimeID
+	event.TaskID = job.TaskID
+	event.TargetID = job.Target.ID
+	event.ParentRunID = job.ParentRunID
+	event.EdgeEndpoint = job.EdgeEndpoint
+	return event, nil
 }

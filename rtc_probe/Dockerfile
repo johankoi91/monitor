@@ -15,6 +15,8 @@ COPY --from=build /libroute_capture.so /opt/rtc-probe/libroute_capture.so
 COPY Agora-Golang-Server-SDK-2.6.6/agora_sdk/ /opt/agora_sdk/
 COPY rtc_probe/build/demo-media/ /opt/rtc-probe/test_data/
 ENV LD_LIBRARY_PATH=/opt/agora_sdk
-ENV RTC_PROBE_DATA_DIR=/data
+ENV AVOPS_PROBE_DATA_DIR=/data
+ENV AVOPS_PROBE_HOST_DIR=/host
+LABEL avops.probe.schema="2" avops.probe.service="rtc" avops.probe.client="native"
 USER 65532:65532
 ENTRYPOINT ["/rtc-probe"]

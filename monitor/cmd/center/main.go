@@ -25,7 +25,7 @@ import (
 	"github.com/johankoi91/monitor/runtime/internal/notify"
 	"github.com/johankoi91/monitor/runtime/internal/postgres"
 	"github.com/johankoi91/monitor/runtime/internal/storage"
-	"github.com/johankoi91/monitor/runtime/web"
+	"github.com/johankoi91/monitor/runtime/internal/webui"
 )
 
 func env(key, fallback string) string {
@@ -48,13 +48,9 @@ func main() {
 	if err != nil {
 		log.Fatal("cannot load center configuration")
 	}
-	for _, agent := range config.Agents {
-		if agent.ID == id || agent.Secret == secret {
-			log.Fatal("management and Agent credentials must be independent")
-		}
-		if config.Notifications.Enabled && config.Notifications.Secret == agent.Secret {
-			log.Fatal("notification credentials must be independent from Agent credentials")
-		}
+	enrollToken := os.Getenv("AVOPS_AGENT_ENROLL_TOKEN")
+	if len(enrollToken) < 24 || enrollToken == secret || enrollToken == config.Notifications.Secret {
+		log.Fatal("independent AVOPS_AGENT_ENROLL_TOKEN required")
 	}
 	if config.Notifications.Enabled && config.Notifications.Secret == secret {
 		log.Fatal("notification credentials must be independent from management credentials")
@@ -92,6 +88,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
+	if store.AgentCredentialMatches(secret) || store.AgentCredentialMatches(enrollToken) || store.AgentCredentialMatches(config.Notifications.Secret) {
+		log.Fatal("machine and system credentials must be independent")
+	}
 	if err = store.ApplyRestartRules(); err != nil {
 		log.Fatal("cannot persist deployment restart permissions")
 	}
@@ -105,25 +104,22 @@ func main() {
 		log.Fatal(err)
 	}
 	defer accessRegistry.Close()
+	probeEnroll := os.Getenv("AVOPS_PROBE_ENROLL_TOKEN")
+	if len(probeEnroll) < 24 || probeEnroll == secret || probeEnroll == enrollToken || probeEnroll == config.Notifications.Secret || store.AgentCredentialMatches(probeEnroll) {
+		log.Fatal("independent AVOPS_PROBE_ENROLL_TOKEN required")
+	}
 	var probes *hub.Hub
-	if config.RTCProbe != nil {
-		for _, p := range config.RTCProbe.Probes {
-			if p.ID == id || p.Secret == secret || p.Secret == config.Notifications.Secret {
-				log.Fatal("RTC probe credentials must be independent")
-			}
-			for _, a := range config.Agents {
-				if p.ID == a.ID || p.Secret == a.Secret {
-					log.Fatal("RTC probe and Docker Agent credentials must be independent")
-				}
-			}
-		}
+	if config.RTCProbe == nil {
+		config.RTCProbe = &hub.Config{}
+	}
+	{
 		probes, err = hub.New(filepath.Join(env("AVOPS_DATA_DIR", "data"), "rtc-probe"), *config.RTCProbe, backend)
 		if err != nil {
 			log.Fatal("cannot initialize RTC probe framework: ", err)
 		}
 		probes.SetNativeInventoryProvider(store.NativeInventory)
 	}
-	assets, _ := fs.Sub(web.Files, "static")
+	assets, _ := fs.Sub(webui.Files, "static")
 	allowed := []string{}
 	for _, ip := range strings.Split(os.Getenv("AVOPS_ALLOWED_IPS"), ",") {
 		if ip = strings.TrimSpace(ip); ip != "" {
@@ -137,7 +133,7 @@ func main() {
 	if err != nil || storageWarning <= 0 {
 		log.Fatal("invalid database warning threshold")
 	}
-	handler := (&center.Server{Store: store, Probes: probes, AdminID: id, AdminSecret: secret, Assets: http.FileServer(http.FS(assets)), AllowedIPs: allowed, Notifier: notifier, Access: accessRegistry, Accounts: accounts, Database: database, StorageWarningBytes: storageWarning, StorageDiskPath: env("AVOPS_STORAGE_DISK_PATH", "/var/lib")}).Handler()
+	handler := (&center.Server{AgentEnrollmentToken: enrollToken, ProbeEnrollmentToken: probeEnroll, Store: store, Probes: probes, AdminID: id, AdminSecret: secret, Assets: http.FileServer(http.FS(assets)), AllowedIPs: allowed, Notifier: notifier, Access: accessRegistry, Accounts: accounts, Database: database, StorageWarningBytes: storageWarning, StorageDiskPath: env("AVOPS_STORAGE_DISK_PATH", "/var/lib")}).Handler()
 	addr := env("AVOPS_CENTER_ADDR", "127.0.0.1:19443")
 	cert, key := os.Getenv("AVOPS_TLS_CERT"), os.Getenv("AVOPS_TLS_KEY")
 	dev := os.Getenv("AVOPS_DEV_HTTP") == "1"

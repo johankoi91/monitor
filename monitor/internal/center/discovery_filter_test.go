@@ -26,10 +26,19 @@ func TestSelectableDiscoveryFiltersBeforePagination(t *testing.T) {
 	get := func(query string) (int, struct {
 		Total      int               `json:"total"`
 		Containers []model.Container `json:"containers"`
-	}) { t.Helper(); r := httptest.NewRequest("GET", "http://center/api/v1/containers?"+query, nil); r.SetBasicAuth("admin", strings.Repeat("z", 32)); w := httptest.NewRecorder(); h.ServeHTTP(w, r); var result struct {
-		Total      int               `json:"total"`
-		Containers []model.Container `json:"containers"`
-	}; json.Unmarshal(w.Body.Bytes(), &result); return w.Code, result }
+	}) {
+		t.Helper()
+		r := httptest.NewRequest("GET", "http://center/api/v1/containers?"+query, nil)
+		r.SetBasicAuth("admin", strings.Repeat("z", 32))
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		var result struct {
+			Total      int               `json:"total"`
+			Containers []model.Container `json:"containers"`
+		}
+		json.Unmarshal(w.Body.Bytes(), &result)
+		return w.Code, result
+	}
 	code, first := get("selectable_only=true&page_size=1&page=1")
 	if code != 200 || first.Total != 2 || len(first.Containers) != 1 || first.Containers[0].Managed || !first.Containers[0].AgentOnline || first.Containers[0].Stale {
 		t.Fatal("unselectable containers affected pagination")
@@ -41,6 +50,18 @@ func TestSelectableDiscoveryFiltersBeforePagination(t *testing.T) {
 	_, stopped := get("selectable_only=true&runtime_status=exited")
 	if stopped.Total != 1 || stopped.Containers[0].ContainerName != "worker-a" {
 		t.Fatal("stopped unmanaged container excluded")
+	}
+	_, named := get("selectable_only=true&name=WORKER-&page_size=1&page=2")
+	if named.Total != 2 || len(named.Containers) != 1 || !strings.Contains(named.Containers[0].ContainerName, "worker-") {
+		t.Fatal("case-insensitive name filter did not apply before pagination")
+	}
+	_, combined := get("selectable_only=true&name=KER-A&agent_id=rtc-a&runtime_status=exited")
+	if combined.Total != 1 || len(combined.Containers) != 1 || combined.Containers[0].ContainerName != "worker-a" {
+		t.Fatal("name, host and runtime filters did not combine")
+	}
+	_, unmatched := get("selectable_only=true&name=not-present")
+	if unmatched.Total != 0 || len(unmatched.Containers) != 0 {
+		t.Fatal("unmatched name returned containers")
 	}
 	_, all := get("")
 	if all.Total != 4 {

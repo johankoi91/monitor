@@ -438,3 +438,13 @@ func LocalTarget(host string) bool {
 	}
 	return false
 }
+
+func (c *Collector) HostName(ctx context.Context) string {
+	var info struct {
+		Name string `json:"Name"`
+	}
+	if c.get(ctx, "/info", &info) != nil {
+		return ""
+	}
+	return info.Name
+}

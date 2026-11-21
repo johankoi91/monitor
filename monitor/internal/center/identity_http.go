@@ -110,6 +110,10 @@ func (s *Server) accountRoutes(w http.ResponseWriter, r *http.Request, user *ide
 		}
 		return true
 	}
+	if strings.HasPrefix(path, "/api/v1/auth/") {
+		failure(w, http.StatusNotFound, "NOT_FOUND", "接口不存在")
+		return true
+	}
 	if path == "/api/v1/permissions" {
 		if r.Method != "GET" {
 			method(w)
@@ -170,12 +174,7 @@ func (s *Server) accountRoutes(w http.ResponseWriter, r *http.Request, user *ide
 		failure(w, 400, "INVALID_PAGE", "分页参数无效")
 		return true
 	}
-	var result any
-	if path == "/api/v1/users" {
-		result, err = s.Accounts.Users(r.URL.Query().Get("status"), r.URL.Query().Get("search"), limit, offset)
-	} else {
-		result, err = s.Accounts.AuditList(r.URL.Query().Get("action"), r.URL.Query().Get("actor"), limit, offset)
-	}
+	result, err := s.Accounts.Users(r.URL.Query().Get("status"), r.URL.Query().Get("search"), limit, offset)
 	if err != nil {
 		identityProblem(w, err)
 	} else {
@@ -184,6 +183,12 @@ func (s *Server) accountRoutes(w http.ResponseWriter, r *http.Request, user *ide
 	return true
 }
 func routePermission(path, method string) string {
+	if strings.HasPrefix(path, "/api/v1/probes/") {
+		if method == "GET" {
+			return "monitor.read"
+		}
+		return "probes.manage"
+	}
 	if strings.HasPrefix(path, "/api/v1/rtc/") {
 		if strings.Contains(path, "/logs") {
 			return "rtc.diagnostics"
@@ -206,6 +211,8 @@ func routePermission(path, method string) string {
 		return "keys.manage"
 	case strings.HasPrefix(path, "/api/v1/containers"):
 		return "inventory.read"
+	case strings.HasPrefix(path, "/api/v1/agents/") && strings.HasSuffix(path, "/retire"):
+		return "baseline.write"
 	case path == "/api/v1/operations/restart":
 		return "restart.execute"
 	case path == "/api/v1/operations/mine":

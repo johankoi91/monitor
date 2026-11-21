@@ -30,13 +30,18 @@ import (
 )
 
 type Config struct {
-	RouteCapturePath         string
-	URL, ID, Secret, DataDir string
-	Driver                   string
-	Capacity                 int
-	AutoCapacity             bool
-	AllowPlaintextLoopback   bool
-	WorkerCommand            func(context.Context) *exec.Cmd
+	RouteCapturePath                      string
+	RuntimeVersion                        string
+	URL, DataDir                          string
+	HostDir, EnrollmentToken              string
+	ServiceType, ClientType               string
+	Name, HostName, HostAddress, Location string
+	Driver                                string
+	Capacity                              int
+	AutoCapacity                          bool
+	AllowPlaintextLoopback                bool
+	WorkerCommand                         func(context.Context) *exec.Cmd
+	CleanupWorker                         func(protocol.Job) error
 }
 type record struct {
 	WorkerID string           `json:"worker_id,omitempty"`
@@ -53,13 +58,14 @@ type process struct {
 	done    chan struct{}
 }
 type Client struct {
+	identity       RuntimeIdentity
+	host           HostIdentity
 	storageBytes   int64
 	collectActive  map[string]string
 	nextLogAttempt map[string]time.Time
 	logReports     map[string]protocol.LogRequest
 	resourceError  string
 	retention      protocol.RetentionPolicy
-	lastPrune      time.Time
 	config         Config
 	mu             sync.Mutex
 	records        map[string]*record
@@ -74,7 +80,7 @@ type Client struct {
 
 func New(c Config) (*Client, error) {
 	u, e := url.Parse(c.URL)
-	if e != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/api/v1/probe/connect" || u.Hostname() == "" {
+	if e != nil || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/api/v1/probes/connect" || u.Hostname() == "" {
 		return nil, errors.New("credential-free probe websocket URL required")
 	}
 	ip := net.ParseIP(u.Hostname())
@@ -82,20 +88,32 @@ func New(c Config) (*Client, error) {
 	if u.Scheme != "wss" && !(u.Scheme == "ws" && local && c.AllowPlaintextLoopback) {
 		return nil, errors.New("WSS required; plaintext only allowed for explicit loopback development")
 	}
-	if !protocol.ValidID(c.ID) || len(c.Secret) < 24 || c.DataDir == "" {
-		return nil, errors.New("independent probe ID, 24+ character secret and data directory required")
+	if c.DataDir == "" || c.HostDir == "" || len(c.EnrollmentToken) < 24 || len(c.EnrollmentToken) > 256 || !validHostOverride(c.HostName, c.HostAddress) {
+		return nil, errors.New("v2 center address, shared host directory and enrollment token required")
 	}
 	if c.Driver == "" {
 		c.Driver = "mock"
 	}
+	if c.ServiceType == "" || c.ClientType == "" {
+		service, client := protocol.DriverService(c.Driver)
+		c.ServiceType = service
+		c.ClientType = client
+	}
+	if !protocol.ValidServiceType(c.ServiceType) || !protocol.ValidServiceType(c.ClientType) {
+		return nil, errors.New("service and client type required")
+	}
 	if c.RouteCapturePath == "" {
-		c.RouteCapturePath = os.Getenv("RTC_PROBE_ROUTE_CAPTURE")
+		c.RouteCapturePath = os.Getenv("AVOPS_PROBE_ROUTE_CAPTURE")
 		if c.RouteCapturePath == "" {
 			c.RouteCapturePath = "/opt/rtc-probe/libroute_capture.so"
 		}
 	}
 	if c.AutoCapacity {
-		c.Capacity = resourceWorkerCapacity()
+		if c.Driver == protocol.WebDriver {
+			c.Capacity = resourceWorkerCapacity(512 << 20)
+		} else {
+			c.Capacity = resourceWorkerCapacity()
+		}
 	}
 	if c.Capacity == 0 {
 		c.Capacity = 2
@@ -111,7 +129,7 @@ func New(c Config) (*Client, error) {
 		c.WorkerCommand = func(ctx context.Context) *exec.Cmd {
 			cmd := exec.CommandContext(ctx, executable, "worker")
 			for _, value := range os.Environ() {
-				if !strings.HasPrefix(value, "RTC_PROBE_SECRET=") {
+				if !strings.HasPrefix(value, "AVOPS_PROBE_ENROLL_TOKEN=") {
 					cmd.Env = append(cmd.Env, value)
 				}
 			}
@@ -128,7 +146,7 @@ func (c *Client) save() error {
 	if len(b) > 16<<20 {
 		return errors.New("probe outbox capacity exhausted")
 	}
-	return durable.Bytes(filepath.Join(c.config.DataDir, "outbox.json"), b)
+	return durable.Bytes(filepath.Join(c.config.DataDir, "outbox-v2.json"), b)
 }
 func (c *Client) fail(err error) {
 	select {
@@ -148,13 +166,31 @@ func (c *Client) Run(parent context.Context) error {
 	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); e != nil {
 		return errors.New("another probe owns data directory")
 	}
+	var err error
+	c.host, err = LoadHostIdentity(c.config.HostDir)
+	if err != nil {
+		return err
+	}
+	runtimeID, _ := protocol.RuntimeIdentityKey(c.host.Secret, c.config.ServiceType, c.config.ClientType)
+	runtimeLock, err := os.OpenFile(filepath.Join(c.config.HostDir, runtimeID+".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer runtimeLock.Close()
+	if err = syscall.Flock(int(runtimeLock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return errors.New("another process owns this server/service/client")
+	}
+	c.identity, err = loadRuntimeIdentity(c.config.DataDir, c.host, c.config.ServiceType, c.config.ClientType)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(parent)
 	defer func() {
 		cancel()
 		c.shutdownWorkers()
 		c.logsWG.Wait()
 	}()
-	if e = durable.Read(filepath.Join(c.config.DataDir, "outbox.json"), 16<<20, &c.records); e != nil && !os.IsNotExist(e) {
+	if e = durable.Read(filepath.Join(c.config.DataDir, "outbox-v2.json"), 16<<20, &c.records); e != nil && !os.IsNotExist(e) {
 		return e
 	}
 	if c.records == nil {
@@ -167,22 +203,25 @@ func (c *Client) Run(parent context.Context) error {
 	if err := c.retention.Validate(); err != nil {
 		return err
 	}
-	migrated := map[string]*record{}
+	validatedRecords := map[string]*record{}
 	for id, r := range c.records {
-		if r == nil || !protocol.ValidID(id) || (id != r.Job.RunID && id != recordKey(r.Job.RunID, r.Job.Role)) || r.Job.ProbeID != c.config.ID || (r.Job.Target.Driver != "mock" && r.Job.Target.Driver != "agora") {
+		if r == nil || !protocol.ValidID(id) || id != recordKey(r.Job.RunID, r.Job.Role) || r.Job.RuntimeID != c.identity.ID || (r.Job.Target.Driver != "mock" && !protocol.RealDriver(r.Job.Target.Driver)) {
 			return errors.New("corrupt or foreign probe execution; preserve for repair")
 		}
 		if r.Result == nil {
 			r.Result = &protocol.Result{ID: protocol.ID(), WorkerID: protocol.ID(), Driver: "mock", Outcome: "ERROR", Reason: "PROBE_PROCESS_RESTARTED", Cleanup: "UNKNOWN", FinishedAt: time.Now().UTC()}
 			r.Result.Driver = r.Job.Target.Driver
 		}
-		// Older pair clients stored zero before the worker applied its UID default.
-		if r.Job.Target.Driver == "agora" && r.Job.Role == "receiver" && r.Job.UID == "0" {
-			r.Job.UID = strconv.FormatUint(uint64(protocol.ReceiverUID), 10)
+		for i, event := range r.Events {
+			bound, err := bindWorkerEvent(r.Job, event)
+			if err != nil {
+				return err
+			}
+			r.Events[i] = bound
 		}
-		migrated[recordKey(r.Job.RunID, r.Job.Role)] = r
+		validatedRecords[recordKey(r.Job.RunID, r.Job.Role)] = r
 	}
-	c.records = migrated
+	c.records = validatedRecords
 	if e = c.save(); e != nil {
 		return e
 	}
@@ -213,10 +252,27 @@ func (c *Client) Run(parent context.Context) error {
 	defer func() { cancel(); <-maintenanceDone }()
 	backoff := 250 * time.Millisecond
 	for ctx.Err() == nil {
+		if err := c.enroll(ctx); err != nil {
+			log.Print("probe server announcement unavailable; retrying")
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case err := <-c.fatal:
+				timer.Stop()
+				return err
+			case <-timer.C:
+			}
+			if backoff < 8*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
 		dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
 		header := http.Header{}
 		req := &http.Request{Header: header}
-		req.SetBasicAuth(c.config.ID, c.config.Secret)
+		req.SetBasicAuth(c.identity.ID, c.identity.Secret)
 		conn, resp, err := dialer.DialContext(ctx, c.config.URL, header)
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
@@ -275,6 +331,7 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 				return
 			}
 			if e = c.handle(ctx, m); e != nil {
+				log.Printf("probe control %s for %s rejected: %v", m.Type, m.RunID, e)
 				readErr <- e
 				return
 			}
@@ -286,7 +343,10 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 	}
 	hello := protocol.Msg("hello")
 	hello.Driver = c.config.Driver
-	hello.ProbeVersion, hello.SDKVersion, hello.Platform = "0.7.0", sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
+	hello.HostID = c.host.Host.ID
+	hello.ServiceType = c.config.ServiceType
+	hello.ClientType = c.config.ClientType
+	hello.RuntimeVersion, hello.SDKVersion, hello.Platform = c.version(), sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
 	hello.Capacity = c.config.Capacity
 	hello.ResourceError = c.resourceStatus()
 	hello.StorageBytes = c.storageSize()
@@ -315,7 +375,10 @@ func (c *Client) session(ctx context.Context, conn *websocket.Conn) error {
 		case <-heartbeat.C:
 			m := protocol.Msg("heartbeat")
 			m.Driver = c.config.Driver
-			m.ProbeVersion, m.SDKVersion, m.Platform = "0.7.0", sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
+			m.HostID = c.host.Host.ID
+			m.ServiceType = c.config.ServiceType
+			m.ClientType = c.config.ClientType
+			m.RuntimeVersion, m.SDKVersion, m.Platform = c.version(), sdkVersion(c.config.Driver), runtime.GOOS+"/"+runtime.GOARCH
 			m.Capacity = c.config.Capacity
 			m.ResourceError = c.resourceStatus()
 			m.StorageBytes = c.storageSize()
@@ -485,7 +548,7 @@ func (c *Client) handle(ctx context.Context, m protocol.Message) error {
 	return nil
 }
 func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
-	if job.ProbeID != c.config.ID {
+	if job.RuntimeID != c.identity.ID || job.HostID != c.host.Host.ID || job.ServiceType != c.config.ServiceType || job.ClientType != c.config.ClientType {
 		return errors.New("assignment owner mismatch")
 	}
 	c.mu.Lock()
@@ -493,8 +556,8 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 	if c.stopping || ctx.Err() != nil {
 		return context.Canceled
 	}
-	if !protocol.ValidID(job.RunID) || job.ProbeID != c.config.ID || job.Target.Driver != c.config.Driver || (job.Role != "sender" && job.Role != "receiver" && job.Role != "pair") || job.Revision == "" || job.Deadline.Before(time.Now()) {
-		return errors.New("invalid mock assignment")
+	if !protocol.ValidID(job.RunID) || job.RuntimeID != c.identity.ID || job.Target.Driver != c.config.Driver || (job.Role != "sender" && job.Role != "receiver" && job.Role != "pair") || job.Revision == "" || job.Deadline.Before(time.Now()) {
+		return errors.New("invalid runtime assignment")
 	}
 	roles := []string{job.Role}
 	if job.Role == "pair" {
@@ -512,10 +575,13 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		return nil
 	}
 	if job.NativeCase != nil {
+		if job.EdgeFormat != protocol.ProbeEdgeAddressFormat {
+			return errors.New("unsupported Edge address format")
+		}
 		if err := job.NativeCase.Validate(); err != nil {
 			return err
 		}
-		if _, err := os.Stat(c.config.RouteCapturePath); err != nil {
+		if _, err := os.Stat(c.config.RouteCapturePath); c.config.Driver != "agora-web" && err != nil {
 			return errors.New("native route capture unavailable")
 		}
 	}
@@ -592,12 +658,12 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		cancel()
 		return e
 	}
-	if job.NativeCase != nil {
+	if job.NativeCase != nil && c.config.Driver != protocol.WebDriver {
 		environment := cmd.Env
 		if environment == nil {
 			environment = os.Environ()
 		}
-		for _, key := range []string{"LD_PRELOAD", "RTC_PROBE_ROUTE_LOG", "RTC_PROBE_ROUTE_ALLOW_ENDPOINTS"} {
+		for _, key := range []string{"LD_PRELOAD", "AVOPS_PROBE_ROUTE_LOG", "AVOPS_PROBE_ROUTE_ALLOW_ENDPOINTS"} {
 			filtered := environment[:0]
 			for _, value := range environment {
 				if !strings.HasPrefix(value, key+"=") {
@@ -606,7 +672,7 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 			}
 			environment = filtered
 		}
-		cmd.Env = append(environment, "LD_PRELOAD="+c.config.RouteCapturePath, "RTC_PROBE_ROUTE_LOG="+filepath.Join(dir, "route-capture.jsonl"), "RTC_PROBE_ROUTE_ALLOW_ENDPOINTS="+strings.Join(job.NativeCase.AllowedEndpoints(), ";"))
+		cmd.Env = append(environment, "LD_PRELOAD="+c.config.RouteCapturePath, "AVOPS_PROBE_ROUTE_LOG="+filepath.Join(dir, "route-capture.jsonl"), "AVOPS_PROBE_ROUTE_ALLOW_ENDPOINTS="+strings.Join(job.NativeCase.AllowedEndpoints(), ";"))
 	}
 	cmd.Stdout = &limitedWriter{w: stdout, remaining: 1 << 20}
 	cmd.Stderr = &limitedWriter{w: stderr, remaining: 1 << 20}
@@ -637,6 +703,11 @@ func (c *Client) prepare(ctx context.Context, job protocol.Job) error {
 		}
 		if cmd.Process != nil {
 			_ = cmd.Wait()
+		}
+		if c.config.CleanupWorker != nil {
+			if err := c.config.CleanupWorker(job); err != nil {
+				c.fail(err)
+			}
 		}
 		exit := processExit(cmd, startErr, workerCtx)
 		_ = durable.Write(filepath.Join(dir, "process.exit.json"), exit)
@@ -683,6 +754,13 @@ func (c *Client) recordWorkerMessage(job protocol.Job, m protocol.Message) error
 	case "run_ready":
 		r.Ready = true
 	case "telemetry_batch":
+		for i, event := range m.Events {
+			bound, err := bindWorkerEvent(r.Job, event)
+			if err != nil {
+				return err
+			}
+			m.Events[i] = bound
+		}
 		if r.WorkerID == "" && len(m.Events) > 0 {
 			r.WorkerID = m.Events[0].WorkerID
 		}
@@ -750,13 +828,13 @@ func (c *Client) UploadURL(id string) string {
 	} else {
 		u.Scheme = "http"
 	}
-	u.Path = "/api/v1/probe/uploads/" + id
+	u.Path = "/api/v1/probes/uploads/" + id
 	return u.String()
 }
 func (c *Client) safeText(b []byte) []byte {
 	text := string(b)
-	if c.config.Secret != "" {
-		text = strings.ReplaceAll(text, c.config.Secret, "[REDACTED]")
+	if c.identity.Secret != "" {
+		text = strings.ReplaceAll(text, c.identity.Secret, "[REDACTED]")
 	}
 	text = regexp.MustCompile(`00[67][A-Za-z0-9+/=]{40,}`).ReplaceAllString(text, "[REDACTED_TOKEN]")
 	return []byte(text)
@@ -765,6 +843,9 @@ func (c *Client) safeText(b []byte) []byte {
 func recordKey(run, role string) string               { return run + "--" + role }
 func (c *Client) endpointDir(run, role string) string { return filepath.Join(c.runDir(run), role) }
 func sdkVersion(driver string) string {
+	if driver == protocol.WebDriver {
+		return "Web-4.24.9/Chromium"
+	}
 	if driver == "agora" {
 		return "Go-2.6.6/native-4.6.31.135"
 	}
@@ -772,11 +853,21 @@ func sdkVersion(driver string) string {
 }
 
 func (c *Client) capabilities() []string {
-	out := []string{protocol.SharedServiceLogsCapability, "rtc_audio_v1", "rtc_video_v1", "retention_v1", "log_chunks_v1", "rtc_vos_list_v1"}
+	if c.config.Driver == protocol.WebDriver {
+		return []string{"native_web_duplex_v1", "native_web_interop_v1", "native_aut_web_interop_v1", protocol.ProbeEdgeAddressCapability, protocol.SharedServiceLogsCapability, protocol.WebMediaCapability, "rtc_audio_v1", "rtc_video_v1", "retention_v1", "log_chunks_v1"}
+	}
+	out := []string{"native_web_duplex_v1", "native_web_interop_v1", "native_aut_web_interop_v1", protocol.ProbeEdgeAddressCapability, protocol.SharedServiceLogsCapability, "rtc_audio_v1", "rtc_video_v1", "retention_v1", "log_chunks_v1", "rtc_vos_list_v1"}
 	if c.config.Driver == "agora" {
 		if info, err := os.Stat(c.config.RouteCapturePath); err == nil && info.Mode().IsRegular() {
 			out = append(out, "native_routes_v1")
 		}
 	}
 	return out
+}
+
+func (c *Client) version() string {
+	if c.config.RuntimeVersion != "" {
+		return c.config.RuntimeVersion
+	}
+	return protocol.ProductVersion
 }

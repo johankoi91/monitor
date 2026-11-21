@@ -15,7 +15,7 @@ func edgeFixture(t *testing.T) (*Hub, protocol.Task) {
 	}
 	h.config.Tasks[0] = task
 	h.config.Targets[0].RTC = cloneRTC(task.RTC)
-	h.sessions[task.ProbeID].Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "rtc_vos_list_v1"}
+	h.sessions[h.runtimeForTask(task)].Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "rtc_vos_list_v1"}
 	return h, task
 }
 func currentSweepChild(t *testing.T, h *Hub, parentID string) *Run {
@@ -53,8 +53,8 @@ func finishEdge(t *testing.T, h *Hub, child *Run, outcome string) {
 		m.Revision = child.Revision
 		m.Role = role
 		m.Result = &protocol.Result{ID: protocol.ID(), WorkerID: worker, Driver: "agora", Outcome: outcome, Reason: map[string]string{"SUCCESS": "MEDIA_VERIFIED", "FAILED": "VIDEO_RECEIVE_TIMEOUT", "CANCELLED": "CANCELLED"}[outcome], Evidence: e, Cleanup: "SUCCESS", TraceComplete: true, FinishedAt: time.Now().UTC()}
-		id := child.Endpoints[role].Job.ProbeID
-		if _, err := h.Receive(id, h.sessions[id], m); err != nil {
+		id := child.Endpoints[role].Job.RuntimeID
+		if _, err := receiveTest(h, id, h.sessions[id], m); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -77,7 +77,7 @@ func TestSweepRunsEveryPortAndCannotHideEarlierFailure(t *testing.T) {
 		if child.EdgeEndpoint != task.RTC.MediaEdges.Endpoints()[index] {
 			t.Fatal("ports out of order", child.EdgeEndpoint)
 		}
-		commands := h.Commands(task.ProbeID, h.sessions[task.ProbeID])
+		commands := h.Commands(h.runtimeForTask(task), h.sessions[h.runtimeForTask(task)])
 		prepared := 0
 		for _, m := range commands {
 			if m.Type == "prepare_run" {
@@ -178,12 +178,12 @@ func TestSweepRestartAndProbeDisableNeverResumeOldPorts(t *testing.T) {
 			finishEdge(t, h, first, "SUCCESS")
 			h.advanceSweeps(time.Now().UTC())
 			if mode == "restart" {
-				h, err = New(h.dir, h.config, nil)
+				h, err = newTestHub(h.dir, h.config, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
 			} else {
-				if err = h.EnableProbe(task.ProbeID, false); err != nil {
+				if err = h.EnableProbe(h.runtimeForTask(task), false); err != nil {
 					t.Fatal(err)
 				}
 			}

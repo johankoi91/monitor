@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/johankoi91/monitor/runtime/internal/testfixture"
-	"github.com/johankoi91/monitor/runtime/web"
+	"github.com/johankoi91/monitor/runtime/internal/webui"
 )
 
 func TestBrowserSelectionWorkflow(t *testing.T) {
@@ -25,7 +25,7 @@ func TestBrowserSelectionWorkflow(t *testing.T) {
 		names = append(names, "unused-"+strconv.Itoa(i))
 	}
 	connect(t, s, "rtc-a", names...)
-	assets, err := fs.Sub(web.Files, "static")
+	assets, err := fs.Sub(webui.Files, "static")
 	if err != nil {
 		t.Fatal(err)
 	}

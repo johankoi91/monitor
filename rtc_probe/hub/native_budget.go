@@ -11,8 +11,8 @@ func (h *Hub) validateNativeBudget(tasks []protocol.Task, targets []protocol.Tar
 	nativeProbe := map[string]bool{}
 	for _, task := range tasks {
 		for _, target := range targets {
-			if task.TargetID == target.ID && target.RTC != nil && target.RTC.NativeCoverage != nil && task.Enabled {
-				nativeProbe[task.ProbeID] = true
+			if task.TargetID == target.ID && target.RTC != nil && (target.RTC.NativeCoverage != nil || target.RTC.WebAccess != nil && target.RTC.WebAccess.Coverage != nil) && task.Enabled {
+				nativeProbe[h.runtimeForTask(task)] = true
 			}
 		}
 	}
@@ -22,7 +22,7 @@ func (h *Hub) validateNativeBudget(tasks []protocol.Task, targets []protocol.Tar
 	h.readNativeInventory(time.Now().UTC())
 	loads := map[string]float64{}
 	for _, task := range tasks {
-		if !task.Enabled || !nativeProbe[task.ProbeID] {
+		if !task.Enabled || !nativeProbe[h.runtimeForTask(task)] {
 			continue
 		}
 		var target protocol.Target
@@ -37,12 +37,16 @@ func (h *Hub) validateNativeBudget(tasks []protocol.Task, targets []protocol.Tar
 		if state := h.state.Native[task.ID]; state != nil {
 			prior = state.Expected
 		}
-		if target.RTC != nil && target.RTC.NativeCoverage != nil {
-			for _, phase := range nativePhases {
-				if phase == "CROSS" && !target.RTC.NativeCoverage.CrossEdge {
+		effective := task
+		if effective.RTC == nil {
+			effective.RTC = target.RTC
+		}
+		if coverageEnabled(effective) {
+			for _, phase := range taskPhases(task) {
+				if phase == "CROSS" && !coverageConfig(effective).CrossEdge {
 					continue
 				}
-				plan := BuildNativePlan(*target.RTC.NativeCoverage, h.nativeSnapshot, prior, phase, 0)
+				plan := buildCoveragePlan(effective, *coverageConfig(effective), h.nativeSnapshot, prior, phase, 0)
 				work := nativeBudget(task, len(plan.Cases)).Seconds()
 				workers := h.nativeWorkerLimit(task, len(plan.Members))
 				if workers > len(plan.Cases) {
@@ -56,7 +60,7 @@ func (h *Hub) validateNativeBudget(tasks []protocol.Task, targets []protocol.Tar
 				round := nativeBudget(task, (len(plan.Cases)+workers-1)/workers).Seconds()
 				demand += work / (round + phaseInterval(task, phase).Seconds())
 			}
-			limit := h.nativeWorkerLimit(task, len(BuildNativePlan(*target.RTC.NativeCoverage, h.nativeSnapshot, prior, "AP", 0).Members))
+			limit := h.nativeWorkerLimit(task, len(buildCoveragePlan(effective, *coverageConfig(effective), h.nativeSnapshot, prior, "AP", 0).Members))
 			if demand > float64(limit) {
 				return fmt.Errorf("Native 执行周期超出单任务预算（%.0f%%），请增大 AP 或轮巡间隔", demand*100)
 			}
@@ -64,7 +68,12 @@ func (h *Hub) validateNativeBudget(tasks []protocol.Task, targets []protocol.Tar
 			work := (time.Duration(task.TimeoutSeconds)*time.Second + protocol.CleanupGrace + protocol.ResultReportGrace).Seconds()
 			demand = work / float64(task.IntervalSeconds)
 		}
-		loads[task.ProbeID] += demand
+		loads[h.runtimeForTask(task)] += demand
+		if protocol.IsInteropClient(task.ClientType) {
+			web := task
+			web.ClientType = "web"
+			loads[h.runtimeForTask(web)] += demand
+		}
 	}
 	for probe, load := range loads {
 		capacity := 1
@@ -85,8 +94,17 @@ func (h *Hub) nativeWorkerLimit(task protocol.Task, members int) int {
 		members = 1
 	}
 	limit := 1
-	if session := h.sessions[task.ProbeID]; session != nil && session.Capacity > 0 {
+	if session := h.sessions[h.runtimeForTask(task)]; session != nil && session.Capacity > 0 {
 		limit = session.Capacity
+	}
+	if protocol.IsInteropClient(task.ClientType) {
+		web := task
+		web.ClientType = "web"
+		if session := h.sessions[h.runtimeForTask(web)]; session == nil {
+			limit = 1
+		} else if session.Capacity < limit {
+			limit = session.Capacity
+		}
 	}
 	if members < limit {
 		limit = members

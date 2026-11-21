@@ -59,6 +59,51 @@ func TestNormalSnapshotAcceptanceAndDeduplication(t *testing.T) {
 	}
 }
 
+func TestRTCNotificationsPreserveAttributionAndRejectMismatches(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openStore(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := handler(s, "receiver", "view-secret", "webhook-secret")
+	for category, status := range map[string]string{"RTC_ABNORMAL": "UNHEALTHY", "RTC_RECOVERED": "HEALTHY", "RTC_UNKNOWN": "UNKNOWN"} {
+		e := sampleEvent(category)
+		e.Type, e.Category, e.CurrentStatus = "RTC_BUSINESS_STATUS_CHANGED", category, status
+		e.Layer, e.TaskID, e.TargetID, e.RunID, e.ConfigRevision, e.Path = "BLACKBOX", "task", "target", "run", "revision", "server / rtc / interop → target"
+		e.Node = ""
+		body, _ := json.Marshal(e)
+		for attempt := 0; attempt < 2; attempt++ {
+			if w := request(h, body, "webhook-secret"); w.Code != 200 {
+				t.Fatalf("RTC event rejected: %d %s", w.Code, w.Body.String())
+			}
+		}
+		e.CurrentStatus = "DEGRADED"
+		body, _ = json.Marshal(e)
+		if w := request(h, body, "webhook-secret"); w.Code != 400 {
+			t.Fatal("mismatched RTC status accepted")
+		}
+		e.CurrentStatus, e.TaskID = status, ""
+		body, _ = json.Marshal(e)
+		if w := request(h, body, "webhook-secret"); w.Code != 400 {
+			t.Fatal("unattributed RTC event accepted")
+		}
+	}
+	s.file.Close()
+	s, err = openStore(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.file.Close()
+	if len(s.records) != 3 {
+		t.Fatal("RTC events lost or duplicated during replay")
+	}
+	for _, r := range s.records {
+		if r.Event.TaskID != "task" || r.Event.Layer != "BLACKBOX" || r.Event.Path == "" {
+			t.Fatal("RTC attribution lost")
+		}
+	}
+}
+
 func TestAuthenticationAndPayloadValidation(t *testing.T) {
 	s, err := openStore(t.TempDir(), 1<<20)
 	if err != nil {

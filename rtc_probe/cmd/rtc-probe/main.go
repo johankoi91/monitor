@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	"github.com/johankoi91/monitor/rtc-probe/probe"
@@ -34,25 +33,16 @@ func main() {
 	if runtimeDriver == "unavailable" {
 		log.Fatal("build the Linux SDK probe with -tags agora")
 	}
-	capacity := 1
-	autoCapacity := os.Getenv("RTC_PROBE_CAPACITY") == "auto"
-	if text := os.Getenv("RTC_PROBE_CAPACITY"); text != "" && !autoCapacity {
-		v, e := strconv.Atoi(text)
-		if e != nil {
-			log.Fatal("invalid capacity")
-		}
-		capacity = v
-	}
-	dir := os.Getenv("RTC_PROBE_DATA_DIR")
-	if dir == "" {
-		dir = "data/rtc-probe"
-	}
-	c, e := probe.New(probe.Config{Driver: runtimeDriver, URL: os.Getenv("RTC_PROBE_CENTER_URL"), ID: os.Getenv("RTC_PROBE_ID"), Secret: os.Getenv("RTC_PROBE_SECRET"), DataDir: dir, Capacity: capacity, AutoCapacity: autoCapacity, AllowPlaintextLoopback: os.Getenv("RTC_PROBE_DEV_HTTP") == "1"})
+	cfg, e := probe.EnvironmentConfig(runtimeDriver)
 	if e != nil {
 		log.Fatal(e)
 	}
-	log.Print("RTC probe starting: driver=", runtimeDriver)
+	c, e := probe.New(cfg)
+	if e != nil {
+		log.Fatal(e)
+	}
+	log.Print("RTC runtime starting: driver=", runtimeDriver)
 	if e = c.Run(ctx); e != nil {
-		log.Fatal("RTC probe stopped: ", e)
+		log.Fatal("RTC runtime stopped: ", e)
 	}
 }

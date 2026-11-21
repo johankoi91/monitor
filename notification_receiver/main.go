@@ -30,6 +30,12 @@ var errCapacity = errors.New("receiver storage capacity reached")
 var errUnavailable = errors.New("receiver storage unavailable")
 
 type event struct {
+	Layer          string     `json:"evidence_layer,omitempty"`
+	TaskID         string     `json:"task_id,omitempty"`
+	TargetID       string     `json:"target_id,omitempty"`
+	RunID          string     `json:"run_id,omitempty"`
+	ConfigRevision string     `json:"config_revision,omitempty"`
+	Path           string     `json:"path,omitempty"`
 	Category       string     `json:"event_category,omitempty"`
 	ID             string     `json:"event_id"`
 	Type           string     `json:"event_type"`
@@ -146,11 +152,30 @@ func (e event) validate() error {
 			return errors.New("required identifier missing or too long")
 		}
 	}
-	if e.Category != "" && e.Category != "CONTAINER_ABNORMAL" && e.Category != "COLLECTION_ABNORMAL" && e.Category != "RECOVERED" && e.Category != "NORMAL" {
+	rtcCategory := e.Category == "RTC_ABNORMAL" || e.Category == "RTC_RECOVERED" || e.Category == "RTC_UNKNOWN"
+	rtcEvent := e.Type == "RTC_BUSINESS_STATUS_CHANGED"
+	if rtcCategory != rtcEvent {
+		return errors.New("RTC event type and category must agree")
+	}
+	if !rtcCategory && e.Category != "" && e.Category != "CONTAINER_ABNORMAL" && e.Category != "COLLECTION_ABNORMAL" && e.Category != "RECOVERED" && e.Category != "NORMAL" {
 		return errors.New("invalid event category")
 	}
-	if (e.Type != "STATUS_CHANGED" && e.Type != "STATUS_SNAPSHOT" && e.Type != "WEBHOOK_TEST") || e.Product != "RTC" || e.OccurredAt.IsZero() || e.Stale == nil {
+	if (e.Type != "STATUS_CHANGED" && e.Type != "STATUS_SNAPSHOT" && e.Type != "WEBHOOK_TEST" && !rtcEvent) || e.Product != "RTC" || e.OccurredAt.IsZero() || e.Stale == nil {
 		return errors.New("invalid event type, product, timestamp or stale flag")
+	}
+	if rtcEvent {
+		for _, field := range []string{e.TaskID, e.TargetID, e.ConfigRevision} {
+			if strings.TrimSpace(field) == "" || len(field) > 256 {
+				return errors.New("RTC attribution missing or too long")
+			}
+		}
+		if e.Layer != "BLACKBOX" || len(e.RunID) > 256 || len(e.Path) > 2048 {
+			return errors.New("invalid RTC evidence context")
+		}
+		expectedStatus := map[string]string{"RTC_ABNORMAL": "UNHEALTHY", "RTC_RECOVERED": "HEALTHY", "RTC_UNKNOWN": "UNKNOWN"}[e.Category]
+		if e.CurrentStatus != expectedStatus {
+			return errors.New("RTC category does not match current status")
+		}
 	}
 	if len(e.Node) > 512 || len(e.Reason) > 4096 {
 		return errors.New("node ID or reason too long")
@@ -337,7 +362,7 @@ func handler(s *store, id, secret string, signingSecrets ...string) http.Handler
 			if r.URL.Path == "/health/ready" && !ready {
 				status = 503
 			}
-			jsonResponse(w, status, map[string]any{"ready": ready, "persisted_count": count, "version": "1.0.0"})
+			jsonResponse(w, status, map[string]any{"ready": ready, "persisted_count": count, "version": "V1.0"})
 		})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -388,8 +413,8 @@ func sourceGuard(next http.Handler, configured string) (http.Handler, error) {
 func main() {
 	id, secret := os.Getenv("AVOPS_RECEIVER_ID"), os.Getenv("AVOPS_RECEIVER_SECRET")
 	webhookSecret := os.Getenv("AVOPS_WEBHOOK_SECRET")
-	if webhookSecret == "" {
-		webhookSecret = secret
+	if len(webhookSecret) < 24 || webhookSecret == secret {
+		log.Fatal("independent webhook signing credential required")
 	}
 	cert, key := os.Getenv("AVOPS_RECEIVER_TLS_CERT"), os.Getenv("AVOPS_RECEIVER_TLS_KEY")
 	if id == "" || secret == "" || strings.Contains(id, ":") || cert == "" || key == "" {

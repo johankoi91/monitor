@@ -62,7 +62,7 @@ func (h *Hub) applyHealth(s *state, run *Run, now time.Time) {
 		h.recordEdgeResult(s, run, now)
 		return
 	}
-	if run.Driver != "agora" {
+	if !protocol.RealDriver(run.Driver) {
 		return
 	}
 	task, ok := h.task(run.TaskID)
@@ -131,7 +131,7 @@ func (h *Hub) effectiveHealth(t protocol.Task, now time.Time) TaskHealth {
 	if !ok || v.Revision != revision(t, h.target(t.TargetID)) {
 		v = h.newHealth(t, now, "WAITING_FIRST_RESULT")
 	}
-	if nativeEnabled(t) {
+	if coverageEnabled(t) {
 		v = h.nativeHealth(t, now)
 	}
 	v.Enabled = h.enabled(t)
@@ -144,25 +144,61 @@ func (h *Hub) effectiveHealth(t protocol.Task, now time.Time) TaskHealth {
 		return v
 	}
 	reason := ""
-	session := h.sessions[t.ProbeID]
+	driver := protocol.TaskDriver(t, h.target(t.TargetID))
+	session := h.sessions[h.runtimeForTask(t)]
 	if !h.storageOK {
 		reason = "STORAGE_UNAVAILABLE"
-	} else if h.state.DisabledProbes[t.ProbeID] {
+	} else if h.runtimeDisabled(h.runtimeForTask(t)) {
 		reason = "PROBE_DISABLED"
-	} else if session != nil && session.Driver == "agora" && (!supportsNativeMedia(session) || t.RTC != nil && t.RTC.MediaEdges != nil && !supportsEdgeRouting(session)) {
+	} else if session != nil && protocol.RealDriver(session.Driver) && (!supportsTaskMedia(session, driver) || t.RTC != nil && t.RTC.MediaEdges != nil && !supportsEdgeRouting(session)) {
 		reason = "PROBE_CAPABILITY_MISMATCH"
 	} else if session != nil && session.ResourceError != "" {
 		reason = "PROBE_STORAGE_EXHAUSTED"
-	} else if session == nil || session.Driver != "agora" || now.Sub(session.Seen) > 60*time.Second {
+	} else if session == nil || session.Driver != driver || now.Sub(session.Seen) > 60*time.Second {
 		reason = "PROBE_OFFLINE"
-		if h.state.DisabledProbes[t.ProbeID] {
+		if h.runtimeDisabled(h.runtimeForTask(t)) {
 			reason = "PROBE_DISABLED"
 		}
-	} else if !nativeEnabled(t) && v.LastResultAt != nil && now.Sub(*v.LastResultAt) > taskFreshness(t) {
+	} else if !coverageEnabled(t) && v.LastResultAt != nil && now.Sub(*v.LastResultAt) > taskFreshness(t) {
 		reason = "RESULT_EXPIRED"
 	}
+	if reason == "" && protocol.IsInteropClient(t.ClientType) {
+		for _, client := range []string{"native", "web"} {
+			copy := t
+			copy.ClientType = client
+			id := h.runtimeForTask(copy)
+			peer := h.sessions[id]
+			if h.runtimeDisabled(id) {
+				reason = "PROBE_DISABLED"
+				break
+			}
+			if peer == nil || now.Sub(peer.Seen) > 60*time.Second {
+				reason = "PROBE_OFFLINE"
+				break
+			}
+			if peer.ResourceError != "" {
+				reason = "PROBE_STORAGE_EXHAUSTED"
+				break
+			}
+			for _, required := range []string{"native_web_interop_v1", "native_aut_web_interop_v1", "native_web_duplex_v1"} {
+				capable := false
+				for _, cap := range peer.Capabilities {
+					if cap == required {
+						capable = true
+					}
+				}
+				if !capable {
+					reason = "PROBE_CAPABILITY_MISMATCH"
+					break
+				}
+			}
+			if reason != "" {
+				break
+			}
+		}
+	}
 	if reason != "" {
-		if nativeEnabled(t) && v.State == "UNHEALTHY" {
+		if coverageEnabled(t) && v.State == "UNHEALTHY" {
 			v.InfrastructureReason = reason
 			return v
 		}
@@ -220,7 +256,7 @@ func (h *Hub) BusinessFacts() []BusinessFact {
 }
 
 func taskPath(t protocol.Task) string {
-	path := t.ProbeID + " → " + t.TargetID
+	path := t.HostID + " / " + t.ServiceType + " / " + t.ClientType + " → " + t.TargetID
 	if t.RTC != nil && t.RTC.MediaEdges != nil {
 		path += " [" + t.RTC.MediaEdges.Host + ":" + strconv.Itoa(t.RTC.MediaEdges.StartPort) + "-" + strconv.Itoa(t.RTC.MediaEdges.EndPort) + "]"
 	}

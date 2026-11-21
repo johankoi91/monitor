@@ -13,7 +13,7 @@ func TestNativeCredentialsStayAtCenterAndPairHasOneAssignment(t *testing.T) {
 	c := testConfig()
 	c.Targets = nil
 	c.Tasks = nil
-	h, err := New(t.TempDir(), c, nil)
+	h, err := newTestHub(t.TempDir(), c, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,11 +21,11 @@ func TestNativeCredentialsStayAtCenterAndPairHasOneAssignment(t *testing.T) {
 	hello := protocol.Msg("hello")
 	hello.Driver = "agora"
 	hello.Capacity = 1
-	if _, err = h.Receive("probe-a", s, hello); err != nil {
+	if _, err = receiveTest(h, "probe-a", s, hello); err != nil {
 		t.Fatal(err)
 	}
 	cert := strings.Repeat("c", 32)
-	plan := Plan{Targets: []protocol.Target{{ID: "native", Name: "真实 RTC", Driver: "agora"}}, Tasks: []protocol.Task{{ID: "native-av", TargetID: "native", ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30, RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.AppCredentials{AppCertificate: cert}}}}
+	plan := Plan{Targets: []protocol.Target{{ID: "native", Name: "真实 RTC", Driver: "agora", RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}, Credentials: &protocol.AppCredentials{AppCertificate: cert}}}, Tasks: []protocol.Task{protocol.Task{ID: "native-av", TargetID: "native", HostID: "host-probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30, ServiceType: "rtc", ClientType: "native"}}}
 	if err = h.UpdatePlan(planRevision(h.planLocked()), plan); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestNativeCredentialsStayAtCenterAndPairHasOneAssignment(t *testing.T) {
 	}
 }
 func TestAudioSuccessDoesNotMaskMissingVideo(t *testing.T) {
-	r := &Run{Driver: "agora", Endpoints: map[string]*Endpoint{"sender": {Job: protocol.Job{RTC: &protocol.RTCParameters{Template: "audio_video", MinAudioMS: 1000, MinVideoFrames: 5}}}}}
+	r := &Run{Driver: "agora", Endpoints: map[string]*Endpoint{"receiver": {Job: protocol.Job{Target: protocol.Target{Driver: "agora"}}}, "sender": {Job: protocol.Job{Target: protocol.Target{Driver: "agora"}, RTC: &protocol.RTCParameters{Template: "audio_video", MinAudioMS: 1000, MinVideoFrames: 5}}}}}
 	a := &protocol.Result{Evidence: protocol.Evidence{Connected: true, Published: true, SentFrames: 10, VideoPublished: true, SentVideoFrames: 10}}
 	b := &protocol.Result{Evidence: protocol.Evidence{Connected: true, Subscribed: true, MediaDurationMS: 1000, VideoSubscribed: true}}
 	if verifiedEvidence(r, a, b) {
@@ -71,7 +71,7 @@ func TestAudioSuccessDoesNotMaskMissingVideo(t *testing.T) {
 
 func TestNativeCapabilityMismatchPausesTask(t *testing.T) {
 	h, task := healthFixture(t)
-	session := h.sessions[task.ProbeID]
+	session := h.sessions[h.runtimeForTask(task)]
 	session.Capabilities = []string{"rtc_audio_v1", "retention_v1"}
 	if _, err := h.Start(task.ID); err == nil {
 		t.Fatal("audio-only probe received combined RTC task")

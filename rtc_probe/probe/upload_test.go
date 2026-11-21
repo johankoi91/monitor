@@ -23,8 +23,8 @@ import (
 func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 	dir := t.TempDir()
 	secret := strings.Repeat("p", 32)
-	cfg := hub.Config{Probes: []hub.ProbeConfig{{ID: "a", Secret: secret, Location: "A"}, {ID: "b", Secret: strings.Repeat("q", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "target", Name: "protocol fixture", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "task", TargetID: "target", ProbeID: "a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30}}}
-	h, err := hub.New(dir, cfg, nil)
+	cfg := hub.Config{Targets: []protocol.Target{{ID: "target", Name: "protocol fixture", Driver: "mock"}}, Tasks: []protocol.Task{protocol.Task{ID: "task", TargetID: "target", HostID: "host-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30, ServiceType: "rtc", ClientType: "native"}}}
+	h, err := newUploadHub(t, dir, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +32,9 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 		session := h.Session(id)
 		m := protocol.Msg("hello")
 		m.Driver = "mock"
+		m.HostID = "host-" + id
+		m.ServiceType = "rtc"
+		m.ClientType = "native"
 		m.Capacity = 1
 		if _, err = h.Receive(id, session, m); err != nil {
 			t.Fatal(err)
@@ -83,7 +86,7 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 		h.ServeProbe(w, r)
 	}))
 	defer server.Close()
-	c := &Client{config: Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probe/connect", ID: "a", Secret: secret}}
+	c := &Client{config: Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probes/connect"}, identity: RuntimeIdentity{ID: "a", Secret: secret}}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err = c.uploadBundle(ctx, server.Client(), request, archive.Bytes()); err == nil {
@@ -93,7 +96,7 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 	bundleDigest := hex.EncodeToString(sum[:])
 	sendPart := func(user, secret, index string, body []byte, digest string) int {
 		t.Helper()
-		r, _ := http.NewRequest("PUT", server.URL+"/api/v1/probe/uploads/"+request.ID+"/parts/"+index, bytes.NewReader(body))
+		r, _ := http.NewRequest("PUT", server.URL+"/api/v1/probes/uploads/"+request.ID+"/parts/"+index, bytes.NewReader(body))
 		r.SetBasicAuth(user, secret)
 		r.Header.Set("X-Bundle-SHA256", bundleDigest)
 		r.Header.Set("X-Bundle-Bytes", strconv.Itoa(archive.Len()))
@@ -131,7 +134,7 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 		t.Fatal("conflicting chunk accepted", code)
 	}
 	mu.Lock()
-	h, err = hub.New(dir, cfg, nil)
+	h, err = newUploadHub(t, dir, cfg)
 	mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -140,7 +143,7 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	mu.Lock()
-	first := counts["PUT /api/v1/probe/uploads/"+request.ID+"/parts/0"]
+	first := counts["PUT /api/v1/probes/uploads/"+request.ID+"/parts/0"]
 	mu.Unlock()
 	if first != 1 {
 		t.Fatal("confirmed first chunk retransmitted", first)
@@ -156,7 +159,7 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 	if run.Logs[request.ID].Status != "AVAILABLE" {
 		t.Fatal("assembled bundle not published")
 	}
-	response, err := http.Get(server.URL + "/api/v1/probe/uploads/" + request.ID + "/parts")
+	response, err := http.Get(server.URL + "/api/v1/probes/uploads/" + request.ID + "/parts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,27 +169,53 @@ func TestChunksResumeAfterFailureAndCenterRestart(t *testing.T) {
 		t.Fatal("unauthenticated chunks accepted")
 	}
 }
-func TestChunkClientFallsBackToExistingCenter(t *testing.T) {
-	payload := []byte("immutable diagnostic zip fixture")
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/parts") {
-			w.WriteHeader(404)
-			return
-		}
-		if r.Method != "PUT" {
-			t.Error("unexpected method")
-		}
-		b, _ := io.ReadAll(r.Body)
-		called = bytes.Equal(b, payload)
-		w.WriteHeader(201)
-	}))
-	defer server.Close()
-	c := &Client{config: Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probe/connect", ID: "a", Secret: "fixture-secret"}}
-	if err := c.uploadBundle(context.Background(), server.Client(), protocol.LogRequest{ID: "request"}, payload); err != nil {
-		t.Fatal(err)
+func TestChunkClientRejectsUnsupportedUploadProtocol(t *testing.T) {
+	for _, status := range []int{404, 405} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.Method != "GET" || !strings.HasSuffix(r.URL.Path, "/parts") {
+					t.Error("unexpected compatibility upload")
+				}
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			c := &Client{config: Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probes/connect"}, identity: RuntimeIdentity{ID: "runtime-a", Secret: "fixture-secret"}}
+			if err := c.uploadBundle(context.Background(), server.Client(), protocol.LogRequest{ID: "request"}, []byte("fixture")); err == nil {
+				t.Fatal("unsupported upload protocol accepted")
+			}
+			if calls != 1 {
+				t.Fatal("client attempted an old upload endpoint")
+			}
+		})
 	}
-	if !called {
-		t.Fatal("legacy upload lost")
+}
+
+func newUploadHub(t *testing.T, dir string, cfg hub.Config) (*hub.Hub, error) {
+	t.Helper()
+	h, err := hub.New(dir, hub.Config{}, nil)
+	if err != nil {
+		return nil, err
 	}
+	for _, id := range []string{"a", "b"} {
+		secret := strings.Repeat("p", 32)
+		if id == "b" {
+			secret = strings.Repeat("q", 32)
+		}
+		if err = h.EnrollProbe(protocol.ProbeEnrollment{Host: protocol.ProbeHostInfo{ID: "host-" + id, Name: "fixture-" + id, Address: "127.0.0.1"}, HostSecret: strings.Repeat("server-"+id, 4), RuntimeID: id, RuntimeSecret: secret, ServiceType: "rtc", ClientType: "native"}, "127.0.0.1"); err != nil {
+			return nil, err
+		}
+	}
+	if len(cfg.Tasks) > 0 {
+		var value struct {
+			Revision string `json:"config_revision"`
+		}
+		b, _ := json.Marshal(h.Snapshot())
+		json.Unmarshal(b, &value)
+		if err = h.UpdatePlan(value.Revision, hub.Plan{Targets: cfg.Targets, Tasks: cfg.Tasks}); err != nil {
+			return nil, err
+		}
+	}
+	return h, nil
 }

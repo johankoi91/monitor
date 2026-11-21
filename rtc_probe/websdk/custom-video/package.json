@@ -1,0 +1,16 @@
+{
+  "name": "rtc-custom-video-probe",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "V1.0 browser RTC worker runtime",
+  "scripts": {
+    "test": "node --test contract.test.mjs remote-stats.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.56.1"
+  }
+}

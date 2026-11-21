@@ -16,7 +16,7 @@ func nativeHubFixture(t *testing.T) (*Hub, protocol.Task) {
 	if err := h.UpdatePlan(planRevision(h.planLocked()), plan); err != nil {
 		t.Fatal(err)
 	}
-	h.sessions["probe-a"].Capabilities = []string{"rtc_audio_v1", "rtc_video_v1", "native_routes_v1"}
+	h.sessions["probe-a"].Capabilities = []string{protocol.ProbeEdgeAddressCapability, "rtc_audio_v1", "rtc_video_v1", "native_routes_v1"}
 	task, _ := h.task("native-task")
 	return h, task
 }
@@ -40,7 +40,7 @@ func finishNativeChild(t *testing.T, h *Hub, child *Run, status string) {
 		m.Revision = child.Revision
 		m.Role = role
 		m.Result = &protocol.Result{ID: protocol.ID(), WorkerID: protocol.ID(), Driver: "agora", Outcome: status, Reason: status, Cleanup: "SUCCESS", FinishedAt: time.Now().UTC(), Evidence: evidence, TraceComplete: true, Route: &protocol.RouteEvidence{Guarded: true, Status: "VERIFIED", Scope: "test_fixture"}}
-		if _, err := h.Receive("probe-a", h.sessions["probe-a"], m); err != nil {
+		if _, err := receiveTest(h, "probe-a", h.sessions["probe-a"], m); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -178,7 +178,7 @@ func TestNativeFailureRetainsEvidenceWhenProbeOffline(t *testing.T) {
 	p.Health.State = "UNHEALTHY"
 	p.Health.LastRunID = "failed-direct"
 	p.Health.LastResultAt = &now
-	h.sessions[task.ProbeID].Seen = now.Add(-time.Minute * 2)
+	h.sessions[h.runtimeForTask(task)].Seen = now.Add(-time.Minute * 2)
 	value := h.effectiveHealth(task, now)
 	if value.State != "UNHEALTHY" || value.LastRunID != "failed-direct" || value.InfrastructureReason != "PROBE_OFFLINE" {
 		t.Fatal("probe offline masked fresh failure", value)
@@ -188,7 +188,7 @@ func TestNativeFailureRetainsEvidenceWhenProbeOffline(t *testing.T) {
 func TestNativeParallelismFollowsInventoryAndResourceCeilings(t *testing.T) {
 	h, task := nativeHubFixture(t)
 	h.config.MaxConcurrentRuns = 32
-	h.sessions[task.ProbeID].Capacity = 64
+	h.sessions[h.runtimeForTask(task)].Capacity = 64
 	if _, err := h.Start(task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -211,11 +211,11 @@ func TestNativeParallelismFollowsInventoryAndResourceCeilings(t *testing.T) {
 	if got := h.nativeWorkerLimit(task, 3); got != 3 {
 		t.Fatal(got)
 	}
-	h.sessions[task.ProbeID].Capacity = 4
+	h.sessions[h.runtimeForTask(task)].Capacity = 4
 	if got := h.nativeWorkerLimit(task, 9); got != 4 {
 		t.Fatal("probe ceiling ignored", got)
 	}
-	h.sessions[task.ProbeID].Capacity = 64
+	h.sessions[h.runtimeForTask(task)].Capacity = 64
 	h.config.MaxConcurrentRuns = 3
 	if got := h.nativeWorkerLimit(task, 9); got != 3 {
 		t.Fatal("global ceiling ignored", got)
@@ -244,7 +244,7 @@ func TestNativeParallelismFollowsInventoryAndResourceCeilings(t *testing.T) {
 func TestNativeParallelFailureDoesNotStopOtherCases(t *testing.T) {
 	h, task := nativeHubFixture(t)
 	h.config.MaxConcurrentRuns = 32
-	h.sessions[task.ProbeID].Capacity = 64
+	h.sessions[h.runtimeForTask(task)].Capacity = 64
 	if _, err := h.Start(task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func TestNativeParallelFailureDoesNotStopOtherCases(t *testing.T) {
 
 func TestSharedServiceCollectRequestsOneBundleAndDeduplicatesRequests(t *testing.T) {
 	h, task := nativeHubFixture(t)
-	h.sessions[task.ProbeID].Capabilities = append(h.sessions[task.ProbeID].Capabilities, protocol.SharedServiceLogsCapability)
+	h.sessions[h.runtimeForTask(task)].Capabilities = append(h.sessions[h.runtimeForTask(task)].Capabilities, protocol.SharedServiceLogsCapability)
 	if _, err := h.Start(task.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -318,5 +318,107 @@ func TestSharedServiceCollectRequestsOneBundleAndDeduplicatesRequests(t *testing
 	finishNativeChild(t, h, current, "SUCCESS")
 	if len(h.state.Runs[child.ID].Logs) != 1 {
 		t.Fatal("completion duplicated a pending shared request")
+	}
+}
+
+func TestExecutionJobsKeepInventoryOnlyAtCenter(t *testing.T) {
+	h, task := nativeHubFixture(t)
+	if _, err := h.Start(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	h.advanceNative(time.Now().UTC())
+	for _, run := range h.state.Runs {
+		if run.NativeCase == nil {
+			continue
+		}
+		if len(run.NativeCase.Candidates) == 0 || run.NativeCase.Candidates[0].AgentID == "" {
+			t.Fatal("center lost the source identity")
+		}
+		for _, ep := range run.Endpoints {
+			job := ep.Job
+			if job.EdgeFormat != protocol.ProbeEdgeAddressFormat || job.NativeCase == nil {
+				t.Fatal("missing compact execution format")
+			}
+			if job.RTC.NativeCoverage != nil || job.Target.RTC.NativeCoverage != nil {
+				t.Fatal("inventory configuration leaked into job")
+			}
+			for _, edge := range append([]protocol.NativeEdge{job.NativeCase.Sender, job.NativeCase.Receiver}, job.NativeCase.Candidates...) {
+				if edge.AgentID != "" || edge.ContainerName != "" || edge.ContainerID != "" || edge.SnapshotID != "" || edge.Stale {
+					t.Fatal("identity leaked into execution Edge", edge)
+				}
+			}
+		}
+		return
+	}
+	t.Fatal("no child execution")
+}
+
+func TestTargetAPIngressComesFromDiscovery(t *testing.T) {
+	h, task := nativeHubFixture(t)
+	plan := h.planLocked()
+	target := &plan.Targets[0]
+	target.RTC.NativeCoverage.Groups[0].EntryPoints = []string{"203.0.113.55"}
+	if err := h.UpdatePlan(planRevision(h.planLocked()), plan); err != nil {
+		t.Fatal(err)
+	}
+	saved := h.target(task.TargetID).RTC.NativeCoverage.Groups[0]
+	if saved.AgentID != "agent" || len(saved.EntryPoints) != 1 || saved.EntryPoints[0] != "111.230.192.59" {
+		t.Fatal("client-supplied AP address overrode discovery", saved)
+	}
+	plan = h.planLocked()
+	plan.Targets[0].RTC.NativeCoverage.Groups[0].AgentID = "unknown-ap"
+	if err := h.UpdatePlan(planRevision(h.planLocked()), plan); err == nil {
+		t.Fatal("non-AP machine accepted")
+	}
+}
+
+func TestTransientBudgetDoesNotOverwriteVerifiedPhaseEvidence(t *testing.T) {
+	h, task := nativeHubFixture(t)
+	now := time.Now().UTC()
+	h.config.Tasks[0].IntervalSeconds = 180
+	h.config.Tasks[0].SweepIntervalSeconds = 300
+	h.config.Tasks[0].CrossIntervalSeconds = 600
+	h.config.Tasks[0].TimeoutSeconds = 90
+	task, _ = h.task(task.ID)
+	h.sessions[h.runtimeForTask(task)].Capacity = 8
+	_, err := h.Start(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range h.state.Runs {
+		if !terminal(run.Status) {
+			run.Status = "CANCELLED"
+			run.FinishedAt = &now
+		}
+	}
+	state := h.state.Native[task.ID]
+	for phase, p := range state.Phases {
+		p.Health = h.newHealth(task, now, "MEDIA_VERIFIED")
+		p.Health.State = "HEALTHY"
+		p.Health.LastResultAt = &now
+		p.Health.LastSuccessAt = &now
+		p.Health.LastRunID = "verified-" + phase
+		p.NextAt = now.Add(time.Hour)
+	}
+	// A temporary low capacity blocks scheduling but is not a new media result.
+	h.sessions[h.runtimeForTask(task)].Capacity = 1
+	h.tickNative(now)
+	if h.state.Native[task.ID].SchedulingError == "" || h.nativeHealth(task, now).State != "UNKNOWN" {
+		t.Fatal("insufficient budget was not visible")
+	}
+	for _, p := range h.state.Native[task.ID].Phases {
+		if p.Health.State != "HEALTHY" || !p.Health.LastResultAt.Equal(now) {
+			t.Fatal("budget error overwrote media evidence")
+		}
+	}
+	h.sessions[h.runtimeForTask(task)].Capacity = 8
+	h.tickNative(now.Add(time.Second))
+	health := h.nativeHealth(task, now.Add(time.Second))
+	if health.State != "HEALTHY" || !health.LastResultAt.Equal(now) {
+		t.Fatal("recovered budget did not restore unmodified fresh evidence", health)
+	}
+	later := now.Add(4 * time.Hour)
+	if h.nativeHealth(task, later).State != "UNKNOWN" {
+		t.Fatal("budget recovery refreshed expired media evidence")
 	}
 }

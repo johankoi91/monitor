@@ -17,6 +17,10 @@ type NativeEdge struct {
 	Stale         bool   `json:"stale,omitempty"`
 }
 type NativeCase struct {
+	Duplex          bool         `json:"duplex,omitempty"`
+	SenderClient    string       `json:"sender_client,omitempty"`
+	ReceiverClient  string       `json:"receiver_client,omitempty"`
+	ClientType      string       `json:"client_type,omitempty"`
 	APClientIPs     []string     `json:"ap_client_ips,omitempty"`
 	ExecutionModel  string       `json:"execution_model,omitempty"`
 	Unavailable     string       `json:"unavailable,omitempty"`
@@ -32,7 +36,7 @@ type NativeCase struct {
 }
 
 func (e NativeEdge) Validate() error {
-	if e.Transport != "udp" && e.Transport != "aut" {
+	if e.Transport != "udp" && e.Transport != "aut" && e.Transport != "web" {
 		return errors.New("native transport must be udp or aut")
 	}
 	if e.Endpoint != "" {
@@ -48,6 +52,24 @@ func (c NativeCase) Validate() error {
 	if c.Kind != "AP_JOIN" && c.Kind != "DIRECT_JOIN" && c.Kind != "CROSS_EDGE_MEDIA" {
 		return errors.New("invalid native case kind")
 	}
+	if IsInteropClient(c.ClientType) {
+		nativeTransport := InteropNativeTransport(c.ClientType)
+		if c.Kind != "AP_JOIN" || !((c.SenderClient == "native" && c.ReceiverClient == "web" && c.Sender.Transport == nativeTransport && c.Receiver.Transport == "web") || (c.SenderClient == "web" && c.ReceiverClient == "native" && c.Sender.Transport == "web" && c.Receiver.Transport == nativeTransport)) {
+			return errors.New("interop requires AP-assigned native/web endpoints")
+		}
+		if c.Duplex && (c.SenderClient != "native" || c.ReceiverClient != "web") {
+			return errors.New("duplex interop requires Native and Web endpoint identities")
+		}
+	} else if c.ClientType == "web" {
+		if c.Sender.Transport != "web" || c.Receiver.Transport != "web" {
+			return errors.New("Web case requires Web routes")
+		}
+	} else if c.Sender.Transport == "web" || c.Receiver.Transport == "web" {
+		return errors.New("Native case requires UDP/AUT routes")
+	}
+	if c.Duplex && !IsInteropClient(c.ClientType) {
+		return errors.New("duplex requires an interop case")
+	}
 	if c.Sender.Validate() != nil || c.Receiver.Validate() != nil {
 		return errors.New("invalid native role route")
 	}
@@ -58,7 +80,7 @@ func (c NativeCase) Validate() error {
 	} else if c.Sender.Endpoint == "" || c.Receiver.Endpoint == "" {
 		return errors.New("direct case requires both edge routes")
 	}
-	if c.ParameterScope != "" && c.ParameterScope != "connection" && c.ParameterScope != "service" {
+	if c.ParameterScope != "" && c.ParameterScope != "connection" && c.ParameterScope != "service" && c.ParameterScope != "browser_context" {
 		return errors.New("invalid native parameter scope")
 	}
 	return nil
@@ -81,6 +103,7 @@ type RouteEvidence struct {
 }
 
 type APBinding struct {
+	AgentID     string   `json:"agent_id,omitempty"`
 	Group       string   `json:"group"`
 	EntryPoints []string `json:"entrypoints"`
 }
@@ -89,9 +112,17 @@ type NativeCoverageConfig struct {
 	CrossEdge bool        `json:"cross_edge"`
 	Excluded  []string    `json:"excluded,omitempty"`
 }
+type DiscoveredAccessPoint struct {
+	AgentID string   `json:"agent_id"`
+	Address string   `json:"address"`
+	Groups  []string `json:"groups"`
+	Stale   bool     `json:"stale"`
+}
 type NativeInventory struct {
-	Groups     map[string][]NativeEdge `json:"groups"`
-	Unresolved int                     `json:"unresolved"`
+	AccessPoints  []DiscoveredAccessPoint `json:"access_points"`
+	Groups        map[string][]NativeEdge `json:"groups"`
+	WebUnresolved int                     `json:"web_unresolved"`
+	Unresolved    int                     `json:"unresolved"`
 }
 
 func (c *NativeCoverageConfig) Normalize() error {
@@ -160,7 +191,7 @@ func (c NativeCase) AllowedEndpoints() []string {
 	}
 	if c.Kind == "AP_JOIN" {
 		for _, edge := range c.Candidates {
-			if edge.Transport == c.Sender.Transport {
+			if edge.Transport == c.Sender.Transport || IsInteropClient(c.ClientType) && edge.Transport == c.Receiver.Transport {
 				seen[edge.Endpoint] = true
 			}
 		}

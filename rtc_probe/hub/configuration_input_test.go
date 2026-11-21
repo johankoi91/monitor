@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/johankoi91/monitor/rtc-probe/durable"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
 )
 
@@ -33,7 +32,7 @@ func TestSimplifiedConfigurationContractAndSingleEnablePath(t *testing.T) {
 	}
 	configTarget := targetInput{ID: target.ID, Name: target.Name, Driver: target.Driver, RTC: target.RTC}
 	targets = []any{configTarget}
-	task := map[string]any{"task_id": "one", "target_id": target.ID, "probe_id": "probe-a", "interval_seconds": 60, "timeout_seconds": 30}
+	task := map[string]any{"task_id": "one", "target_id": target.ID, "host_id": "host-probe-a", "service_type": "rtc", "client_type": "native", "interval_seconds": 60, "timeout_seconds": 30}
 	tasks := []any{task}
 	if w := configRequest(t, h, targets, tasks); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -42,8 +41,11 @@ func TestSimplifiedConfigurationContractAndSingleEnablePath(t *testing.T) {
 	if h.enabled(current) {
 		t.Fatal("creation enabled task through configuration")
 	}
-	for _, key := range []string{"enabled", "sender_probe_id", "receiver_probe_id"} {
-		task[key] = true
+	for _, key := range []string{"enabled", "probe_id", "runtime_id", "sender_probe_id", "receiver_probe_id"} {
+		task[key] = "old-runtime"
+		if key == "enabled" {
+			task[key] = true
+		}
 		if w := configRequest(t, h, targets, tasks); w.Code != 400 {
 			t.Fatal("retired task input accepted", key, w.Code)
 		}
@@ -89,36 +91,36 @@ func TestSimplifiedConfigurationContractAndSingleEnablePath(t *testing.T) {
 		t.Fatal("pre-signed token mode accepted", w.Code)
 	}
 }
-func TestLegacySingleProbeBindingMigration(t *testing.T) {
+func TestTaskDisplayNamePreservesIdentityAndEnableState(t *testing.T) {
 	h := targetPlanFixture(t)
-	p := Plan{Targets: []protocol.Target{{ID: "target", Name: "target", Driver: "agora", RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "none"}}}, Tasks: []protocol.Task{targetTask("task", "target")}}
-	if err := h.UpdatePlan(planRevision(h.planLocked()), p); err != nil {
+	initial := Plan{Targets: []protocol.Target{{ID: "target", Name: "RTC", Driver: "agora", RTC: &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "none"}}}, Tasks: []protocol.Task{targetTask("task", "target")}}
+	if err := h.UpdatePlan(planRevision(h.planLocked()), initial); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(h.state)
-	var root map[string]any
-	_ = json.Unmarshal(raw, &root)
-	task := root["plan"].(map[string]any)["tasks"].([]any)[0].(map[string]any)
-	task["sender_probe_id"], task["receiver_probe_id"] = "probe-a", "probe-a"
-	delete(task, "probe_id")
-	if err := durable.Write(h.dir+"/state.json", root); err != nil {
-		t.Fatal(err)
+	plan := h.planLocked()
+	original := plan.Tasks[0]
+	task := map[string]any{"task_id": original.ID, "name": "Native 音视频探测", "target_id": original.TargetID, "host_id": original.HostID, "service_type": "rtc", "client_type": "native", "interval_seconds": original.IntervalSeconds, "timeout_seconds": original.TimeoutSeconds}
+	targets := make([]any, 0, len(plan.Targets))
+	for _, v := range plan.Targets {
+		targets = append(targets, targetInput{ID: v.ID, Name: v.Name, Driver: v.Driver, RTC: v.RTC})
 	}
-	cfg := testConfig()
-	cfg.Targets = nil
-	cfg.Tasks = nil
-	for i := 0; i < 2; i++ {
-		restored, err := New(h.dir, cfg, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		current, _ := restored.task("task")
-		if current.ProbeID != "probe-a" || !restored.enabled(current) {
-			t.Fatal("migration lost binding or enabled state")
-		}
-		stored, _ := json.Marshal(restored.state.Plan)
-		if bytes.Contains(stored, []byte("sender_probe_id")) || bytes.Contains(stored, []byte("receiver_probe_id")) {
-			t.Fatal("legacy binding retained")
-		}
+	if w := configRequest(t, h, targets, []any{task}); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	current, ok := h.task(original.ID)
+	if !ok || current.Name != "Native 音视频探测" || h.enabled(current) != h.enabled(original) {
+		t.Fatal("name changed identity or enable state", current)
+	}
+	delete(task, "name")
+	if w := configRequest(t, h, targets, []any{task}); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	current, _ = h.task(original.ID)
+	if current.Name != "Native 音视频探测" {
+		t.Fatal("legacy client cleared display name")
+	}
+	task["name"] = strings.Repeat("x", 241)
+	if w := configRequest(t, h, targets, []any{task}); w.Code == 200 {
+		t.Fatal("oversized name accepted")
 	}
 }

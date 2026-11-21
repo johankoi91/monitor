@@ -16,7 +16,7 @@ func (c *Client) shutdownWorkers() {
 			if record.Job.RunID == id {
 				m.Revision = record.Job.Revision
 				m.Role = record.Job.Role
-				if record.Job.Target.Driver == "agora" {
+				if protocol.RealDriver(record.Job.Target.Driver) {
 					m.Role = "pair"
 				}
 				break

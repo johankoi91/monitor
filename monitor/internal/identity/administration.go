@@ -3,7 +3,6 @@ package identity
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"github.com/lib/pq"
 	"strings"
 )
@@ -175,31 +174,4 @@ func (s *Service) UpdateUser(uid string, r UserUpdate, actor, ip string) (User, 
 		return User{}, err
 	}
 	return s.User(uid)
-}
-
-func (s *Service) AuditList(action, actor string, limit, offset int) (any, error) {
-	if limit < 1 || limit > 100 || offset < 0 {
-		return nil, problem(400, "INVALID_PAGE", "分页参数无效")
-	}
-	context, cancel := ctx()
-	defer cancel()
-	var total int
-	where := " WHERE ($1='' OR action=$1) AND ($2='' OR actor=$2)"
-	if err := s.db.QueryRowContext(context, "SELECT count(*) FROM avops.system_audit"+where, action, actor).Scan(&total); err != nil {
-		return nil, err
-	}
-	rows, err := s.db.QueryContext(context, "SELECT jsonb_build_object('audit_id',id,'at',at,'actor',actor,'source_ip',source_ip,'action',action,'target',target,'outcome',outcome,'details',details) FROM avops.system_audit"+where+" ORDER BY id DESC LIMIT $3 OFFSET $4", action, actor, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := []json.RawMessage{}
-	for rows.Next() {
-		var b []byte
-		if err = rows.Scan(&b); err != nil {
-			return nil, err
-		}
-		result = append(result, b)
-	}
-	return map[string]any{"total": total, "records": result}, rows.Err()
 }

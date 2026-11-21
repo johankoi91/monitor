@@ -20,7 +20,7 @@ func diagnosticEndpoint(job protocol.Job) protocol.DiagnosticEndpoint {
 	return protocol.DiagnosticEndpoint{Role: job.Role, UID: job.UID, PublisherUID: job.PublisherUID, Channel: job.Channel}
 }
 func sameBundleExecution(a, b protocol.Job) bool {
-	return a.RunID == b.RunID && a.Revision == b.Revision && a.ProbeID == b.ProbeID && a.Channel == b.Channel && a.Target.ID == b.Target.ID && a.TaskID == b.TaskID && a.ParentRunID == b.ParentRunID && a.EdgeEndpoint == b.EdgeEndpoint && reflect.DeepEqual(a.NativeCase, b.NativeCase) && reflect.DeepEqual(a.RTC, b.RTC)
+	return a.RunID == b.RunID && a.Revision == b.Revision && a.RuntimeID == b.RuntimeID && a.Channel == b.Channel && a.Target.ID == b.Target.ID && a.TaskID == b.TaskID && a.ParentRunID == b.ParentRunID && a.EdgeEndpoint == b.EdgeEndpoint && reflect.DeepEqual(a.NativeCase, b.NativeCase) && reflect.DeepEqual(a.RTC, b.RTC)
 }
 
 // Merge both roles' trace lines into one file, retaining their identities and

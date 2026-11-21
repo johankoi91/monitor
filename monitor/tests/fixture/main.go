@@ -19,7 +19,7 @@ import (
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/notify"
 	"github.com/johankoi91/monitor/runtime/internal/testfixture"
-	"github.com/johankoi91/monitor/runtime/web"
+	"github.com/johankoi91/monitor/runtime/internal/webui"
 )
 
 func main() {
@@ -29,8 +29,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-	store, err := center.NewStore(dir, center.Config{Site: model.Site{Code: "ui-fixture", Name: "React 界面模拟验证"}, Agents: []center.AgentConfig{{ID: "ui-fixture", Secret: strings.Repeat("f", 32), HostName: "界面模拟主机", HostAddress: "127.0.0.1"}}})
+	store, err := center.NewStore(dir, center.Config{Site: model.Site{Code: "ui-fixture", Name: "React 界面模拟验证"}})
 	if err != nil {
+		log.Fatal(err)
+	}
+	if err = store.EnrollAgent("ui-fixture", strings.Repeat("f", 32), model.HostInfo{HostName: "界面模拟主机", HostAddress: "127.0.0.1", IPAddresses: []string{"127.0.0.1"}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: time.Now().UTC()}); err != nil {
 		log.Fatal(err)
 	}
 	defer store.Close()
@@ -52,7 +55,7 @@ func main() {
 		for ctx.Err() == nil {
 			sequence++
 			at := time.Now().UTC()
-			r := model.Report{Type: "snapshot", Complete: true, Sequence: sequence, CollectedAt: at, BaselineRevision: store.Baseline().Revision, Containers: []model.Observation{}}
+			r := model.Report{Host: &model.HostInfo{HostName: "界面模拟主机", HostAddress: "127.0.0.1", IPAddresses: []string{"127.0.0.1"}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: at}, Type: "snapshot", Complete: true, Sequence: sequence, CollectedAt: at, BaselineRevision: store.Baseline().Revision, Containers: []model.Observation{}}
 			for i := 0; i < 55; i++ {
 				name := "unused-" + strings.Repeat("x", i+1)
 				if i == 0 {
@@ -132,7 +135,7 @@ func main() {
 			}
 		}
 	}()
-	assets, _ := fs.Sub(web.Files, "static")
+	assets, _ := fs.Sub(webui.Files, "static")
 	handler := (&center.Server{Store: store, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets)), Notifier: notifier, Access: keys}).Handler()
 	if os.Getenv("AVOPS_UI_ACCOUNT_FIXTURE") == "1" {
 		handler = testfixture.AccountAuth(handler)

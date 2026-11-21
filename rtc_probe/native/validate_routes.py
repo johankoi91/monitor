@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Run explicitly requested real SDK routing cases, keeping artifacts private."""
-import argparse,datetime,json,os,pathlib,subprocess,threading,time
+import argparse,datetime,json,os,pathlib,subprocess
 p=argparse.ArgumentParser()
 p.add_argument('--binary',required=True);p.add_argument('--capture',required=True);p.add_argument('--output',type=pathlib.Path,required=True)
 p.add_argument('--case',required=True,choices=['udp-ap','aut-ap','udp-direct','aut-direct','udp-cross','aut-cross','udp-aut','aut-udp'])
@@ -22,19 +22,19 @@ elif a.case=='aut-cross':sender=route('aut',4701);receiver=route('aut',4702);kin
 elif a.case=='udp-aut':receiver=route('aut',4701);kind='CROSS_EDGE_MEDIA'
 elif a.case=='aut-udp':sender=route('aut',4701);kind='CROSS_EDGE_MEDIA'
 run_id=os.urandom(16).hex()
-job={'run_id':run_id,'task_id':'route-qa','target':{'target_id':'route-qa','driver':'agora'},'config_revision':'route-qa','probe_id':'route-qa','endpoint_role':'pair','channel':'qa_'+run_id,'uid':'10001','publisher_uid':'10001','deadline':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=18)).isoformat().replace('+00:00','Z'),'media_duration_ms':5000,'work_dir':str(a.output.resolve()),'rtc':{'app_id':app,'auth_mode':'none','private_deployment':True,'access_ips':['111.230.192.59'],'access_domains':['111.230.192.59'],'verify_domain':'ap.1145326.agora.local','proxy_mode':1,'disable_aut':False},'native_case':{'case_key':a.case,'case_kind':kind,'coverage_version':'qa','ap_group':'172.16.80.25','ap_entrypoint':'111.230.192.59','sender':sender,'receiver':receiver,'candidates':candidates,'parameter_scope':a.scope}}
+job={'run_id':run_id,'task_id':'route-qa','target':{'target_id':'route-qa','driver':'agora'},'config_revision':'route-qa','runtime_id':'route-qa','endpoint_role':'pair','channel':'qa_'+run_id,'uid':'10001','publisher_uid':'10001','deadline':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=18)).isoformat().replace('+00:00','Z'),'media_duration_ms':5000,'work_dir':str(a.output.resolve()),'rtc':{'app_id':app,'auth_mode':'none','private_deployment':True,'access_ips':['111.230.192.59'],'access_domains':['111.230.192.59'],'verify_domain':'ap.1145326.agora.local','proxy_mode':1,'disable_aut':False},'native_case':{'case_key':a.case,'case_kind':kind,'coverage_version':'qa','ap_group':'172.16.80.25','ap_entrypoint':'111.230.192.59','sender':sender,'receiver':receiver,'candidates':candidates,'parameter_scope':a.scope}}
 read_fd,write_fd=os.pipe()
 if read_fd!=3:raise RuntimeError('run QA with descriptors 3+ free')
-env=dict(os.environ,LD_PRELOAD=str(pathlib.Path(a.capture).resolve()),RTC_PROBE_ROUTE_LOG=str(a.output.resolve()/'route-capture.jsonl'))
+env=dict(os.environ,LD_PRELOAD=str(pathlib.Path(a.capture).resolve()),AVOPS_PROBE_ROUTE_LOG=str(a.output.resolve()/'route-capture.jsonl'))
 if a.guard:
  allow=[edge['endpoint'] for edge in [sender,receiver] if edge.get('endpoint')]
  if kind=='AP_JOIN':allow=[edge['endpoint'] for edge in candidates if edge['transport']==sender['transport']]
  allow+=['111.230.192.59:8003','111.230.192.59:8443']
- env['RTC_PROBE_ROUTE_ALLOW_ENDPOINTS']=';'.join(sorted(set(allow)))
+ env['AVOPS_PROBE_ROUTE_ALLOW_ENDPOINTS']=';'.join(sorted(set(allow)))
 with (a.output/'worker.log').open('wb') as log:
  child=subprocess.Popen([a.binary,'worker'],stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,pass_fds=(read_fd,write_fd),preexec_fn=lambda:os.dup2(write_fd,3),env=env)
 os.close(write_fd)
-child.stdin.write((json.dumps({'protocol_version':1,'type':'prepare_run','job':job})+'\n').encode());child.stdin.flush()
+child.stdin.write((json.dumps({'protocol_version':2,'type':'prepare_run','job':job})+'\n').encode());child.stdin.flush()
 ready=set();results={};messages=[]
 with os.fdopen(read_fd) as stream:
  for line in stream:
@@ -42,7 +42,7 @@ with os.fdopen(read_fd) as stream:
   if value['type']=='run_ready':
    ready.add(value['endpoint_role'])
    if len(ready)==2:
-    child.stdin.write((json.dumps({'protocol_version':1,'type':'start_media','run_id':run_id,'config_revision':'route-qa','endpoint_role':'pair'})+'\n').encode());child.stdin.flush()
+    child.stdin.write((json.dumps({'protocol_version':2,'type':'start_media','run_id':run_id,'config_revision':'route-qa','endpoint_role':'pair'})+'\n').encode());child.stdin.flush()
   if value['type']=='run_result':results[value['endpoint_role']]=value['result']
 child.wait(timeout=15);child.stdin.close()
 (a.output/'evidence.json').write_text(json.dumps({'case':a.case,'scope':a.scope,'results':results,'messages':messages},indent=2))

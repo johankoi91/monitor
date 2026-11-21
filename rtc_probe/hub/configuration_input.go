@@ -12,11 +12,14 @@ type targetInput struct {
 	Credentials *protocol.AppCredentials `json:"credentials,omitempty"`
 }
 type taskInput struct {
+	Name                 string `json:"name,omitempty" yaml:"name,omitempty"`
+	ClientType           string `json:"client_type,omitempty"`
 	SweepIntervalSeconds int    `json:"sweep_interval_seconds,omitempty"`
 	CrossIntervalSeconds int    `json:"cross_interval_seconds,omitempty"`
 	ID                   string `json:"task_id"`
 	TargetID             string `json:"target_id"`
-	ProbeID              string `json:"probe_id"`
+	HostID               string `json:"host_id"`
+	ServiceType          string `json:"service_type"`
 	IntervalSeconds      int    `json:"interval_seconds"`
 	TimeoutSeconds       int    `json:"timeout_seconds"`
 	FailureThreshold     int    `json:"failure_threshold"`
@@ -42,8 +45,11 @@ func (h *Hub) configurationPlan(input configurationInput) Plan {
 		enabled := false
 		if current, ok := h.task(v.ID); ok {
 			enabled = h.enabled(current)
+			if v.Name == "" {
+				v.Name = current.Name
+			}
 		}
-		plan.Tasks = append(plan.Tasks, protocol.Task{SweepIntervalSeconds: v.SweepIntervalSeconds, CrossIntervalSeconds: v.CrossIntervalSeconds, ID: v.ID, TargetID: v.TargetID, ProbeID: v.ProbeID, Enabled: enabled, IntervalSeconds: v.IntervalSeconds, TimeoutSeconds: v.TimeoutSeconds, FailureThreshold: v.FailureThreshold, RecoveryThreshold: v.RecoveryThreshold, UnknownNotifySeconds: v.UnknownNotifySeconds, Description: v.Description})
+		plan.Tasks = append(plan.Tasks, protocol.Task{Name: v.Name, ClientType: v.ClientType, SweepIntervalSeconds: v.SweepIntervalSeconds, CrossIntervalSeconds: v.CrossIntervalSeconds, ID: v.ID, TargetID: v.TargetID, HostID: v.HostID, ServiceType: v.ServiceType, Enabled: enabled, IntervalSeconds: v.IntervalSeconds, TimeoutSeconds: v.TimeoutSeconds, FailureThreshold: v.FailureThreshold, RecoveryThreshold: v.RecoveryThreshold, UnknownNotifySeconds: v.UnknownNotifySeconds, Description: v.Description})
 	}
 	return plan
 }

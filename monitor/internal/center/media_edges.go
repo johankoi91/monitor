@@ -19,11 +19,11 @@ import (
 func (s *Store) MediaEdges() model.MediaEdgeInventory {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := model.MediaEdgeInventory{ByAP: map[string][]model.MediaEdgeEndpoint{}, Hosts: []string{}, Skipped: []model.MediaEdgeSkipped{}, GeneratedAt: time.Now().UTC()}
+	out := model.MediaEdgeInventory{AccessPoints: []model.DiscoveredAccessPoint{}, ByAP: map[string][]model.MediaEdgeEndpoint{}, Hosts: []string{}, Skipped: []model.MediaEdgeSkipped{}, GeneratedAt: time.Now().UTC()}
 	hosts := map[string]bool{}
-	for _, agent := range s.config.Agents {
-		if agent.HostAddress != "" {
-			hosts[agent.HostAddress] = true
+	for _, agent := range s.registeredAgentsLocked() {
+		if agent.Host.HostAddress != "" {
+			hosts[agent.Host.HostAddress] = true
 		}
 		state := s.agents[agent.ID]
 		if state == nil {
@@ -31,12 +31,15 @@ func (s *Store) MediaEdges() model.MediaEdgeInventory {
 		}
 		for _, observation := range state.Report.Containers {
 			container := observation.Container
+			if container.ContainerName == "agora_local_ap" {
+				out.AccessPoints = append(out.AccessPoints, model.DiscoveredAccessPoint{AgentID: agent.ID, Address: agent.Host.HostAddress, ContainerName: container.ContainerName, Stale: !fresh(state, time.Now()), Groups: []string{}})
+			}
 			if !strings.Contains(strings.ToLower(container.ContainerName), "media_edge") {
 				continue
 			}
 			out.MatchedContainers++
 			skip := func(reason string) {
-				out.Skipped = append(out.Skipped, model.MediaEdgeSkipped{AgentID: agent.ID, HostIP: agent.HostAddress, ContainerName: container.ContainerName, Reason: reason})
+				out.Skipped = append(out.Skipped, model.MediaEdgeSkipped{AgentID: agent.ID, HostIP: agent.Host.HostAddress, ContainerName: container.ContainerName, Reason: reason})
 			}
 			kind := mediaEdgeType(container.ContainerName)
 			if kind == "" {
@@ -63,10 +66,28 @@ func (s *Store) MediaEdges() model.MediaEdgeInventory {
 			}
 			stale := s.startupViewLocked(agent.ID, container.ContainerName, &observation)["stale"].(bool)
 			for _, group := range strings.Split(ap, ",") {
-				out.ByAP[group] = append(out.ByAP[group], model.MediaEdgeEndpoint{EdgeType: kind, ContainerID: container.ContainerID, SnapshotID: container.SnapshotID, IPForClient: ip, UserPort: port, AgentID: agent.ID, HostIP: agent.HostAddress, ContainerName: container.ContainerName, Stale: stale})
+				out.ByAP[group] = append(out.ByAP[group], model.MediaEdgeEndpoint{EdgeType: kind, ContainerID: container.ContainerID, SnapshotID: container.SnapshotID, IPForClient: ip, UserPort: port, AgentID: agent.ID, HostIP: agent.Host.HostAddress, ContainerName: container.ContainerName, Stale: stale})
 			}
 		}
 	}
+	for i := range out.AccessPoints {
+		ap := &out.AccessPoints[i]
+		agent := s.registry[ap.AgentID]
+		addresses := map[string]bool{agent.Host.HostAddress: true}
+		for _, address := range agent.Host.IPAddresses {
+			addresses[address] = true
+		}
+		for group := range out.ByAP {
+			if addresses[group] {
+				ap.Groups = append(ap.Groups, group)
+			}
+		}
+		if len(ap.Groups) == 0 {
+			ap.Groups = []string{ap.Address}
+		}
+		sort.Strings(ap.Groups)
+	}
+	sort.Slice(out.AccessPoints, func(i, j int) bool { return out.AccessPoints[i].Address < out.AccessPoints[j].Address })
 	for host := range hosts {
 		out.Hosts = append(out.Hosts, host)
 	}

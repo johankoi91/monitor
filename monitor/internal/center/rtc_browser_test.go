@@ -2,6 +2,7 @@ package center
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +16,11 @@ import (
 
 	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/rtc-probe/probe"
-	"github.com/johankoi91/monitor/rtc-probe/testkit"
+	"github.com/johankoi91/monitor/rtc-probe/protocol"
+	"github.com/johankoi91/monitor/rtc-probe/tests/testkit"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/testfixture"
-	"github.com/johankoi91/monitor/runtime/web"
+	"github.com/johankoi91/monitor/runtime/internal/webui"
 )
 
 func TestRTCUIMockWorker(t *testing.T) {
@@ -37,7 +39,7 @@ func TestRTCUIWorkflow(t *testing.T) {
 	if os.Getenv("AVOPS_BROWSER_TEST") != "1" {
 		t.Skip("opt-in browser verification")
 	}
-	config := hub.Config{Probes: []hub.ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "模拟位置 A", HostAddress: "127.0.0.1"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "模拟位置 B", HostAddress: "127.0.0.1"}}}
+	config := hub.Config{}
 	h, err := hub.New(t.TempDir(), config, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -45,12 +47,14 @@ func TestRTCUIWorkflow(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.Run(ctx)
-	assets, err := fs.Sub(web.Files, "static")
+	assets, err := fs.Sub(webui.Files, "static")
 	if err != nil {
 		t.Fatal(err)
 	}
 	store := setup(t)
-	discovered := report("agora_udp_media_edge_1", "agora_udp_media_edge_2", "agora_udp_media_edge_3", "agora_aut_media_edge_1", "agora_aut_media_edge_2", "agora_aut_media_edge_3", "agora_web_media_edge_1")
+	discovered := report("agora_udp_media_edge_1", "agora_udp_media_edge_2", "agora_udp_media_edge_3", "agora_aut_media_edge_1", "agora_aut_media_edge_2", "agora_aut_media_edge_3", "agora_web_media_edge_1", "agora_local_ap")
+	discovered.Host.HostAddress = "127.0.0.1"
+	discovered.Host.IPAddresses = []string{"127.0.0.1", "172.16.80.25"}
 	for i := range discovered.Containers {
 		port := 4001 + i
 		if i >= 3 {
@@ -66,11 +70,34 @@ func TestRTCUIWorkflow(t *testing.T) {
 	if err := store.Receive("rtc-a", session, discovered); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(testfixture.AccountAuth((&Server{Store: store, Probes: h, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets))}).Handler()))
+	enrollToken := strings.Repeat("e", 32)
+	server := httptest.NewServer(testfixture.AccountAuth((&Server{Store: store, Probes: h, ProbeEnrollmentToken: enrollToken, AdminID: "fixture", AdminSecret: strings.Repeat("z", 32), Assets: http.FileServer(http.FS(assets))}).Handler()))
 	defer server.Close()
 	done := []chan error{}
-	for _, p := range config.Probes {
-		c, err := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probe/connect", ID: p.ID, Secret: p.Secret, DataDir: t.TempDir(), Driver: "agora", AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
+	hostDir := t.TempDir()
+	host, err := probe.LoadHostIdentity(hostDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host.Host.Name = "模拟服务器"
+	host.Host.Address = "127.0.0.1"
+	host.Host.Location = "模拟位置"
+	hostData, _ := json.Marshal(host)
+	if err = os.WriteFile(filepath.Join(hostDir, "server-identity-v2.json"), hostData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"native", "web"} {
+		id, secret := protocol.RuntimeIdentityKey(host.Secret, "rtc", kind)
+		driver := "agora"
+		if kind == "web" {
+			driver = protocol.WebDriver
+		}
+		if err = h.EnrollProbe(protocol.ProbeEnrollment{Host: host.Host, HostSecret: host.Secret, RuntimeID: id, RuntimeSecret: secret, ServiceType: "rtc", ClientType: kind, Driver: driver}, "127.0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range []int{0} {
+		c, err := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probes/connect", HostDir: hostDir, EnrollmentToken: enrollToken, ServiceType: "rtc", ClientType: "native", DataDir: t.TempDir(), Driver: "agora", AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRTCUIMockWorker$")
 			cmd.Env = append(os.Environ(), "RTC_UI_WORKER=1")
 			return cmd
@@ -82,6 +109,32 @@ func TestRTCUIWorkflow(t *testing.T) {
 		done = append(done, ch)
 		go func() { ch <- c.Run(ctx) }()
 	}
+	webID, _ := protocol.RuntimeIdentityKey(host.Secret, "rtc", "web")
+	webSession := h.Session(webID)
+	webHello := protocol.Msg("hello")
+	webHello.Driver = protocol.WebDriver
+	webHello.HostID = host.Host.ID
+	webHello.ServiceType = "rtc"
+	webHello.ClientType = "web"
+	webHello.Capacity = 1
+	webHello.Capabilities = []string{protocol.ProbeEdgeAddressCapability, protocol.WebMediaCapability, protocol.SharedServiceLogsCapability}
+	if _, err := h.Receive(webID, webSession, webHello); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				message := webHello
+				message.Type = "heartbeat"
+				_, _ = h.Receive(webID, webSession, message)
+			}
+		}
+	}()
 	defer func() {
 		cancel()
 		for _, ch := range done {

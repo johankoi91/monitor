@@ -1,7 +1,6 @@
 package hub
 
 import (
-	"encoding/json"
 	"errors"
 	"sort"
 	"time"
@@ -14,14 +13,16 @@ const nativeCoverageKind = "NATIVE_COVERAGE"
 var nativePhases = []string{"AP", "DIRECT", "CROSS"}
 
 type NativeCaseResult struct {
-	Case             protocol.NativeCase     `json:"case"`
-	RunID            string                  `json:"run_id,omitempty"`
-	Status           string                  `json:"status"`
-	Reason           string                  `json:"reason,omitempty"`
-	SenderEvidence   *protocol.Evidence      `json:"sender_evidence,omitempty"`
-	ReceiverEvidence *protocol.Evidence      `json:"receiver_evidence,omitempty"`
-	SenderRoute      *protocol.RouteEvidence `json:"sender_route,omitempty"`
-	ReceiverRoute    *protocol.RouteEvidence `json:"receiver_route,omitempty"`
+	SenderBrowser    *protocol.BrowserEvidence `json:"sender_browser,omitempty"`
+	ReceiverBrowser  *protocol.BrowserEvidence `json:"receiver_browser,omitempty"`
+	Case             protocol.NativeCase       `json:"case"`
+	RunID            string                    `json:"run_id,omitempty"`
+	Status           string                    `json:"status"`
+	Reason           string                    `json:"reason,omitempty"`
+	SenderEvidence   *protocol.Evidence        `json:"sender_evidence,omitempty"`
+	ReceiverEvidence *protocol.Evidence        `json:"receiver_evidence,omitempty"`
+	SenderRoute      *protocol.RouteEvidence   `json:"sender_route,omitempty"`
+	ReceiverRoute    *protocol.RouteEvidence   `json:"receiver_route,omitempty"`
 }
 type NativePhaseState struct {
 	ActiveRunID string     `json:"active_run_id,omitempty"`
@@ -33,6 +34,7 @@ type NativePhaseState struct {
 type NativeState struct {
 	SchedulingError string                       `json:"scheduling_error,omitempty"`
 	WorkerLimit     int                          `json:"worker_limit"`
+	ClientType      string                       `json:"client_type,omitempty"`
 	CrossTopology   string                       `json:"cross_topology"`
 	Version         string                       `json:"coverage_version"`
 	Expected        []protocol.NativeMember      `json:"expected"`
@@ -40,8 +42,21 @@ type NativeState struct {
 	Issues          []string                     `json:"issues"`
 }
 
-func isSummary(r *Run) bool              { return r.Kind == edgeSweepKind || r.Kind == nativeCoverageKind }
-func nativeEnabled(t protocol.Task) bool { return t.RTC != nil && t.RTC.NativeCoverage != nil }
+func isSummary(r *Run) bool { return r.Kind == edgeSweepKind || r.Kind == nativeCoverageKind }
+func coverageConfig(t protocol.Task) *protocol.NativeCoverageConfig {
+	if t.RTC == nil {
+		return nil
+	}
+	if t.ClientType == "web" {
+		if t.RTC.WebAccess != nil {
+			return t.RTC.WebAccess.Coverage
+		}
+		return nil
+	}
+	return t.RTC.NativeCoverage
+}
+func coverageEnabled(t protocol.Task) bool { return coverageConfig(t) != nil }
+
 func (h *Hub) SetNativeInventoryProvider(provider func() (protocol.NativeInventory, error)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -85,7 +100,7 @@ func (h *Hub) nativeTaskPlan(t protocol.Task, phase string, now time.Time) proto
 			round = p.Round
 		}
 	}
-	plan := BuildNativePlan(*t.RTC.NativeCoverage, h.nativeSnapshot, prior, phase, round)
+	plan := buildCoveragePlan(t, *coverageConfig(t), h.nativeSnapshot, prior, phase, round)
 	if h.nativeInventoryErr != nil {
 		plan.Issues = append(plan.Issues, "NATIVE_INVENTORY_UNAVAILABLE")
 	}
@@ -107,7 +122,7 @@ func (h *Hub) startNativePhase(t protocol.Task, phase string, now time.Time) (Ru
 	if len(plan.Cases) == 0 {
 		return Run{}, errors.New("native plan has no cases")
 	}
-	r := Run{ID: protocol.ID(), TaskID: t.ID, TargetID: t.TargetID, Revision: revision(t, h.target(t.TargetID)), Driver: "agora", Kind: nativeCoverageKind, NativePlan: &plan, Status: "RUNNING", Reason: "NATIVE_COVERAGE_RUNNING", CreatedAt: now, Deadline: now.Add(nativeBudget(t, len(plan.Cases)) + phaseInterval(t, phase)), Endpoints: map[string]*Endpoint{}, Logs: map[string]protocol.LogRequest{}}
+	r := Run{ClientType: t.ClientType, ID: protocol.ID(), TaskID: t.ID, TargetID: t.TargetID, Revision: revision(t, h.target(t.TargetID)), Driver: protocol.TaskDriver(t, h.target(t.TargetID)), Kind: nativeCoverageKind, NativePlan: &plan, Status: "RUNNING", Reason: "NATIVE_COVERAGE_RUNNING", CreatedAt: now, Deadline: now.Add(nativeBudget(t, len(plan.Cases)) + phaseInterval(t, phase)), Endpoints: map[string]*Endpoint{}, Logs: map[string]protocol.LogRequest{}}
 	for _, c := range plan.Cases {
 		r.Cases = append(r.Cases, NativeCaseResult{Case: c, Status: "PENDING"})
 	}
@@ -133,6 +148,7 @@ func (h *Hub) startNativePhase(t protocol.Task, phase string, now time.Time) (Ru
 		state.Version = plan.Version
 		state.WorkerLimit = h.nativeWorkerLimit(t, len(plan.Members))
 		state.CrossTopology = "ring"
+		state.ClientType = t.ClientType
 		state.Expected = plan.Members
 		state.Issues = plan.Issues
 		p := state.Phases[phase]
@@ -153,8 +169,8 @@ func (h *Hub) startNativeCoverage(t protocol.Task, now time.Time) (Run, error) {
 		return Run{}, errors.New("task disabled")
 	}
 	var first Run
-	for _, phase := range nativePhases {
-		if phase == "CROSS" && !t.RTC.NativeCoverage.CrossEdge {
+	for _, phase := range taskPhases(t) {
+		if phase == "CROSS" && !coverageConfig(t).CrossEdge {
 			continue
 		}
 		if h.activeNativePhase(t.ID, phase) {
@@ -176,7 +192,7 @@ func (h *Hub) startNativeCoverage(t protocol.Task, now time.Time) (Run, error) {
 }
 func (h *Hub) tickNative(now time.Time) {
 	for _, t := range h.config.Tasks {
-		if !nativeEnabled(t) || !h.enabled(t) {
+		if !coverageEnabled(t) || !h.enabled(t) {
 			continue
 		}
 		plan := h.nativeTaskPlan(t, "AP", now)
@@ -205,6 +221,7 @@ func (h *Hub) tickNative(now time.Time) {
 				value.Version = plan.Version
 				value.WorkerLimit = workerLimit
 				value.CrossTopology = "ring"
+				value.ClientType = t.ClientType
 				value.Expected = plan.Members
 				value.Issues = plan.Issues
 				return nil
@@ -222,22 +239,17 @@ func (h *Hub) tickNative(now time.Time) {
 			_ = h.change(func(s *state) error {
 				value := s.Native[t.ID]
 				value.SchedulingError = budgetErr
-				if budgetErr != "" {
-					for phase, p := range value.Phases {
-						if phase != "AP" && p.Health.State != "UNHEALTHY" {
-							p.Health.State = "UNKNOWN"
-							p.Health.Reason = "NATIVE_SCHEDULE_BUDGET_EXCEEDED"
-						}
-					}
-				}
+				// nativeHealth applies the current scheduling constraint separately.
+				// Keep media evidence intact so reconnecting clients can restore the
+				// conclusion without inventing a new result or refreshing its age.
 				return nil
 			})
 		}
-		for _, phase := range nativePhases {
+		for _, phase := range taskPhases(t) {
 			if phase != "AP" && h.state.Native[t.ID].SchedulingError != "" {
 				continue
 			}
-			if phase == "CROSS" && !t.RTC.NativeCoverage.CrossEdge {
+			if phase == "CROSS" && !coverageConfig(t).CrossEdge {
 				continue
 			}
 			if h.activeNativePhase(t.ID, phase) {
@@ -271,7 +283,7 @@ func (h *Hub) advanceNative(now time.Time) {
 		for {
 			parent = h.state.Runs[parent.ID]
 			task, ok := h.task(parent.TaskID)
-			if !ok || !h.enabled(task) || !nativeEnabled(task) {
+			if !ok || !h.enabled(task) || !coverageEnabled(task) {
 				break
 			}
 			if current := h.state.Native[task.ID]; current == nil || current.Version != parent.NativePlan.Version || parent.Revision != revision(task, h.target(task.TargetID)) {
@@ -313,20 +325,31 @@ func (h *Hub) advanceNative(now time.Time) {
 				})
 				continue
 			}
-			session := h.sessions[task.ProbeID]
+			session := h.sessions[h.runtimeForTask(task)]
 			capable := false
 			if session != nil {
 				for _, cap := range session.Capabilities {
-					if cap == "native_routes_v1" {
+					if cap == "native_routes_v1" && task.ClientType != "web" || cap == protocol.WebMediaCapability && task.ClientType == "web" {
 						capable = true
 					}
 				}
 			}
-			if !capable && session != nil && session.Driver == "agora" {
+			compact := false
+			if session != nil {
+				for _, cap := range session.Capabilities {
+					if cap == protocol.ProbeEdgeAddressCapability {
+						compact = true
+					}
+				}
+			}
+			if (!capable || !compact) && session != nil && protocol.RealDriver(session.Driver) {
 				_ = h.change(func(s *state) error {
 					r := s.Runs[parent.ID]
 					r.Cases[pending].Status = "ERROR"
 					r.Cases[pending].Reason = "PROBE_NATIVE_CAPABILITY_UNAVAILABLE"
+					if capable && !compact {
+						r.Cases[pending].Reason = "PROBE_EDGE_FORMAT_UNAVAILABLE"
+					}
 					return nil
 				})
 				continue
@@ -372,11 +395,13 @@ func (h *Hub) recordNativeChild(s *state, child *Run, now time.Time) bool {
 			v := e.Result.Evidence
 			row.SenderEvidence = &v
 			row.SenderRoute = e.Result.Route
+			row.SenderBrowser = e.Result.Browser
 		}
 		if e := child.Endpoints["receiver"]; e != nil && e.Result != nil {
 			v := e.Result.Evidence
 			row.ReceiverEvidence = &v
 			row.ReceiverRoute = e.Result.Route
+			row.ReceiverBrowser = e.Result.Browser
 		}
 	}
 	return true
@@ -416,7 +441,7 @@ func (h *Hub) applyNativePhaseResult(s *state, r *Run, now time.Time) {
 	if value, exists := s.Enabled[r.TaskID]; exists {
 		enabled = value
 	}
-	if !ok || !enabled || !nativeEnabled(task) || current == nil || r.NativePlan == nil || current.Version != r.NativePlan.Version || r.Revision != revision(task, h.target(task.TargetID)) {
+	if !ok || !enabled || !coverageEnabled(task) || current == nil || r.NativePlan == nil || current.Version != r.NativePlan.Version || r.Revision != revision(task, h.target(task.TargetID)) {
 		return
 	}
 	phase := current.Phases[r.NativePlan.Phase]
@@ -476,8 +501,8 @@ func (h *Hub) nativeHealth(t protocol.Task, now time.Time) TaskHealth {
 		unknown = true
 		out.Reason = state.Issues[0]
 	}
-	for _, phase := range nativePhases {
-		if phase == "CROSS" && !t.RTC.NativeCoverage.CrossEdge {
+	for _, phase := range taskPhases(t) {
+		if phase == "CROSS" && !coverageConfig(t).CrossEdge {
 			continue
 		}
 		p := state.Phases[phase]
@@ -513,7 +538,7 @@ func (h *Hub) nativeHealth(t protocol.Task, now time.Time) TaskHealth {
 			healthy = false
 			continue
 		}
-		if value.State != "HEALTHY" || value.LastResultAt == nil || now.Sub(*value.LastResultAt) > budget {
+		if value.State != "HEALTHY" {
 			unknown = true
 			healthy = false
 		}
@@ -533,8 +558,4 @@ func (h *Hub) nativeHealth(t protocol.Task, now time.Time) TaskHealth {
 		out.State = "UNKNOWN"
 	}
 	return out
-}
-func (h *Hub) nativeSnapshotJSON() json.RawMessage {
-	data, _ := json.Marshal(h.state.Native)
-	return data
 }

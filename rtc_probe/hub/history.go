@@ -38,6 +38,7 @@ type Archive interface {
 	RTCGetRun(string) (Run, error)
 	RTCGetLog(string) (protocol.LogRequest, error)
 	RTCListRuns(string, int, int) (HistoryPage, error)
+	RTCListFilteredRuns(HistoryFilter, int, int) (HistoryPage, error)
 	RTCUsage() (HistoryUsage, error)
 	RTCCleanup(time.Time, int) error
 }
@@ -65,13 +66,23 @@ func (h *Hub) UpdateSettings(expected string, v Settings) error {
 	v.Version = protocol.ID()
 	return h.change(func(s *state) error { s.Settings = v; return nil })
 }
+
+type HistoryFilter struct {
+	TaskID     string
+	ClientType string
+	Status     string
+}
+
 func (h *Hub) History(task string, limit, offset int) (HistoryPage, error) {
+	return h.FilteredHistory(HistoryFilter{TaskID: task}, limit, offset)
+}
+func (h *Hub) FilteredHistory(filter HistoryFilter, limit, offset int) (HistoryPage, error) {
 	if limit < 1 || limit > 100 || offset < 0 {
 		return HistoryPage{}, errors.New("历史分页参数无效")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	page, err := h.archive.RTCListRuns(task, limit, offset)
+	page, err := h.archive.RTCListFilteredRuns(filter, limit, offset)
 	for i := range page.Runs {
 		h.decorateRun(&page.Runs[i])
 	}
@@ -133,8 +144,7 @@ func (f *fileArchive) RTCInit() error {
 	if err := os.MkdirAll(filepath.Join(f.dir, "runs"), 0700); err != nil {
 		return err
 	}
-	// Remove data from the retired RTC audit feature during upgrade.
-	return os.RemoveAll(filepath.Join(f.dir, "audit"))
+	return nil
 }
 func (f *fileArchive) RTCPutRun(v Run, max int64) error {
 	b, _ := json.Marshal(v)
@@ -192,6 +202,9 @@ func (h *Hub) decorateRun(r *Run) {
 	r.Logs = logs
 }
 func (f *fileArchive) RTCListRuns(task string, limit, offset int) (HistoryPage, error) {
+	return f.RTCListFilteredRuns(HistoryFilter{TaskID: task}, limit, offset)
+}
+func (f *fileArchive) RTCListFilteredRuns(filter HistoryFilter, limit, offset int) (HistoryPage, error) {
 	out := HistoryPage{Runs: []Run{}, Limit: limit, Offset: offset}
 	entries, err := os.ReadDir(filepath.Join(f.dir, "runs"))
 	if err != nil {
@@ -206,11 +219,16 @@ func (f *fileArchive) RTCListRuns(task string, limit, offset int) (HistoryPage, 
 		if err != nil {
 			return out, err
 		}
-		if r.ParentRunID == "" && (task == "" || r.TaskID == task) {
+		if r.ParentRunID == "" && (filter.TaskID == "" || r.TaskID == filter.TaskID) && (filter.Status == "" || r.Status == filter.Status) && (filter.ClientType == "" || filter.ClientType == "web" && r.Driver == protocol.WebDriver || filter.ClientType == "native" && r.Driver != protocol.WebDriver && !protocol.IsInteropClient(r.ClientType) || (filter.ClientType == protocol.InteropClient && protocol.IsInteropClient(r.ClientType) || filter.ClientType == protocol.InteropAUTClient && r.ClientType == protocol.InteropAUTClient)) {
 			rows = append(rows, r)
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].ID < rows[j].ID
+		}
+		return rows[i].CreatedAt.After(rows[j].CreatedAt)
+	})
 	out.Total = len(rows)
 	if offset < len(rows) {
 		end := offset + limit

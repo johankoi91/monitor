@@ -16,15 +16,10 @@ type Plan struct {
 	Tasks   []protocol.Task   `json:"tasks"`
 }
 
-func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
-	var err error
-	plan, err = promoteTaskSettings(plan, nil)
-	if err != nil {
-		return Plan{}, err
-	}
-	registered := map[string]bool{}
+func normalizePlan(probes []RuntimeRegistration, plan Plan) (Plan, error) {
+	registrations := map[string]RuntimeRegistration{}
 	for _, p := range probes {
-		registered[p.ID] = true
+		registrations[clientKey(p.HostID, p.ServiceType, p.ClientType)] = p
 	}
 	targets := map[string]bool{}
 	names := map[string]bool{}
@@ -52,6 +47,12 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 	tasks := map[string]bool{}
 	for i := range plan.Tasks {
 		v := &plan.Tasks[i]
+		if v.Credentials != nil {
+			return Plan{}, errors.New("credentials belong to the target service")
+		}
+		if len(v.Name) > 240 {
+			return Plan{}, errors.New("任务名称过长")
+		}
 		if v.Scenario == "" {
 			v.Scenario = "success"
 		}
@@ -73,8 +74,28 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 		if v.FailureThreshold < 1 || v.FailureThreshold > 10 || v.RecoveryThreshold < 1 || v.RecoveryThreshold > 10 || v.UnknownNotifySeconds < 30 || v.UnknownNotifySeconds > 3600 || len(v.Description) > 1000 {
 			return Plan{}, errors.New("失败/恢复次数、未知通知时长或描述无效")
 		}
-		if !protocol.ValidID(v.ID) || tasks[v.ID] || !targets[v.TargetID] || !registered[v.ProbeID] || v.IntervalSeconds < 5 || v.IntervalSeconds > 3600 || v.TimeoutSeconds < 3 || v.TimeoutSeconds >= v.IntervalSeconds {
-			return Plan{}, errors.New("任务目标、双端探针、周期或超时配置无效")
+		if !protocol.ValidID(v.ID) || tasks[v.ID] || !targets[v.TargetID] || !taskRegistered(registrations, *v) || v.IntervalSeconds < 5 || v.IntervalSeconds > 3600 || v.TimeoutSeconds < 3 || v.TimeoutSeconds >= v.IntervalSeconds {
+			return Plan{}, errors.New("任务目标、服务器客户端、周期或超时配置无效")
+		}
+		if !protocol.ValidID(v.HostID) || !serviceName.MatchString(v.ServiceType) || !serviceName.MatchString(v.ClientType) {
+			return Plan{}, errors.New("server, service type and client type are required")
+		}
+		if drivers[v.TargetID] == "agora" && (v.ServiceType != "rtc" || (v.ClientType != "native" && v.ClientType != "web" && v.ClientType != protocol.InteropClient)) {
+			return Plan{}, errors.New("RTC tasks require an advertised native or web client")
+		}
+		if protocol.IsInteropClient(v.ClientType) {
+			var target *protocol.Target
+			for i := range plan.Targets {
+				if plan.Targets[i].ID == v.TargetID {
+					target = &plan.Targets[i]
+				}
+			}
+			if target == nil || target.RTC == nil || target.RTC.NativeCoverage == nil || target.RTC.WebAccess == nil || target.RTC.WebAccess.Coverage == nil || v.TimeoutSeconds < 15 {
+				return Plan{}, errors.New("互通任务需要 Native/Web 能力和至少15秒超时")
+			}
+		}
+		if v.ClientType == "web" && drivers[v.TargetID] != "agora" {
+			return Plan{}, errors.New("Web 探测须关联真实 RTC 目标")
 		}
 		if drivers[v.TargetID] == "agora" {
 			if v.IntervalSeconds < 30 || v.TimeoutSeconds < 5 || v.TimeoutSeconds > 120 {
@@ -90,7 +111,7 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 			if target == nil || target.RTC == nil {
 				return Plan{}, errors.New("请先在目标服务配置 RTC 接入与鉴权")
 			}
-			if target.RTC.NativeCoverage != nil {
+			if !protocol.IsInteropClient(v.ClientType) && (target.RTC.NativeCoverage != nil || v.ClientType == "web" && target.RTC.WebAccess != nil && target.RTC.WebAccess.Coverage != nil) {
 				if v.SweepIntervalSeconds == 0 {
 					v.SweepIntervalSeconds = 900
 				}
@@ -101,7 +122,15 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 					return Plan{}, errors.New("Native 轮巡周期为 60–86400 秒")
 				}
 			}
-			v.RTC = cloneRTC(target.RTC)
+			v.RTC = taskRTC(*v, target.RTC)
+			if v.ClientType == "web" {
+				if err := v.RTC.WebAccess.Normalize(); err != nil {
+					return Plan{}, err
+				}
+				if v.TimeoutSeconds < 15 {
+					return Plan{}, errors.New("Web 探测超时至少为 15 秒")
+				}
+			}
 			v.CredentialVersion = target.CredentialVersion
 			v.Credentials = nil
 			v.HasCertificate = false
@@ -109,7 +138,7 @@ func normalizePlan(probes []ProbeConfig, plan Plan) (Plan, error) {
 				return Plan{}, errors.New("业务超时应至少比媒体发送时长多 2 秒")
 			}
 		} else if !scenarios[v.Scenario] {
-			return Plan{}, errors.New("旧模拟任务双端或场景无效")
+			return Plan{}, errors.New("模拟任务场景无效")
 		}
 		tasks[v.ID] = true
 	}
@@ -141,7 +170,33 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 	if expected == "" || expected != planRevision(h.planLocked()) {
 		return errors.New("配置已变化，请刷新后重试")
 	}
-	p, err := normalizePlan(h.probesLocked(), plan)
+	h.readNativeInventory(time.Now().UTC())
+	for i := range plan.Targets {
+		rtc := cloneRTC(plan.Targets[i].RTC)
+		plan.Targets[i].RTC = rtc
+		if rtc == nil {
+			continue
+		}
+		coverages := []*protocol.NativeCoverageConfig{rtc.NativeCoverage}
+		if rtc.WebAccess != nil {
+			coverages = append(coverages, rtc.WebAccess.Coverage)
+		}
+		for _, coverage := range coverages {
+			if coverage == nil {
+				continue
+			}
+			resolved, issues := protocol.ResolveDiscoveredAPs(*coverage, h.nativeSnapshot)
+			changed := fingerprint(cloneRTC(h.target(plan.Targets[i].ID).RTC)) != fingerprint(rtc)
+			if len(issues) > 0 {
+				if changed {
+					return errors.New("AP 自动发现不可用：" + issues[0])
+				}
+				continue
+			}
+			*coverage = resolved
+		}
+	}
+	p, err := normalizePlan(h.runtimesLocked(), plan)
 	if err != nil {
 		return err
 	}
@@ -173,7 +228,7 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 	for i := range p.Tasks {
 		for _, target := range p.Targets {
 			if target.ID == p.Tasks[i].TargetID {
-				p.Tasks[i].RTC = cloneRTC(target.RTC)
+				p.Tasks[i].RTC = taskRTC(p.Tasks[i], target.RTC)
 				p.Tasks[i].CredentialVersion = target.CredentialVersion
 				break
 			}
@@ -207,7 +262,6 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 		stored := storagePlan(p)
 		s.Plan = &stored
 		s.TargetCredentials = secrets
-		s.Credentials = nil
 		s.Enabled = map[string]bool{}
 		for id, current := range s.Native {
 			if !affected[id] {
@@ -220,7 +274,7 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 					break
 				}
 			}
-			if next == nil || !nativeEnabled(*next) {
+			if next == nil || !coverageEnabled(*next) {
 				delete(s.Native, id)
 				continue
 			}
@@ -262,4 +316,11 @@ func (h *Hub) UpdatePlan(expected string, plan Plan) error {
 		}
 	}
 	return nil
+}
+
+func taskRegistered(registrations map[string]RuntimeRegistration, task protocol.Task) bool {
+	if protocol.IsInteropClient(task.ClientType) {
+		return registrations[clientKey(task.HostID, task.ServiceType, "native")].ID != "" && registrations[clientKey(task.HostID, task.ServiceType, "web")].ID != ""
+	}
+	return registrations[clientKey(task.HostID, task.ServiceType, task.ClientType)].ID != ""
 }

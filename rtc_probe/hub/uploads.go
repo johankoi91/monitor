@@ -35,7 +35,7 @@ func bundleHeaders(r *http.Request) (stagedBundle, error) {
 	return b, nil
 }
 func (h *Hub) uploadParts(w http.ResponseWriter, r *http.Request, probe string) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/probe/uploads/"), "/")
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/probes/uploads/"), "/")
 	if len(parts) < 2 || len(parts) > 3 || !protocol.ValidID(parts[0]) {
 		http.NotFound(w, r)
 		return
@@ -188,7 +188,7 @@ func (h *Hub) uploadParts(w http.ResponseWriter, r *http.Request, probe string) 
 	}
 	clone := r.Clone(r.Context())
 	url := *r.URL
-	url.Path = "/api/v1/probe/uploads/" + id
+	url.Path = "/api/v1/probes/uploads/" + id
 	clone.URL = &url
 	clone.Method = "PUT"
 	clone.Body = io.NopCloser(bytes.NewReader(assembled.Bytes()))
@@ -237,7 +237,7 @@ func (h *Hub) receiveLogStatus(probe string, m protocol.Message) (protocol.Messa
 		return protocol.Message{}, errors.New("invalid log status")
 	}
 	v, ok := h.logOwner(m.Logs.ID, probe)
-	if !ok || v.RunID != m.Logs.RunID || v.Role != m.Logs.Role || m.Logs.ProbeID != probe {
+	if !ok || v.RunID != m.Logs.RunID || v.Role != m.Logs.Role || m.Logs.RuntimeID != probe {
 		return protocol.Message{}, errors.New("log status owner mismatch")
 	}
 	if v.Status == "REQUESTED" {

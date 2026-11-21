@@ -11,7 +11,7 @@ import (
 )
 
 func testConfig() Config {
-	return Config{Probes: []ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "A"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "service", Name: "overall RTC", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "audio", TargetID: "service", ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, Scenario: "success"}}}
+	return Config{Targets: []protocol.Target{{ID: "service", Name: "overall RTC", Driver: "mock"}}, Tasks: []protocol.Task{protocol.Task{ID: "audio", TargetID: "service", HostID: "host-probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, Scenario: "success", ServiceType: "rtc", ClientType: "native"}}}
 }
 func online(t *testing.T, h *Hub, id string) *session {
 	t.Helper()
@@ -19,14 +19,14 @@ func online(t *testing.T, h *Hub, id string) *session {
 	m := protocol.Msg("hello")
 	m.Driver = "mock"
 	m.Capacity = 2
-	if _, e := h.Receive(id, s, m); e != nil {
+	if _, e := receiveTest(h, id, s, m); e != nil {
 		t.Fatal(e)
 	}
 	return s
 }
 func TestOwnershipReplaySessionReplacementAndRestart(t *testing.T) {
 	dir := t.TempDir()
-	h, e := New(dir, testConfig(), nil)
+	h, e := newTestHub(dir, testConfig(), nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -42,11 +42,11 @@ func TestOwnershipReplaySessionReplacementAndRestart(t *testing.T) {
 	m.Revision = r.Revision
 	m.Role = "sender"
 	m.Events = []protocol.Event{ev}
-	if _, e = h.Receive("probe-b", b, m); e == nil {
+	if _, e = receiveTest(h, "probe-b", b, m); e == nil {
 		t.Fatal("cross-probe evidence accepted")
 	}
 	for i := 0; i < 2; i++ {
-		ack, e := h.Receive("probe-a", a, m)
+		ack, e := receiveTest(h, "probe-a", a, m)
 		if e != nil || len(ack.EventIDs) != 1 {
 			t.Fatal("idempotent evidence failed", e)
 		}
@@ -55,14 +55,14 @@ func TestOwnershipReplaySessionReplacementAndRestart(t *testing.T) {
 		t.Fatal("replay duplicated evidence")
 	}
 	m.Events[0].Name = "different"
-	if _, e = h.Receive("probe-a", a, m); e == nil {
+	if _, e = receiveTest(h, "probe-a", a, m); e == nil {
 		t.Fatal("conflicting replay accepted")
 	}
 	_ = online(t, h, "probe-a")
-	if _, e = h.Receive("probe-a", a, m); e == nil {
+	if _, e = receiveTest(h, "probe-a", a, m); e == nil {
 		t.Fatal("old session accepted")
 	}
-	restored, e := New(dir, testConfig(), nil)
+	restored, e := newTestHub(dir, testConfig(), nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -92,7 +92,7 @@ func (d *brokenDocuments) SaveDocument(_ string, b []byte) error {
 }
 func TestFailedPersistenceDoesNotPublishRunOrAck(t *testing.T) {
 	d := &brokenDocuments{}
-	h, e := New(t.TempDir(), testConfig(), d)
+	h, e := newTestHub(t.TempDir(), testConfig(), d)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -112,14 +112,14 @@ func TestFailedPersistenceDoesNotPublishRunOrAck(t *testing.T) {
 	m.Revision = r.Revision
 	m.Role = "sender"
 	d.fail = true
-	if _, e = h.Receive("probe-a", a, m); e == nil || h.state.Runs[r.ID].Endpoints["sender"].Ready {
+	if _, e = receiveTest(h, "probe-a", a, m); e == nil || h.state.Runs[r.ID].Endpoints["sender"].Ready {
 		t.Fatal("failed commit acknowledged state")
 	}
 }
 
 func TestEditablePlanPersistsAndCancelsOldExecution(t *testing.T) {
 	dir := t.TempDir()
-	h, err := New(dir, testConfig(), nil)
+	h, err := newTestHub(dir, testConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestEditablePlanPersistsAndCancelsOldExecution(t *testing.T) {
 	if err = h.UpdatePlan(revision, p); err == nil {
 		t.Fatal("stale configuration accepted")
 	}
-	restored, err := New(dir, testConfig(), nil)
+	restored, err := newTestHub(dir, testConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestEditablePlanPersistsAndCancelsOldExecution(t *testing.T) {
 	}
 	p = restored.planLocked()
 	revision = planRevision(p)
-	p.Tasks[0].ProbeID = "missing-probe"
+	p.Tasks[0].HostID = "missing-host"
 	if restored.UpdatePlan(revision, p) == nil {
 		t.Fatal("unregistered probe accepted")
 	}

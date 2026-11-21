@@ -52,7 +52,7 @@ func (h *Hub) admitProbe(t protocol.Task, now time.Time, parentID string) error 
 		return errors.New("task disabled")
 	}
 	nativeParent := h.state.Runs[parentID]
-	parallelNative := nativeEnabled(t) && nativeParent != nil && nativeParent.Kind == nativeCoverageKind && nativeParent.TaskID == t.ID && !terminal(nativeParent.Status)
+	parallelNative := coverageEnabled(t) && nativeParent != nil && nativeParent.Kind == nativeCoverageKind && nativeParent.TaskID == t.ID && !terminal(nativeParent.Status)
 	taskUsed := 0
 	active := 0
 	used := map[string]int{}
@@ -70,9 +70,9 @@ func (h *Hub) admitProbe(t protocol.Task, now time.Time, parentID string) error 
 			}
 			seen := map[string]bool{}
 			for _, e := range r.Endpoints {
-				if !seen[e.Job.ProbeID] {
-					used[e.Job.ProbeID]++
-					seen[e.Job.ProbeID] = true
+				if !seen[e.Job.RuntimeID] {
+					used[e.Job.RuntimeID]++
+					seen[e.Job.RuntimeID] = true
 				}
 			}
 		}
@@ -88,15 +88,16 @@ func (h *Hub) admitProbe(t protocol.Task, now time.Time, parentID string) error 
 		return errors.New("RTC capacity exhausted")
 	}
 	target := h.target(t.TargetID)
-	for _, id := range []string{t.ProbeID} {
+	target.Driver = protocol.TaskDriver(t, target)
+	for _, id := range []string{h.runtimeForTask(t)} {
 		s := h.sessions[id]
-		if target.Driver == "agora" && s != nil && !supportsNativeMedia(s) {
+		if protocol.RealDriver(target.Driver) && s != nil && !supportsTaskMedia(s, target.Driver) {
 			return errors.New("probe audio/video capability unavailable")
 		}
 		if t.RTC != nil && t.RTC.MediaEdges != nil && !supportsEdgeRouting(s) {
 			return errors.New("探针版本不支持指定 UDP edge，请升级探针")
 		}
-		if h.state.DisabledProbes[id] || s == nil || s.ResourceError != "" || time.Since(s.Seen) > 60*time.Second || s.Driver != target.Driver || s.Capacity <= used[id] {
+		if h.runtimeDisabled(id) || s == nil || s.ResourceError != "" || time.Since(s.Seen) > 60*time.Second || s.Driver != target.Driver || s.Capacity <= used[id] {
 			return errors.New("probe offline or capacity unavailable")
 		}
 	}

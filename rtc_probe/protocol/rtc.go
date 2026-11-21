@@ -7,36 +7,37 @@ import (
 
 // RTCParameters contains public target settings and execution snapshots. Credentials are write-only.
 type RTCParameters struct {
-	NativeCoverage  *NativeCoverageConfig `json:"native_coverage,omitempty"`
-	MediaEdges      *MediaEdgeRange       `json:"media_edges,omitempty"`
-	AppID           string                `json:"app_id"`
-	Template        string                `json:"template"`
-	Source          string                `json:"source"`
-	AuthMode        string                `json:"auth_mode"`
-	SampleRate      int                   `json:"sample_rate"`
-	AudioChannels   int                   `json:"audio_channels"`
-	MediaDurationMS int                   `json:"media_duration_ms"`
-	MinAudioMS      int                   `json:"min_audio_ms"`
-	MinVideoFrames  int                   `json:"min_video_frames"`
-	Width           int                   `json:"video_width"`
-	Height          int                   `json:"video_height"`
-	FPS             int                   `json:"video_fps"`
-	Bitrate         int                   `json:"video_bitrate_kbps"`
-	Codec           int                   `json:"video_codec"`
-	Private         bool                  `json:"private_deployment"`
-	AccessIPs       []string              `json:"access_ips,omitempty"`
-	AccessDomains   []string              `json:"access_domains,omitempty"`
-	VerifyDomain    string                `json:"verify_domain,omitempty"`
-	ProxyMode       int                   `json:"proxy_mode"`
-	DisableAut      bool                  `json:"disable_aut"`
-	AreaCode        uint32                `json:"area_code"`
-	DomainLimit     int                   `json:"domain_limit"`
-	AudioScenario   int                   `json:"audio_scenario"`
-	AudioProfile    int                   `json:"audio_profile"`
-	ChannelProfile  int                   `json:"channel_profile"`
-	ChannelType     int                   `json:"channel_type"`
-	LogSizeKB       int                   `json:"log_size_kb"`
-	LogLevel        int                   `json:"log_level"`
+	WebAccess       *WebAccessConfiguration `json:"web_access,omitempty"`
+	NativeCoverage  *NativeCoverageConfig   `json:"native_coverage,omitempty"`
+	MediaEdges      *MediaEdgeRange         `json:"media_edges,omitempty"`
+	AppID           string                  `json:"app_id"`
+	Template        string                  `json:"template"`
+	Source          string                  `json:"source"`
+	AuthMode        string                  `json:"auth_mode"`
+	SampleRate      int                     `json:"sample_rate"`
+	AudioChannels   int                     `json:"audio_channels"`
+	MediaDurationMS int                     `json:"media_duration_ms"`
+	MinAudioMS      int                     `json:"min_audio_ms"`
+	MinVideoFrames  int                     `json:"min_video_frames"`
+	Width           int                     `json:"video_width"`
+	Height          int                     `json:"video_height"`
+	FPS             int                     `json:"video_fps"`
+	Bitrate         int                     `json:"video_bitrate_kbps"`
+	Codec           int                     `json:"video_codec"`
+	Private         bool                    `json:"private_deployment"`
+	AccessIPs       []string                `json:"access_ips,omitempty"`
+	AccessDomains   []string                `json:"access_domains,omitempty"`
+	VerifyDomain    string                  `json:"verify_domain,omitempty"`
+	ProxyMode       int                     `json:"proxy_mode"`
+	DisableAut      bool                    `json:"disable_aut"`
+	AreaCode        uint32                  `json:"area_code"`
+	DomainLimit     int                     `json:"domain_limit"`
+	AudioScenario   int                     `json:"audio_scenario"`
+	AudioProfile    int                     `json:"audio_profile"`
+	ChannelProfile  int                     `json:"channel_profile"`
+	ChannelType     int                     `json:"channel_type"`
+	LogSizeKB       int                     `json:"log_size_kb"`
+	LogLevel        int                     `json:"log_level"`
 }
 
 const SenderUID uint32 = 10001
@@ -91,6 +92,11 @@ func (p *RTCParameters) Normalize() error {
 					seen[ip] = true
 				}
 			}
+		}
+	}
+	if p.WebAccess != nil {
+		if err := p.WebAccess.Normalize(); err != nil {
+			return err
 		}
 	}
 	p.Template = "audio_video"

@@ -30,9 +30,6 @@ func TestRTCHistoryQuotaAndRestrictedRuntime(t *testing.T) {
 	if _, err = pool.Exec("DROP SCHEMA IF EXISTS avops CASCADE"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec("CREATE SCHEMA avops; CREATE TABLE avops.rtc_probe_audit(audit_id text PRIMARY KEY,at timestamptz,payload jsonb); INSERT INTO avops.rtc_probe_audit VALUES('legacy',now(),'{}')"); err != nil {
-		t.Fatal(err)
-	}
 	key := bytes.Repeat([]byte{42}, 32)
 	db, err := postgres.Open(dsn, key, true)
 	if err != nil {
@@ -44,16 +41,20 @@ func TestRTCHistoryQuotaAndRestrictedRuntime(t *testing.T) {
 		}
 	}()
 	state := []byte(`{"revision":"v1","settings":{"history_mb":16}}`)
-	if err = db.SaveDocument("rtc-probe/state-v1", state); err != nil {
+	if err = db.SaveDocument("probe-center/state-v2", state); err != nil {
 		t.Fatal(err)
 	}
-	saved, ok, err := db.LoadDocument("rtc-probe/state-v1")
+	var controlEncrypted bool
+	if err = pool.QueryRow("SELECT payload IS NULL AND encrypted_payload IS NOT NULL FROM avops.documents WHERE name='probe-center/state-v2'").Scan(&controlEncrypted); err != nil || !controlEncrypted {
+		t.Fatal("v2 server credentials and target certificate must be encrypted", err)
+	}
+	saved, ok, err := db.LoadDocument("probe-center/state-v2")
 	if err != nil || !ok || !bytes.Equal(saved, state) {
 		t.Fatal("control state did not persist", err)
 	}
-	var retired bool
-	if err = pool.QueryRow("SELECT to_regclass('avops.rtc_probe_audit') IS NULL").Scan(&retired); err != nil || !retired {
-		t.Fatal("retired table still exists", err)
+	var created bool
+	if err = pool.QueryRow("SELECT to_regclass('avops.probe_runs_v2') IS NOT NULL AND to_regclass('avops.probe_logs_v2') IS NOT NULL").Scan(&created); err != nil || !created {
+		t.Fatal("v2 archive tables missing", err)
 	}
 	if _, err = pool.Exec("INSERT INTO avops.system_audit(actor,source_ip,action,target,outcome) VALUES('fixture','127.0.0.1','ACCESS_DENIED','/api/v1/rtc/tasks','DENIED'),('fixture','127.0.0.1','OTHER','baseline','SUCCESS')"); err != nil {
 		t.Fatal(err)
@@ -64,8 +65,8 @@ func TestRTCHistoryQuotaAndRestrictedRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rtcRows, otherRows int
-	if err = pool.QueryRow("SELECT count(*) FILTER(WHERE target LIKE '/api/v1/rtc/%'),count(*) FILTER(WHERE target='baseline') FROM avops.system_audit").Scan(&rtcRows, &otherRows); err != nil || rtcRows != 0 || otherRows != 1 {
-		t.Fatal("retired operation cleanup scope incorrect", rtcRows, otherRows, err)
+	if err = pool.QueryRow("SELECT count(*) FILTER(WHERE target LIKE '/api/v1/rtc/%'),count(*) FILTER(WHERE target='baseline') FROM avops.system_audit").Scan(&rtcRows, &otherRows); err != nil || rtcRows != 1 || otherRows != 1 {
+		t.Fatal("new archive initialization modified unrelated audit records", rtcRows, otherRows, err)
 	}
 	old := time.Now().UTC().Add(-8 * 24 * time.Hour)
 	r := hub.Run{ID: protocol.ID(), TaskID: "task", TargetID: "rtc", Driver: "agora", Status: "SUCCESS", CreatedAt: old, FinishedAt: &old, Logs: map[string]protocol.LogRequest{}}
@@ -114,6 +115,25 @@ func TestRTCHistoryQuotaAndRestrictedRuntime(t *testing.T) {
 	if _, err = db.RTCGetRun(child.ID); err == nil {
 		t.Fatal("expired sweep child retained indefinitely")
 	}
+	for _, client := range []string{"native", "web", "interop", "interop_aut"} {
+		record := hub.Run{ID: "filter-" + client, TaskID: "filter", TargetID: "service", ClientType: client, Driver: "agora", Status: "SUCCESS", CreatedAt: time.Now(), Logs: map[string]protocol.LogRequest{}}
+		if client == "web" {
+			record.Driver = protocol.WebDriver
+		}
+		if err = db.RTCPutRun(record, 16<<20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, client := range []string{"native", "web", "interop", "interop_aut"} {
+		page, filterErr := db.RTCListFilteredRuns(hub.HistoryFilter{TaskID: "filter", ClientType: client}, 10, 0)
+		want := 1
+		if client == "interop" {
+			want = 2
+		}
+		if filterErr != nil || page.Total != want || (client != "interop" && page.Runs[0].ClientType != client) {
+			t.Fatal("client filter mixed interoperability history", client, page.Total, filterErr)
+		}
+	}
 	role := "rtc_runtime_" + protocol.ID()[:8]
 	if _, err = pool.Exec("CREATE ROLE " + role + " LOGIN; GRANT USAGE ON SCHEMA avops TO " + role + "; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA avops TO " + role); err != nil {
 		t.Fatal(err)
@@ -133,7 +153,7 @@ func TestRTCHistoryQuotaAndRestrictedRuntime(t *testing.T) {
 		t.Fatal("runtime unexpectedly owns schema DDL")
 	}
 	data, _ := json.Marshal(map[string]any{"settings": map[string]int{"history_mb": 16}, "revision": "runtime"})
-	if err = runtime.SaveDocument("rtc-probe/state-v1", data); err != nil {
+	if err = runtime.SaveDocument("probe-center/state-v2", data); err != nil {
 		t.Fatal("restricted runtime cannot save control state", err)
 	}
 }

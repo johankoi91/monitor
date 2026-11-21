@@ -22,7 +22,7 @@ func (c *Client) uploadBundle(ctx context.Context, client *http.Client, request 
 		if err != nil {
 			return 0, nil, err
 		}
-		r.SetBasicAuth(c.config.ID, c.config.Secret)
+		r.SetBasicAuth(c.identity.ID, c.identity.Secret)
 		r.Header.Set("X-Bundle-SHA256", digest)
 		r.Header.Set("X-Bundle-Bytes", strconv.Itoa(len(data)))
 		if chunk {
@@ -46,16 +46,6 @@ func (c *Client) uploadBundle(ctx context.Context, client *http.Client, request 
 	status, b, err := send("GET", base+"/parts", nil, false)
 	if err != nil {
 		return err
-	}
-	if status == 404 || status == 405 {
-		status, _, err = send("PUT", base, data, false)
-		if err != nil {
-			return err
-		}
-		if status/100 != 2 {
-			return fmt.Errorf("legacy upload status %d", status)
-		}
-		return nil
 	}
 	if status != 200 {
 		return fmt.Errorf("upload resume status %d", status)

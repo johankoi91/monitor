@@ -24,7 +24,7 @@ func TestReportedStartupSurvivesOfflineMissingAndRecreation(t *testing.T) {
 	}
 	session = s.Connect("rtc-a")
 	now := time.Now().UTC()
-	if err := s.Receive("rtc-a", session, model.Report{Type: "snapshot", Complete: true, Sequence: 1, CollectedAt: now}); err != nil {
+	if err := s.Receive("rtc-a", session, model.Report{Host: fixtureHost("10.0.0.1", now), Type: "snapshot", Complete: true, Sequence: 1, CollectedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if read()["startup"] == nil || read()["stale"] != true {
@@ -34,7 +34,7 @@ func TestReportedStartupSurvivesOfflineMissingAndRecreation(t *testing.T) {
 	previous := s.lastStartups["rtc-a"]["ap"]
 	s.mu.RUnlock()
 	observation := model.Observation{Container: model.Container{ContainerID: "new-id", ContainerName: "ap", SnapshotID: "new-snapshot", CollectedAt: now, RuntimeStatus: "running"}, StartupValid: true}
-	report := model.Report{Type: "snapshot", Complete: true, Sequence: 2, CollectedAt: now, Containers: []model.Observation{observation}}
+	report := model.Report{Host: fixtureHost("10.0.0.1", now), Type: "snapshot", Complete: true, Sequence: 2, CollectedAt: now, Containers: []model.Observation{observation}}
 	if err := s.Receive("rtc-a", session, report); err != nil {
 		t.Fatal(err)
 	}

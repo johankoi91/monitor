@@ -73,3 +73,34 @@ func TestBusyNodeCannotChangeChecks(t *testing.T) {
 	_, err := s.UpdateChecks(b.Revision, "rtc-a/ap", "source", []model.Check{})
 	code(t, err, "OPERATION_IN_PROGRESS")
 }
+
+func TestCleanupEmptyGroupsPreservesMembersAndUsesRevision(t *testing.T) {
+	s := setup(t)
+	connect(t, s, "rtc-a", "ap")
+	before, err := s.Save(selection("", "rtc-a"), "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.record.Baseline.Definition.Clusters[0].Services = append(s.record.Baseline.Definition.Clusters[0].Services, model.Service{Code: "empty-service", Name: "Empty"})
+	s.record.Baseline.Definition.Clusters = append(s.record.Baseline.Definition.Clusters, model.Cluster{Code: "empty-group", Name: "Empty", Product: "RTC"})
+	_, err = s.CleanupEmptyGroups("stale", "fixture")
+	code(t, err, "BASELINE_CONFLICT")
+	after, err := s.CleanupEmptyGroups(before.Revision, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodeCount(after) != 1 || len(after.Definition.Clusters) != 1 || len(after.Definition.Clusters[0].Services) != 1 || after.Revision == before.Revision {
+		t.Fatal("cleanup changed membership or retained empty groups")
+	}
+	unchanged, err := s.CleanupEmptyGroups(after.Revision, "fixture")
+	if err != nil || unchanged.Revision != after.Revision {
+		t.Fatal("cleanup not idempotent", err)
+	}
+	after, err = s.Save(model.Selection{ExpectedRevision: after.Revision, Additions: []model.Addition{}, Removals: []string{"rtc-a/ap"}}, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Definition.Clusters) != 0 {
+		t.Fatal("last removal left an empty group")
+	}
+}

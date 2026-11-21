@@ -18,7 +18,7 @@ import (
 	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/rtc-probe/probe"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
-	"github.com/johankoi91/monitor/rtc-probe/testkit"
+	"github.com/johankoi91/monitor/rtc-probe/tests/testkit"
 )
 
 // The test binary becomes the same isolated JSON-pipe worker used by the CLI.
@@ -35,7 +35,7 @@ func TestMockWorkerProcess(t *testing.T) {
 	os.Exit(0)
 }
 func config(scenario string) hub.Config {
-	return hub.Config{Probes: []hub.ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("a", 32), Location: "A"}, {ID: "probe-b", Secret: strings.Repeat("b", 32), Location: "B"}}, Targets: []protocol.Target{{ID: "rtc-whole-service", Name: "RTC overall service", Driver: "mock"}}, Tasks: []protocol.Task{{ID: "audio", TargetID: "rtc-whole-service", ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 4, Scenario: scenario}}}
+	return hub.Config{Targets: []protocol.Target{{ID: "rtc-whole-service", Name: "RTC overall service", Driver: "mock"}}, Tasks: []protocol.Task{protocol.Task{ID: "audio", TargetID: "rtc-whole-service", HostID: "host-probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 4, Scenario: scenario, ServiceType: "rtc", ClientType: "native"}}}
 }
 func eventually(t *testing.T, timeout time.Duration, fn func() bool) {
 	t.Helper()
@@ -57,7 +57,7 @@ type fixture struct {
 
 func setup(t *testing.T, scenario string) fixture {
 	t.Helper()
-	h, e := hub.New(t.TempDir(), config(scenario), nil)
+	h, e := hub.New(t.TempDir(), hub.Config{}, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -65,7 +65,16 @@ func setup(t *testing.T, scenario string) fixture {
 	done := make(chan struct{})
 	go func() { defer close(done); h.Run(ctx) }()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/probe/") {
+		if r.URL.Path == "/api/v1/probes/enroll" {
+			var input protocol.ProbeEnrollment
+			if json.NewDecoder(r.Body).Decode(&input) != nil || h.EnrollProbe(input, "127.0.0.1") != nil {
+				w.WriteHeader(409)
+				return
+			}
+			json.NewEncoder(w).Encode(protocol.ProbeEnrollmentReply{HostID: input.Host.ID, RuntimeID: input.RuntimeID, ObservedAddress: "127.0.0.1"})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/probes/") {
 			h.ServeProbe(w, r)
 		} else {
 			h.ServeAdmin(w, r)
@@ -73,10 +82,34 @@ func setup(t *testing.T, scenario string) fixture {
 	}))
 	var dirs []string
 	clientDone := []chan error{}
-	for _, identity := range config(scenario).Probes[:1] {
+	for range []int{0} {
 		dir := t.TempDir()
 		dirs = append(dirs, dir)
-		c, e := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(s.URL, "http") + "/api/v1/probe/connect", ID: identity.ID, Secret: identity.Secret, DataDir: dir, Capacity: 1, AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
+		hostDir := t.TempDir()
+		host, err := probe.LoadHostIdentity(hostDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtimeID, runtimeSecret := protocol.RuntimeIdentityKey(host.Secret, "rtc", "native")
+		identity := probe.RuntimeIdentity{Version: 2, ID: runtimeID, Secret: runtimeSecret, HostID: host.Host.ID, ServiceType: "rtc", ClientType: "native"}
+		b, _ := json.Marshal(identity)
+		if err = os.WriteFile(filepath.Join(dir, "runtime-identity-v2.json"), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err = h.EnrollProbe(protocol.ProbeEnrollment{Host: host.Host, HostSecret: host.Secret, RuntimeID: identity.ID, RuntimeSecret: identity.Secret, ServiceType: "rtc", ClientType: "native"}, "127.0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config(scenario)
+		cfg.Tasks[0].HostID = host.Host.ID
+		var snapshot struct {
+			Revision string `json:"config_revision"`
+		}
+		value, _ := json.Marshal(h.Snapshot())
+		json.Unmarshal(value, &snapshot)
+		if err = h.UpdatePlan(snapshot.Revision, hub.Plan{Targets: cfg.Targets, Tasks: cfg.Tasks}); err != nil {
+			t.Fatal(err)
+		}
+		c, e := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(s.URL, "http") + "/api/v1/probes/connect", HostDir: hostDir, EnrollmentToken: strings.Repeat("e", 32), ServiceType: "rtc", ClientType: "native", DataDir: dir, Capacity: 1, AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMockWorkerProcess$")
 			cmd.Env = append(os.Environ(), "RTC_TEST_WORKER=1")
 			return cmd
@@ -151,7 +184,7 @@ func TestRealWorkersEvidenceAcknowledgementAndLogRetrieval(t *testing.T) {
 	}
 	for _, dir := range f.dirs {
 		eventually(t, 5*time.Second, func() bool {
-			b, e := os.ReadFile(filepath.Join(dir, "outbox.json"))
+			b, e := os.ReadFile(filepath.Join(dir, "outbox-v2.json"))
 			if e != nil {
 				return false
 			}

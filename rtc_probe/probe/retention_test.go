@@ -95,12 +95,12 @@ func TestBudgetEvictsConfirmedSuccessBeforeFailureAndRejectsWhenProtected(t *tes
 
 func TestBudgetRejectsAssignmentWithoutStartingSDKAndExpiryIsReported(t *testing.T) {
 	c := retentionFixture(t)
-	c.config.ID = "probe"
+	c.identity.ID = "probe"
 	c.config.Driver = "agora"
 	c.config.Capacity = 1
 	c.retention.DiskMB = 16
 	c.config.WorkerCommand = func(context.Context) *exec.Cmd { t.Fatal("SDK started despite exhausted reserve"); return nil }
-	job := protocol.Job{RunID: protocol.ID(), TaskID: "task", ProbeID: "probe", Role: "pair", Revision: "v1", Deadline: time.Now().Add(time.Minute), Target: protocol.Target{ID: "target", Driver: "agora"}}
+	job := protocol.Job{RunID: protocol.ID(), TaskID: "task", RuntimeID: "probe", Role: "pair", Revision: "v1", Deadline: time.Now().Add(time.Minute), Target: protocol.Target{ID: "target", Driver: "agora"}}
 	if err := c.prepare(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestBudgetRejectsAssignmentWithoutStartingSDKAndExpiryIsReported(t *testing
 			t.Fatal("resource rejection missing", role)
 		}
 	}
-	req := protocol.LogRequest{ID: protocol.ID(), RunID: protocol.ID(), ProbeID: "probe", Role: "receiver", ExpiresAt: time.Now().Add(time.Minute)}
+	req := protocol.LogRequest{ID: protocol.ID(), RunID: protocol.ID(), RuntimeID: "probe", Role: "receiver", ExpiresAt: time.Now().Add(time.Minute)}
 	c.collect(context.Background(), req)
 	report, ok := c.logReports[req.ID]
 	if !ok || report.Status != "EXPIRED" {

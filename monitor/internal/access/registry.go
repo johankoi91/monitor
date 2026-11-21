@@ -41,12 +41,11 @@ type Key struct {
 	RequestID string     `json:"request_id,omitempty"`
 }
 type IssueRequest struct {
-	ExpiresHours   int    `json:"expires_hours,omitempty"`
-	OwnerID        string `json:"-"`
-	RequestID      string `json:"request_id,omitempty"`
-	Name           string `json:"name"`
-	Purpose        string `json:"purpose"`
-	ApprovalReason string `json:"approval_reason,omitempty"` // legacy input ignored
+	ExpiresHours int    `json:"expires_hours,omitempty"`
+	OwnerID      string `json:"-"`
+	RequestID    string `json:"request_id,omitempty"`
+	Name         string `json:"name"`
+	Purpose      string `json:"purpose"`
 }
 type Issued struct {
 	Key    Key    `json:"key"`

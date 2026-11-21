@@ -13,11 +13,11 @@ func healthFixture(t *testing.T) (*Hub, protocol.Task) {
 	c.Tasks[0].TimeoutSeconds = 30
 	c.Tasks[0].FailureThreshold = 3
 	c.Tasks[0].RecoveryThreshold = 2
-	c.Tasks[0].RTC = &protocol.RTCParameters{AppID: "88dc432b1fe248039879fb84844c497b", AuthMode: "none"}
-	if err := c.Tasks[0].RTC.Normalize(); err != nil {
+	c.Targets[0].RTC = &protocol.RTCParameters{AppID: "88dc432b1fe248039879fb84844c497b", AuthMode: "none"}
+	if err := c.Targets[0].RTC.Normalize(); err != nil {
 		t.Fatal(err)
 	}
-	h, err := New(t.TempDir(), c, nil)
+	h, err := newTestHub(t.TempDir(), c, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func healthFixture(t *testing.T) (*Hub, protocol.Task) {
 	m := protocol.Msg("hello")
 	m.Driver = "agora"
 	m.Capacity = 1
-	if _, err = h.Receive("probe-a", s, m); err != nil {
+	if _, err = receiveTest(h, "probe-a", s, m); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := h.task(c.Tasks[0].ID)
@@ -102,7 +102,7 @@ func TestHealthExpiryRequiresNewEvidence(t *testing.T) {
 	}
 }
 func TestHistoryRetentionIsScoped(t *testing.T) {
-	h, err := New(t.TempDir(), testConfig(), nil)
+	h, err := newTestHub(t.TempDir(), testConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestHistoryRetentionIsScoped(t *testing.T) {
 }
 
 func TestControlCacheKeepsHistoryAndPendingDiagnostics(t *testing.T) {
-	h, err := New(t.TempDir(), testConfig(), nil)
+	h, err := newTestHub(t.TempDir(), testConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestControlCacheKeepsHistoryAndPendingDiagnostics(t *testing.T) {
 		for i := 0; i < 12; i++ {
 			id := protocol.ID()
 			at := now.Add(-time.Duration(i+1) * time.Minute)
-			s.Runs[id] = &Run{ID: id, TaskID: "audio", TargetID: "service", Driver: "agora", Status: "SUCCESS", CreatedAt: at, Deadline: at, FinishedAt: &at, Logs: map[string]protocol.LogRequest{}, Endpoints: map[string]*Endpoint{"sender": {Job: protocol.Job{ProbeID: "probe-a"}}, "receiver": {Job: protocol.Job{ProbeID: "probe-b"}}}}
+			s.Runs[id] = &Run{ID: id, TaskID: "audio", TargetID: "service", Driver: "agora", Status: "SUCCESS", CreatedAt: at, Deadline: at, FinishedAt: &at, Logs: map[string]protocol.LogRequest{}, Endpoints: map[string]*Endpoint{"sender": {Job: protocol.Job{RuntimeID: "probe-a"}}, "receiver": {Job: protocol.Job{RuntimeID: "probe-b"}}}}
 			if i == 11 {
 				oldest = id
 			}

@@ -11,8 +11,8 @@ import (
 	"time"
 
 	rtc "github.com/AgoraIO-Extensions/Agora-Golang-Server-SDK/v2/go_sdk/rtc"
+	"github.com/johankoi91/monitor/rtc-probe/internal/telemetry"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
-	"github.com/johankoi91/monitor/rtc-probe/telemetry"
 )
 
 // SelfCheck exercises the original SDK without Connect. Set the output directory
@@ -24,7 +24,7 @@ func SelfCheck() error {
 			return fmt.Errorf("demo media missing: %s", name)
 		}
 	}
-	dir := os.Getenv("RTC_PROBE_SELF_CHECK_DIR")
+	dir := os.Getenv("AVOPS_PROBE_SELF_CHECK_DIR")
 	preserve := dir != ""
 	if dir == "" {
 		var err error
@@ -40,7 +40,7 @@ func SelfCheck() error {
 	if err := p.Normalize(); err != nil {
 		return err
 	}
-	job := protocol.Job{RunID: "self-check", TaskID: "self-check", ProbeID: "self-check", Revision: "local", Target: protocol.Target{ID: "local-sdk-check", Driver: "agora"}, RTC: p, WorkDir: dir}
+	job := protocol.Job{RunID: "self-check", TaskID: "self-check", RuntimeID: "self-check", Revision: "local", Target: protocol.Target{ID: "local-sdk-check", Driver: "agora"}, RTC: p, WorkDir: dir}
 	r := &recorder{job: job, worker: protocol.ID(), at: time.Now()}
 	var err error
 	r.trace, err = telemetry.New(dir, r.worker, nil, nil)

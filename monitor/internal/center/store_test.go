@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,17 +16,33 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/johankoi91/monitor/runtime/internal/model"
-	"github.com/johankoi91/monitor/runtime/web"
+	"github.com/johankoi91/monitor/runtime/internal/webui"
 	"gopkg.in/yaml.v3"
 	"io/fs"
 )
 
 func config() Config {
-	return Config{Site: model.Site{Code: "rtc-pilot", Name: "RTC"}, Agents: []AgentConfig{{ID: "rtc-a", Secret: strings.Repeat("a", 32), HostName: "shared-hostname", HostAddress: "10.0.0.1"}, {ID: "rtc-b", Secret: strings.Repeat("b", 32), HostName: "shared-hostname", HostAddress: "10.0.0.2"}}}
+	return Config{Site: model.Site{Code: "rtc-pilot", Name: "RTC"}}
+}
+func fixtureHost(ip string, at time.Time) *model.HostInfo {
+	return &model.HostInfo{HostName: "shared-hostname", HostAddress: ip, IPAddresses: []string{ip}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: at}
+}
+func newTestStore(dir string, cfg Config) (*Store, error) {
+	s, err := NewStore(dir, cfg)
+	if err != nil {
+		return nil, err
+	}
+	for i, id := range []string{"rtc-a", "rtc-b"} {
+		if err = s.EnrollAgent(id, strings.Repeat(string(rune('a'+i)), 32), *fixtureHost(fmt.Sprintf("10.0.0.%d", i+1), time.Now().UTC())); err != nil {
+			s.Close()
+			return nil, err
+		}
+	}
+	return s, nil
 }
 func setup(t *testing.T) *Store {
 	t.Helper()
-	s, err := NewStore(t.TempDir(), config())
+	s, err := newTestStore(t.TempDir(), config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +51,7 @@ func setup(t *testing.T) *Store {
 }
 func report(names ...string) model.Report {
 	at := time.Now().UTC()
-	r := model.Report{Type: "snapshot", Complete: true, Sequence: 1, CollectedAt: at, Containers: []model.Observation{}}
+	r := model.Report{Host: fixtureHost("10.0.0.1", at), Type: "snapshot", Complete: true, Sequence: 1, CollectedAt: at, Containers: []model.Observation{}}
 	for _, name := range names {
 		r.Containers = append(r.Containers, model.Observation{Container: model.Container{ContainerID: "id-" + name, ContainerName: name, SnapshotID: "snapshot-" + name, CollectedAt: at, RuntimeStatus: "running", Image: "rtc/ap:1"}, Startup: &model.Startup{SnapshotID: "snapshot-" + name, CollectedAt: at, Config: model.StartupConfig{Image: "rtc/ap:1"}}})
 	}
@@ -43,7 +60,11 @@ func report(names ...string) model.Report {
 func connect(t *testing.T, s *Store, id string, names ...string) string {
 	t.Helper()
 	session := s.Connect(id)
-	if err := s.Receive(id, session, report(names...)); err != nil {
+	r := report(names...)
+	if id == "rtc-b" {
+		r.Host = fixtureHost("10.0.0.2", r.CollectedAt)
+	}
+	if err := s.Receive(id, session, r); err != nil {
 		t.Fatal(err)
 	}
 	return session
@@ -76,7 +97,7 @@ func nodeCount(b model.Baseline) int {
 
 func TestSaveCrossHostAndRestartRecovery(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewStore(dir, config())
+	s, err := newTestStore(dir, config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +130,7 @@ func TestSaveCrossHostAndRestartRecovery(t *testing.T) {
 		t.Fatal("startup configuration mixed into YAML")
 	}
 	s.Close()
-	s, err = NewStore(dir, config())
+	s, err = newTestStore(dir, config())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,17 +290,17 @@ func TestNoFreshnessOnIncompleteOrOldSession(t *testing.T) {
 }
 func TestWriterLockAndCorruptRecovery(t *testing.T) {
 	dir := t.TempDir()
-	s, err := NewStore(dir, config())
+	s, err := newTestStore(dir, config())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second, err := NewStore(dir, config()); err == nil {
+	if second, err := newTestStore(dir, config()); err == nil {
 		second.Close()
 		t.Fatal("second writer accepted")
 	}
 	s.Close()
 	os.WriteFile(filepath.Join(dir, "current-baseline.json"), []byte(`{"baseline":`), 0600)
-	if broken, err := NewStore(dir, config()); err == nil {
+	if broken, err := newTestStore(dir, config()); err == nil {
 		broken.Close()
 		t.Fatal("corrupt record accepted")
 	}
@@ -367,7 +388,7 @@ func TestHTTPAuthUnknownFieldsAndCSRF(t *testing.T) {
 
 func TestLoginShellLoadsWithoutExposingAuthenticatedData(t *testing.T) {
 	s := setup(t)
-	assets, err := fs.Sub(web.Files, "static")
+	assets, err := fs.Sub(webui.Files, "static")
 	if err != nil {
 		t.Fatal(err)
 	}

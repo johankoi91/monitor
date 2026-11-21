@@ -23,6 +23,8 @@ import (
 )
 
 type Server struct {
+	AgentEnrollmentToken string
+	ProbeEnrollmentToken string
 	Probes               *hub.Hub
 	Store                *Store
 	AdminID, AdminSecret string
@@ -92,7 +94,11 @@ func (s *Server) Handler() http.Handler {
 		// Load the login shell without a native Basic challenge. The shell contains
 		// no monitoring data or credentials; every API still requires Basic Auth.
 		path := r.URL.Path
-		if strings.HasPrefix(path, "/api/v1/probe/") {
+		if path == "/api/v1/probes/enroll" {
+			s.enrollProbe(w, r, ip)
+			return
+		}
+		if path == "/api/v1/probes/connect" || strings.HasPrefix(path, "/api/v1/probes/uploads/") {
 			if s.Probes == nil {
 				failure(w, 503, "RTC_PROBE_DISABLED", "RTC 探测服务尚未配置")
 			} else {
@@ -100,7 +106,7 @@ func (s *Server) Handler() http.Handler {
 			}
 			return
 		}
-		if path == "/" || path == "/index.html" || path == "/app.js" || path == "/style.css" || path == "/favicon.ico" || strings.HasPrefix(path, "/assets/") {
+		if isWorkspacePath(path) || path == "/" || path == "/index.html" || path == "/app.js" || path == "/style.css" || path == "/favicon.ico" || strings.HasPrefix(path, "/assets/") {
 			if r.Method != "GET" && r.Method != "HEAD" {
 				method(w)
 				return
@@ -109,11 +115,15 @@ func (s *Server) Handler() http.Handler {
 				http.NotFound(w, r)
 				return
 			}
-			if path == "/" || path == "/index.html" {
+			if path == "/" || path == "/index.html" || isWorkspacePath(path) {
 				serveLoginShell(w, r)
 				return
 			}
 			s.Assets.ServeHTTP(w, r)
+			return
+		}
+		if path == "/api/v1/agent/enroll" {
+			s.enrollAgent(w, r, ip)
 			return
 		}
 		id, secret, ok := r.BasicAuth()
@@ -157,8 +167,7 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		if r.URL.Path == "/api/v1/agent/connect" {
-			a, exists := s.Store.Agent(id)
-			valid = ok && exists && equal(secret, a.Secret)
+			valid = ok && s.Store.AuthenticateAgent(id, secret)
 		}
 		if !valid {
 			w.Header().Set("WWW-Authenticate", `Basic realm="avops", charset="UTF-8"`)
@@ -272,6 +281,14 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		if s.accountRoutes(w, r, account, id, ip) {
+			return
+		}
+		if strings.HasPrefix(path, "/api/v1/probes/") {
+			if s.Probes == nil {
+				failure(w, 503, "PROBE_CENTER_UNAVAILABLE", "探测服务中心不可用")
+			} else {
+				s.Probes.ServeRegistryAdmin(w, r)
+			}
 			return
 		}
 		if strings.HasPrefix(path, "/api/v1/rtc/") {
@@ -501,8 +518,16 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			forbidden := []string{s.AdminSecret}
-			for _, a := range s.Store.config.Agents {
-				forbidden = append(forbidden, a.Secret)
+			forbidden = append(forbidden, s.AgentEnrollmentToken)
+			reused := s.Store.AgentCredentialMatches(request.Secret)
+			if request.Endpoints != nil {
+				for _, endpoint := range *request.Endpoints {
+					reused = reused || s.Store.AgentCredentialMatches(endpoint.Secret)
+				}
+			}
+			if reused {
+				failure(w, 400, "CREDENTIAL_REUSE", "通知凭证须独立于机器凭证")
+				return
 			}
 			settings, err := s.Notifier.UpdateSettings(request, forbidden)
 			if err != nil {
@@ -533,6 +558,27 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			s.agent(w, r, id)
+		case path == "/api/v1/baseline/cleanup-empty-groups":
+			if r.Method != "POST" {
+				method(w)
+				return
+			}
+			var request struct {
+				ExpectedRevision *string `json:"expected_revision"`
+			}
+			if !decode(w, r, &request) {
+				return
+			}
+			if request.ExpectedRevision == nil {
+				failure(w, 400, "REQUIRED_FIELDS", "expected_revision 必须填写")
+				return
+			}
+			value, err := s.Store.CleanupEmptyGroups(*request.ExpectedRevision, id)
+			if err != nil {
+				writeProblem(w, err)
+				return
+			}
+			send(w, 200, value)
 		case path == "/api/v1/baseline/selection":
 			if r.Method != "POST" {
 				method(w)
@@ -635,6 +681,21 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			send(w, 200, s.Store.MediaEdges())
+		case strings.HasPrefix(path, "/api/v1/agents/") && strings.HasSuffix(path, "/retire"):
+			if r.Method != "POST" {
+				method(w)
+				return
+			}
+			agentID := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/agents/"), "/retire")
+			if !identifier.MatchString(agentID) {
+				failure(w, 404, "NOT_FOUND", "路径不存在")
+				return
+			}
+			if err := s.Store.RetireAgent(agentID); err != nil {
+				writeProblem(w, err)
+				return
+			}
+			send(w, 200, map[string]any{"agent_id": agentID, "retired": true})
 		case path == "/api/v1/agents":
 			if r.Method != "GET" {
 				method(w)
@@ -747,7 +808,7 @@ func (s *Server) Handler() http.Handler {
 			if s.Database != nil {
 				storageBackend = "postgresql"
 			}
-			send(w, 200, map[string]any{"version": "1.0.0", "api_version": "v1", "storage_backend": storageBackend, "credential_purpose": purpose, "can_manage_keys": canManageKeys, "accounts_enabled": s.Accounts != nil, "permissions": permissions, "user": account, "capabilities": []string{"discovery", "startup", "baseline", "status", "restart", "audit", "notifications", "react_ui", "access_keys", "cadvisor_resources"}})
+			send(w, 200, map[string]any{"version": "V1.0", "api_version": "v1", "storage_backend": storageBackend, "credential_purpose": purpose, "can_manage_keys": canManageKeys, "accounts_enabled": s.Accounts != nil, "permissions": permissions, "user": account, "capabilities": []string{"discovery", "startup", "baseline", "status", "restart", "audit", "notifications", "react_ui", "access_keys", "cadvisor_resources"}})
 		case strings.HasPrefix(path, "/api/"):
 			failure(w, 404, "NOT_FOUND", "接口不存在")
 		default:
@@ -865,6 +926,7 @@ func (s *Server) agent(w http.ResponseWriter, r *http.Request, id string) {
 				return
 			case <-ticker.C:
 				plan := s.Store.Plan(id)
+				plan.ObservedAddress, _, _ = net.SplitHostPort(r.RemoteAddr)
 				if plan.Revision != revision {
 					conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 					if conn.WriteJSON(plan) != nil {

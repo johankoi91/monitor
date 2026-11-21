@@ -19,8 +19,8 @@ import (
 	"time"
 
 	rtc "github.com/AgoraIO-Extensions/Agora-Golang-Server-SDK/v2/go_sdk/rtc"
+	"github.com/johankoi91/monitor/rtc-probe/internal/telemetry"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
-	"github.com/johankoi91/monitor/rtc-probe/telemetry"
 )
 
 const DemoDirectory = "/opt/rtc-probe/test_data"
@@ -28,14 +28,16 @@ const DemoDirectory = "/opt/rtc-probe/test_data"
 var errLocalMedia = errors.New("LOCAL_MEDIA_UNAVAILABLE")
 
 type recorder struct {
-	trace   *telemetry.Recorder
-	mu      sync.Mutex
-	job     protocol.Job
-	worker  string
-	at      time.Time
-	out     chan protocol.Message
-	closed  bool
-	dropped atomic.Uint64
+	receiveRole                      string
+	receiveMinAudio, receiveMinVideo int
+	trace                            *telemetry.Recorder
+	mu                               sync.Mutex
+	job                              protocol.Job
+	worker                           string
+	at                               time.Time
+	out                              chan protocol.Message
+	closed                           bool
+	dropped                          atomic.Uint64
 }
 
 func (r *recorder) message(kind, role string) protocol.Message {
@@ -112,10 +114,23 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 	if err := d.Decode(&initial); err != nil {
 		return err
 	}
-	if initial.Job == nil || initial.Job.Role != "pair" || initial.Job.RTC == nil {
+	if initial.Job == nil || (initial.Job.Role != "pair" && (initial.Job.NativeCase == nil || !protocol.IsInteropClient(initial.Job.NativeCase.ClientType) || (initial.Job.Role != "sender" && initial.Job.Role != "receiver"))) || initial.Job.RTC == nil {
 		return errors.New("native pair assignment required")
 	}
 	job := *initial.Job
+	if job.Duplex() && job.Role != "sender" {
+		return errors.New("duplex Native endpoint must use Native identity")
+	}
+	roles := workerRoles(job)
+	receiveRole := "receiver"
+	if job.Duplex() {
+		receiveRole = job.Role
+	}
+	peerUID, peerErr := strconv.ParseUint(job.PublisherUID, 10, 32)
+	if peerErr != nil || peerUID == 0 {
+		return errors.New("invalid peer publisher UID")
+	}
+	primaryRole := roles[0]
 	p := *job.RTC
 	if job.NativeCase != nil {
 		if err := job.NativeCase.Validate(); err != nil {
@@ -137,7 +152,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 	}
 	ctx, cancel := context.WithDeadline(parent, job.Deadline)
 	defer cancel()
-	r := &recorder{job: job, worker: protocol.ID(), at: time.Now(), out: make(chan protocol.Message, 256)}
+	r := &recorder{receiveRole: receiveRole, receiveMinAudio: p.MinAudioMS, receiveMinVideo: p.MinVideoFrames, job: job, worker: protocol.ID(), at: time.Now(), out: make(chan protocol.Message, 256)}
 	secretValues := []string{}
 	if job.Credentials != nil {
 		secretValues = []string{job.Credentials.SenderToken, job.Credentials.ReceiverToken, job.Credentials.AppCertificate}
@@ -192,8 +207,8 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 	failures := make(chan string, 8)
 	cleaning := atomic.Bool{}
 	streaming := atomic.Bool{}
-	for _, role := range []string{"sender", "receiver"} {
-		r.event(role, "worker_event", "INITIALIZE", "worker_started", "", nil, map[string]any{"driver": "agora", "shared_service": true, "connections": 2}, 0)
+	for _, role := range roles {
+		r.event(role, "worker_event", "INITIALIZE", "worker_started", "", nil, map[string]any{"driver": "agora", "shared_service": job.Role == "pair", "connections": len(roles)}, 0)
 	}
 	phase := "INITIALIZE"
 	phaseAt := time.Now()
@@ -232,7 +247,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 		cfg.DataDir = sdkDir
 		cfg.LogSize = p.LogSizeKB
 		cfg.LogLevel = p.LogLevel
-		if err := r.callArgs("sender", phase, "Initialize", map[string]any{"config": snapshotObject(cfg), "log_size_native_unit": "KB"}, false, func() int { return rtc.Initialize(cfg) }); err != nil {
+		if err := r.callArgs(primaryRole, phase, "Initialize", map[string]any{"config": snapshotObject(cfg), "log_size_native_unit": "KB"}, false, func() int { return rtc.Initialize(cfg) }); err != nil {
 			return err
 		}
 		serviceInitialized = true
@@ -253,7 +268,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				return err
 			}
 		}
-		for _, role := range []string{"sender", "receiver"} {
+		for _, role := range roles {
 			advance("CREATE_CONNECTION")
 			pub := rtc.NewRtcConPublishConfig()
 			pub.AudioScenario = rtc.AudioScenario(p.AudioScenario)
@@ -278,14 +293,14 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				config.Mode = rtc.LocalProxyModeLocalOnly
 				config.DisableAut = job.NativeCase.Sender.Transport != "aut" && job.NativeCase.Receiver.Transport != "aut"
 			}
-			if err := r.callArgs("sender", phase, "SetLocalAccessPoint", map[string]any{"config": snapshotObject(config)}, false, func() int { return rtc.SetLocalAccessPoint(config) }); err != nil {
+			if err := r.callArgs(primaryRole, phase, "SetLocalAccessPoint", map[string]any{"config": snapshotObject(config)}, false, func() int { return rtc.SetLocalAccessPoint(config) }); err != nil {
 				return err
 			}
 		}
 		if err := r.configureRoutes(connections); err != nil {
 			return err
 		}
-		for _, endpointRole := range []string{"sender", "receiver"} {
+		for _, endpointRole := range roles {
 			role := endpointRole
 			con := connections[role]
 			uid := strconv.FormatUint(uint64(protocol.SenderUID), 10)
@@ -415,95 +430,121 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				return err
 			}
 		}
-		b := connections["receiver"]
-		if err := r.call("receiver", "REGISTER", "SetPlaybackAudioFrameBeforeMixingParameters", func() int { return r.user("receiver", b).SetPlaybackAudioFrameBeforeMixingParameters(1, 16000) }); err != nil {
-			return err
-		}
-		audio := &rtc.AudioFrameObserver{OnGetAudioFramePosition: func(*rtc.LocalUser) int {
-			r.callback("receiver", "REGISTER", "OnGetAudioFramePosition", "RegisterAudioFrameObserver", map[string]any{"return_value": 0x0008}, true)
-			return 0x0008
-		}, OnPlaybackAudioFrameBeforeMixing: func(_ *rtc.LocalUser, channel, user string, f *rtc.AudioFrame, vad rtc.VadState, vadFrame *rtc.AudioFrame) bool {
-			parameters := audioParameters(channel, user, f, vad, vadFrame)
-			// Native 4.6.31 may omit channelId here. This observer belongs to
-			// B's connection, whose channel and UID were checked in OnConnected.
-			parameters["connection_channel_id"] = job.Channel
-			parameters["channel_from_connection"] = channel == ""
-			accepted := false
-			defer func() {
-				parameters["accepted"] = accepted
-				r.callback("receiver", "RECEIVE_AUDIO", "OnPlaybackAudioFrameBeforeMixing", "SubscribeAudio", parameters, true)
-			}()
-			if cleaning.Load() || ctx.Err() != nil || !streaming.Load() || !sameAudioSource(job.Channel, job.PublisherUID, channel, user, values["receiver"].snapshot().Connected) || f == nil || f.Type != rtc.AudioFrameTypePCM16 || f.BytesPerSample != 2 || f.Channels != 1 || f.SamplesPerSec != 16000 || f.SamplesPerChannel <= 0 || len(f.Buffer) != f.SamplesPerChannel*2 {
-				return true
+		b := connections[receiveRole]
+		if b != nil {
+			if err := r.call(receiveRole, "REGISTER", "SetPlaybackAudioFrameBeforeMixingParameters", func() int { return r.user(receiveRole, b).SetPlaybackAudioFrameBeforeMixingParameters(1, 16000) }); err != nil {
+				return err
 			}
-			var energy int64
-			for i := 0; i < len(f.Buffer); i += 2 {
-				v := int64(int16(binary.LittleEndian.Uint16(f.Buffer[i:])))
-				energy += v * v
-			}
-			if energy/int64(f.SamplesPerChannel) < 900 {
-				return true
-			}
-			accepted = true
-			first := false
-			values["receiver"].update(func(e *protocol.Evidence) {
-				first = e.ReceivedFrames == 0
-				e.ReceivedFrames++
-				e.ValidSamples += f.SamplesPerChannel
-				e.MediaDurationMS = e.ValidSamples / 16
-				if first {
-					e.FirstFrameMS = time.Since(r.at).Milliseconds()
+			audio := &rtc.AudioFrameObserver{OnGetAudioFramePosition: func(*rtc.LocalUser) int {
+				r.callback(receiveRole, "REGISTER", "OnGetAudioFramePosition", "RegisterAudioFrameObserver", map[string]any{"return_value": 0x0008}, true)
+				return 0x0008
+			}, OnPlaybackAudioFrameBeforeMixing: func(_ *rtc.LocalUser, channel, user string, f *rtc.AudioFrame, vad rtc.VadState, vadFrame *rtc.AudioFrame) bool {
+				parameters := audioParameters(channel, user, f, vad, vadFrame)
+				// Native 4.6.31 may omit channelId here. This observer belongs to
+				// B's connection, whose channel and UID were checked in OnConnected.
+				parameters["connection_channel_id"] = job.Channel
+				parameters["channel_from_connection"] = channel == ""
+				accepted := false
+				defer func() {
+					parameters["accepted"] = accepted
+					r.callback(receiveRole, "RECEIVE_AUDIO", "OnPlaybackAudioFrameBeforeMixing", "SubscribeAudio", parameters, true)
+				}()
+				if cleaning.Load() || ctx.Err() != nil || !streaming.Load() || !sameAudioSource(job.Channel, job.PublisherUID, channel, user, values[receiveRole].snapshot().Connected) || f == nil || f.Type != rtc.AudioFrameTypePCM16 || f.BytesPerSample != 2 || f.Channels != 1 || f.SamplesPerSec != 16000 || f.SamplesPerChannel <= 0 || len(f.Buffer) != f.SamplesPerChannel*2 {
+					return true
 				}
-			})
-			if first {
-				parameters["first_valid_frame"] = true
+				var energy int64
+				for i := 0; i < len(f.Buffer); i += 2 {
+					v := int64(int16(binary.LittleEndian.Uint16(f.Buffer[i:])))
+					energy += v * v
+				}
+				if energy/int64(f.SamplesPerChannel) < 900 {
+					return true
+				}
+				accepted = true
+				first := false
+				values[receiveRole].update(func(e *protocol.Evidence) {
+					first = e.ReceivedFrames == 0
+					e.ReceivedFrames++
+					e.ValidSamples += f.SamplesPerChannel
+					e.MediaDurationMS = e.ValidSamples / 16
+					if first {
+						e.FirstFrameMS = time.Since(r.at).Milliseconds()
+					}
+				})
+				if first {
+					parameters["first_valid_frame"] = true
+				}
+				return true
+			}}
+			if err := r.call(receiveRole, "REGISTER", "RegisterAudioFrameObserver", func() int { return b.RegisterAudioFrameObserver(audio, 0, nil) }); err != nil {
+				return err
 			}
-			return true
-		}}
-		if err := r.call("receiver", "REGISTER", "RegisterAudioFrameObserver", func() int { return b.RegisterAudioFrameObserver(audio, 0, nil) }); err != nil {
-			return err
-		}
-		video := &rtc.VideoFrameObserver{OnRenderVideoFrame: func(channel string, user uint32, f *rtc.VideoFrame) bool {
-			parameters := videoParameters(channel, user, f)
-			accepted := false
-			defer func() {
-				parameters["accepted"] = accepted
-				r.callback("receiver", "RECEIVE_VIDEO", "OnRenderVideoFrame", "SubscribeVideo", parameters, true)
-			}()
-			if cleaning.Load() || ctx.Err() != nil || !streaming.Load() || channel != job.Channel || user != protocol.SenderUID || f == nil || f.Type != rtc.VideoPixelI420 || f.Width <= 0 || f.Height <= 0 || f.YStride < f.Width || f.UStride < (f.Width+1)/2 || f.VStride < (f.Width+1)/2 || len(f.YBuffer) < f.YStride*f.Height || len(f.UBuffer) < f.UStride*((f.Height+1)/2) || len(f.VBuffer) < f.VStride*((f.Height+1)/2) {
+			// The bundled SDK calls this OnRenderVideoFrame; keep an OnFrame-style
+			// handler in the integration project without changing the SDK package.
+			onFrame := func(channel, user string, f *rtc.VideoFrame) bool {
+				parameters := videoParameters(channel, user, f)
+				parameters["handler"] = "OnFrame"
+				parameters["evidence_source"] = "sdk_yuv_frame_callback"
+				accepted := false
+				defer func() {
+					parameters["accepted"] = accepted
+					r.callback(receiveRole, "RECEIVE_VIDEO", "OnRenderVideoFrame", "SubscribeVideo", parameters, true)
+				}()
+				if cleaning.Load() || ctx.Err() != nil || !streaming.Load() {
+					parameters["rejected_reason"] = "OUTSIDE_MEDIA_WINDOW"
+					return true
+				}
+				if reason := yuvFrameRejection(job.Channel, strconv.FormatUint(peerUID, 10), channel, user, f); reason != "" {
+					parameters["rejected_reason"] = reason
+					return true
+				}
+				accepted = true
+				first := false
+				values[receiveRole].update(func(e *protocol.Evidence) {
+					first = e.ReceivedVideoFrames == 0
+					e.ReceivedVideoFrames++
+					e.VideoWidth = f.Width
+					e.VideoHeight = f.Height
+					if first {
+						e.FirstVideoMS = time.Since(r.at).Milliseconds()
+					}
+				})
+				if first {
+					parameters["first_valid_frame"] = true
+				}
 				return true
 			}
-			accepted = true
-			first := false
-			values["receiver"].update(func(e *protocol.Evidence) {
-				first = e.ReceivedVideoFrames == 0
-				e.ReceivedVideoFrames++
-				e.VideoWidth = f.Width
-				e.VideoHeight = f.Height
-				if first {
-					e.FirstVideoMS = time.Since(r.at).Milliseconds()
-				}
-			})
-			if first {
-				parameters["first_valid_frame"] = true
+			video := &rtc.VideoFrameObserver{
+				OnRenderVideoFrame: func(channel string, uid uint32, frame *rtc.VideoFrame) bool {
+					return onFrame(channel, strconv.FormatUint(uint64(uid), 10), frame)
+				},
+				GetVideoFormatPreference: func() rtc.VideoPixelFormat {
+					r.callback(receiveRole, "REGISTER", "GetVideoFormatPreference", "RegisterVideoFrameObserver", map[string]any{"return_value": int(rtc.VideoPixelI420)}, true)
+					return rtc.VideoPixelI420
+				},
 			}
-			return true
-		}}
-		if err := r.call("receiver", "REGISTER", "RegisterVideoFrameObserver", func() int { return b.RegisterVideoFrameObserver(video) }); err != nil {
-			return err
+			if err := r.call(receiveRole, "REGISTER", "RegisterVideoFrameObserver", func() int { return b.RegisterVideoFrameObserver(video) }); err != nil {
+				return err
+			}
+
 		}
-		advance("CONFIGURE_VIDEO")
-		encoder := rtc.NewVideoEncoderConfiguration()
-		encoder.Width = 352
-		encoder.Height = 288
-		encoder.Framerate = 15
-		encoder.Bitrate = 400
-		encoder.CodecType = rtc.VideoCodecTypeH264
-		if err := r.callArgs("sender", "CONFIGURE_VIDEO", "SetVideoEncoderConfiguration", map[string]any{"config": snapshotObject(encoder)}, false, func() int { return connections["sender"].SetVideoEncoderConfiguration(encoder) }); err != nil {
-			return err
+		if connections["sender"] != nil {
+			advance("CONFIGURE_VIDEO")
+			encoder := rtc.NewVideoEncoderConfiguration()
+			encoder.Width = 352
+			encoder.Height = 288
+			encoder.Framerate = 15
+			encoder.Bitrate = 400
+			encoder.CodecType = rtc.VideoCodecTypeH264
+			if job.NativeCase != nil && protocol.IsInteropClient(job.NativeCase.ClientType) {
+				encoder.CodecType = rtc.VideoCodecTypeVp8
+			}
+			if err := r.callArgs("sender", "CONFIGURE_VIDEO", "SetVideoEncoderConfiguration", map[string]any{"config": snapshotObject(encoder)}, false, func() int { return connections["sender"].SetVideoEncoderConfiguration(encoder) }); err != nil {
+				return err
+			}
 		}
 		advance("JOIN")
-		for _, role := range []string{"sender", "receiver"} {
+		for _, role := range roles {
 			token := ""
 			if job.Credentials != nil {
 				token = job.Credentials.SenderToken
@@ -521,7 +562,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 				return err
 			}
 		}
-		for _, role := range []string{"sender", "receiver"} {
+		for _, role := range roles {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -530,18 +571,20 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			case <-joined[role]:
 			}
 		}
-		advance("SUBSCRIBE")
-		if err := r.call("receiver", phase, "SubscribeAudio", func() int { return r.user("receiver", b).SubscribeAudio(job.PublisherUID) }); err != nil {
-			return err
+		if b != nil {
+			advance("SUBSCRIBE")
+			if err := r.call(receiveRole, phase, "SubscribeAudio", func() int { return r.user(receiveRole, b).SubscribeAudio(job.PublisherUID) }); err != nil {
+				return err
+			}
+			values[receiveRole].update(func(e *protocol.Evidence) { e.Subscribed = true })
+			if err := r.call(receiveRole, phase, "SubscribeVideo", func() int {
+				return r.user(receiveRole, b).SubscribeVideo(job.PublisherUID, &rtc.VideoSubscriptionOptions{StreamType: rtc.VideoStreamHigh, EncodedFrameOnly: false})
+			}); err != nil {
+				return err
+			}
+			values[receiveRole].update(func(e *protocol.Evidence) { e.VideoSubscribed = true })
 		}
-		values["receiver"].update(func(e *protocol.Evidence) { e.Subscribed = true })
-		if err := r.call("receiver", phase, "SubscribeVideo", func() int {
-			return r.user("receiver", b).SubscribeVideo(job.PublisherUID, &rtc.VideoSubscriptionOptions{StreamType: rtc.VideoStreamHigh, EncodedFrameOnly: false})
-		}); err != nil {
-			return err
-		}
-		values["receiver"].update(func(e *protocol.Evidence) { e.VideoSubscribed = true })
-		for _, role := range []string{"sender", "receiver"} {
+		for _, role := range roles {
 			r.out <- r.message("run_ready", role)
 		}
 		advance("WAIT_START")
@@ -550,11 +593,20 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			return ctx.Err()
 		case <-start:
 		}
-		if time.Until(job.Deadline) < time.Duration(p.MediaDurationMS)*time.Millisecond+500*time.Millisecond {
+		requiredWindow := time.Duration(p.MediaDurationMS)*time.Millisecond + 500*time.Millisecond
+		if job.Duplex() {
+			requiredWindow += 3 * time.Second
+		}
+		if time.Until(job.Deadline) < requiredWindow {
 			return errControlStartLate
 		}
 		advance("PUBLISH")
 		streaming.Store(true)
+		if connections["sender"] == nil {
+			advance("MEDIA")
+			mediaStart = time.Now().UnixNano()
+			return receiveMedia(ctx, values["receiver"], failures, p)
+		}
 		if err := r.call("sender", phase, "PublishAudio", func() int { return connections["sender"].PublishAudio() }); err != nil {
 			return err
 		}
@@ -596,7 +648,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 			outcome = "ERROR"
 			reason = "CONTROL_START_TOO_LATE"
 		}
-		r.event("receiver", "stage_event", phase, "stage_failed", "", nil, map[string]any{"reason": reason, "detail": sanitize(err.Error(), job.Credentials)}, 0)
+		r.event(primaryRole, "stage_event", phase, "stage_failed", "", nil, map[string]any{"reason": reason, "detail": sanitize(err.Error(), job.Credentials)}, 0)
 	}
 	snapshots := map[string]protocol.Evidence{}
 	for role, s := range values {
@@ -608,7 +660,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 	cleaning.Store(true)
 	cleanup := "SUCCESS"
 	waiting := map[string]bool{}
-	for _, role := range []string{"sender", "receiver"} {
+	for _, role := range roles {
 		if con := connections[role]; con != nil {
 			waiting[role] = live[role].Load()
 			if err := r.call(role, "CLEANUP", "Disconnect", con.Disconnect); err != nil {
@@ -618,7 +670,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 		}
 	}
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), protocol.CleanupGrace-2*time.Second)
-	for _, role := range []string{"sender", "receiver"} {
+	for _, role := range roles {
 		if waiting[role] {
 			select {
 			case <-disconnected[role]:
@@ -629,7 +681,7 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 		}
 	}
 	cleanupCancel()
-	for _, role := range []string{"sender", "receiver"} {
+	for _, role := range roles {
 		if con := connections[role]; con != nil {
 			span := r.trace.Begin(role, "CLEANUP", "Connection.Release", r.arguments(role, "Connection.Release"), false)
 			con.Release()
@@ -638,13 +690,13 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 	}
 
 	if serviceInitialized {
-		if e := r.call("sender", "CLEANUP", "Service.Release", rtc.Release); e != nil {
+		if e := r.call(primaryRole, "CLEANUP", "Service.Release", rtc.Release); e != nil {
 			cleanup = "FAILED"
 		}
 	}
 	proofs := map[string]*protocol.RouteEvidence{}
 	if job.NativeCase != nil {
-		for _, role := range []string{"sender", "receiver"} {
+		for _, role := range roles {
 			proofs[role] = r.routeEvidence(role, mediaStart, mediaEnd)
 			r.event(role, "route_evidence", "VERIFY_ROUTE", "route_verification", "", nil, snapshotObject(proofs[role]), 0)
 		}
@@ -659,16 +711,16 @@ func run(parent context.Context, input io.Reader, output io.Writer, policy media
 		outcome = "ERROR"
 		reason = "LOCAL_TELEMETRY_OVERFLOW"
 	}
-	for _, role := range []string{"sender", "receiver"} {
+	for _, role := range roles {
 		m := r.message("run_result", role)
 		roleOutcome, roleReason := outcome, reason
 		if businessPhase == "MEDIA" && errors.Is(err, context.DeadlineExceeded) {
-			a, b := snapshots["sender"], snapshots["receiver"]
-			if role == "sender" && a.SentFrames > 0 && a.SentVideoFrames > 0 {
+			a, b := snapshots["sender"], snapshots[receiveRole]
+			if role == "sender" && !job.Duplex() && a.SentFrames > 0 && a.SentVideoFrames > 0 {
 				roleOutcome = "SUCCESS"
 				roleReason = "MEDIA_SUBMITTED"
 			}
-			if role == "receiver" {
+			if role == receiveRole {
 				if b.MediaDurationMS >= 1000 && b.ReceivedVideoFrames < 5 {
 					roleReason = "VIDEO_RECEIVE_TIMEOUT"
 				} else if b.MediaDurationMS < 1000 && b.ReceivedVideoFrames >= 5 {
@@ -751,7 +803,7 @@ func sendFiles(ctx context.Context, r *recorder, a *rtc.RtcConnection, values ma
 			videoClock = nil
 		case <-summary.C:
 			r.trace.Flush()
-			for _, role := range []string{"sender", "receiver"} {
+			for _, role := range workerRoles(r.job) {
 				v := values[role].snapshot()
 				r.event(role, "media_summary", "MEDIA", "media_window", "", nil, map[string]any{"sent_frames": v.SentFrames, "received_frames": v.ReceivedFrames, "valid_samples": v.ValidSamples, "media_duration_ms": v.MediaDurationMS, "sent_video_frames": v.SentVideoFrames, "received_video_frames": v.ReceivedVideoFrames, "video_width": v.VideoWidth, "video_height": v.VideoHeight}, 0)
 			}
@@ -782,8 +834,14 @@ func sendFiles(ctx context.Context, r *recorder, a *rtc.RtcConnection, values ma
 			}
 			values["sender"].update(func(v *protocol.Evidence) { v.SentVideoFrames++ })
 		}
-		v := values["receiver"].snapshot()
-		if mediaEnded && v.MediaDurationMS >= 1000 && v.ReceivedVideoFrames >= 5 {
+		v := values[r.receiveRole].snapshot()
+		if r.job.Duplex() && mediaEnded && time.Since(started) >= time.Duration(r.job.MediaDurationMS)*time.Millisecond+3*time.Second && v.MediaDurationMS >= r.receiveMinAudio && v.ReceivedVideoFrames >= r.receiveMinVideo {
+			return nil
+		}
+		if mediaEnded && !r.job.Duplex() && r.job.Role == "sender" && time.Since(started) >= time.Duration(r.job.MediaDurationMS)*time.Millisecond+3*time.Second {
+			return nil
+		}
+		if mediaEnded && r.job.Role == "pair" && v.MediaDurationMS >= 1000 && v.ReceivedVideoFrames >= 5 {
 			return nil
 		}
 	}
@@ -794,4 +852,29 @@ func (r *recorder) user(role string, connection *rtc.RtcConnection) *rtc.LocalUs
 	value := connection.GetLocalUser()
 	r.trace.End(span, "object", nil, map[string]any{"present": value != nil, "local_user_id": r.worker + "/" + role + "/local_user"})
 	return value
+}
+
+func receiveMedia(ctx context.Context, value *stats, failures <-chan string, p protocol.RTCParameters) error {
+	started := time.Now()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case failure := <-failures:
+			return errors.New(failure)
+		case <-ticker.C:
+			evidence := value.snapshot()
+			if time.Since(started) >= time.Duration(p.MediaDurationMS)*time.Millisecond && evidence.MediaDurationMS >= p.MinAudioMS && evidence.ReceivedVideoFrames >= p.MinVideoFrames {
+				return nil
+			}
+		}
+	}
+}
+func workerRoles(job protocol.Job) []string {
+	if job.Role == "pair" {
+		return []string{"sender", "receiver"}
+	}
+	return []string{job.Role}
 }

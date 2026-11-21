@@ -54,13 +54,16 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal("second center writer accepted")
 	}
 	dir := t.TempDir()
-	cfg := center.Config{Site: model.Site{Code: "pgqa", Name: "PG Test"}, Agents: []center.AgentConfig{{ID: "qa", Secret: strings.Repeat("a", 32), HostName: "qa", HostAddress: "127.0.0.1"}}, RestartRules: []model.RestartRule{{AgentID: "qa", ContainerName: "canary", ServiceCode: "canary", Image: "canary:test", Approved: true, ApprovalRef: "isolated PG fixture"}}}
+	cfg := center.Config{Site: model.Site{Code: "pgqa", Name: "PG Test"}, RestartRules: []model.RestartRule{{AgentID: "qa", ContainerName: "canary", ServiceCode: "canary", Image: "canary:test", Approved: true, ApprovalRef: "isolated PG fixture"}}}
 	legacy, e := center.NewStore(dir, cfg)
 	if e != nil {
 		t.Fatal(e)
 	}
+	if e = legacy.EnrollAgent("qa", strings.Repeat("a", 32), model.HostInfo{HostName: "qa", HostAddress: "127.0.0.1", IPAddresses: []string{"127.0.0.1"}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: time.Now().UTC()}); e != nil {
+		t.Fatal(e)
+	}
 	at := time.Now().UTC()
-	report := model.Report{Type: "snapshot", Complete: true, Sequence: 1, CollectedAt: at, Containers: []model.Observation{{Container: model.Container{ContainerID: strings.Repeat("a", 64), ContainerName: "canary", SnapshotID: "snapshot", Image: "canary:test", RuntimeStatus: "running", CollectedAt: at}, Startup: &model.Startup{SnapshotID: "snapshot", CollectedAt: at, Config: model.StartupConfig{Image: "canary:test"}}, StartedAt: "2020-01-01T00:00:00Z"}}}
+	report := model.Report{Host: &model.HostInfo{HostName: "qa", HostAddress: "127.0.0.1", IPAddresses: []string{"127.0.0.1"}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: at}, Type: "snapshot", Complete: true, Sequence: 1, CollectedAt: at, Containers: []model.Observation{{Container: model.Container{ContainerID: strings.Repeat("a", 64), ContainerName: "canary", SnapshotID: "snapshot", Image: "canary:test", RuntimeStatus: "running", CollectedAt: at}, Startup: &model.Startup{SnapshotID: "snapshot", CollectedAt: at, Config: model.StartupConfig{Image: "canary:test"}}, StartedAt: "2020-01-01T00:00:00Z"}}}
 	session := legacy.Connect("qa")
 	if e = legacy.Receive("qa", session, report); e != nil {
 		t.Fatal(e)
@@ -83,7 +86,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	issued, e := keys.Issue(access.IssueRequest{Name: "legacy restart", Purpose: "RESTART", ApprovalReason: "fixture"}, "legacy")
+	issued, e := keys.Issue(access.IssueRequest{Name: "legacy restart", Purpose: "RESTART"}, "legacy")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -373,14 +376,14 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if w := post("/api/v1/operations/restart", request, token, issued); w.Code != 403 {
 		t.Fatalf("viewer restart bypass: %d", w.Code)
 	}
-	customerKey, e := registry.Issue(access.IssueRequest{OwnerID: user.ID, Name: "customer key", Purpose: "RESTART", ApprovalReason: "fixture"}, "fixture")
+	customerKey, e := registry.Issue(access.IssueRequest{OwnerID: user.ID, Name: "customer key", Purpose: "RESTART"}, "fixture")
 	if e != nil {
 		t.Fatal(e)
 	}
 	if w := post("/api/v1/operations/restart", request, token, customerKey); w.Code != 403 {
 		t.Fatalf("customer replay exposed other operation: %d %s", w.Code, w.Body.String())
 	}
-	otherKey, e := registry.Issue(access.IssueRequest{OwnerID: admin.ID, Name: "other owner", Purpose: "RESTART", ApprovalReason: "fixture"}, "fixture")
+	otherKey, e := registry.Issue(access.IssueRequest{OwnerID: admin.ID, Name: "other owner", Purpose: "RESTART"}, "fixture")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -394,6 +397,9 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer customerStore.Close()
+	if e = customerStore.EnrollAgent("qa", strings.Repeat("a", 32), model.HostInfo{HostName: "qa", HostAddress: "127.0.0.1", IPAddresses: []string{"127.0.0.1"}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: time.Now().UTC()}); e != nil {
+		t.Fatal(e)
+	}
 	customerSession := customerStore.Connect("qa")
 	if e = customerStore.Receive("qa", customerSession, report); e != nil {
 		t.Fatal(e)
@@ -510,7 +516,7 @@ func TestPostgreSQLMigrationAccountsPermissionsAndRecovery(t *testing.T) {
 	if e = accounts.ChangePassword(operator.ID, "strong-operator-password", "changed-operator-password", "fixture"); e != nil {
 		t.Fatal(e)
 	}
-	owned, e := registry.Issue(access.IssueRequest{Name: "owned", Purpose: "RESTART", OwnerID: operator.ID, ApprovalReason: "owned permission"}, admin.ID)
+	owned, e := registry.Issue(access.IssueRequest{Name: "owned", Purpose: "RESTART", OwnerID: operator.ID}, admin.ID)
 	if e != nil {
 		t.Fatal(e)
 	}

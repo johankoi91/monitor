@@ -2,7 +2,6 @@ package hub
 
 import (
 	"encoding/json"
-	"github.com/johankoi91/monitor/rtc-probe/durable"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
 	"strings"
 	"testing"
@@ -13,23 +12,26 @@ func targetPlanFixture(t *testing.T) *Hub {
 	cfg := testConfig()
 	cfg.Tasks = nil
 	cfg.Targets = nil
-	h, err := New(t.TempDir(), cfg, nil)
+	h, err := newTestHub(t.TempDir(), cfg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"probe-a", "probe-b"} {
+	for _, id := range []string{"probe-a", "probe-b", "probe-web"} {
 		session := h.Session(id)
 		m := protocol.Msg("hello")
 		m.Driver = "agora"
+		if id == "probe-web" {
+			m.Driver = protocol.WebDriver
+		}
 		m.Capacity = 4
-		if _, err = h.Receive(id, session, m); err != nil {
+		if _, err = receiveTest(h, id, session, m); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return h
 }
 func targetTask(id, target string) protocol.Task {
-	return protocol.Task{ID: id, TargetID: target, ProbeID: "probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30}
+	return protocol.Task{ID: id, TargetID: target, HostID: "host-probe-a", Enabled: true, IntervalSeconds: 60, TimeoutSeconds: 30, ServiceType: "rtc", ClientType: "native"}
 }
 func TestTargetOwnsSharedRTCAndCredentials(t *testing.T) {
 	h := targetPlanFixture(t)
@@ -38,7 +40,7 @@ func TestTargetOwnsSharedRTCAndCredentials(t *testing.T) {
 	if err := h.UpdatePlan(planRevision(h.planLocked()), plan); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.state.Credentials) != 0 || h.state.TargetCredentials["rtc"].AppCertificate != certificate {
+	if h.state.TargetCredentials["rtc"].AppCertificate != certificate {
 		t.Fatal("credentials are not target-owned")
 	}
 	for _, task := range h.state.Plan.Tasks {
@@ -98,39 +100,6 @@ func TestTargetChangeOnlyCancelsAssociatedTasksAndKeepsHistorySnapshot(t *testin
 	task, _ := h.task("a")
 	if !task.RTC.Private {
 		t.Fatal("associated task did not inherit updated target")
-	}
-}
-func TestLegacyTargetMigrationSplitsConflictingSettingsAndPreservesSecrets(t *testing.T) {
-	cfg := testConfig()
-	cfg.Targets = nil
-	cfg.Tasks = nil
-	dir := t.TempDir()
-	tasks := []protocol.Task{targetTask("a", "legacy"), targetTask("b", "legacy")}
-	tasks[0].RTC = &protocol.RTCParameters{AppID: strings.Repeat("a", 32), AuthMode: "certificate"}
-	tasks[1].RTC = &protocol.RTCParameters{AppID: strings.Repeat("b", 32), AuthMode: "certificate"}
-	old := state{Plan: &Plan{Targets: []protocol.Target{{ID: "legacy", Name: "legacy", Driver: "agora"}}, Tasks: tasks}, Credentials: map[string]protocol.Credentials{"a": {AppCertificate: strings.Repeat("c", 32)}, "b": {AppCertificate: strings.Repeat("d", 32)}}, Runs: map[string]*Run{}, Enabled: map[string]bool{}, Settings: defaultSettings()}
-	if err := durable.Write(dir+"/state.json", old); err != nil {
-		t.Fatal(err)
-	}
-	h, err := New(dir, cfg, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(h.config.Targets) != 2 || h.config.Tasks[0].TargetID == h.config.Tasks[1].TargetID {
-		t.Fatal("conflicting legacy RTC settings overwritten")
-	}
-	for i, task := range h.config.Tasks {
-		expected := strings.Repeat([]string{"c", "d"}[i], 32)
-		if h.state.TargetCredentials[task.TargetID].AppCertificate != expected {
-			t.Fatal("migration lost credential")
-		}
-	}
-	reloaded, err := New(dir, cfg, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reloaded.config.Tasks[1].TargetID != h.config.Tasks[1].TargetID || len(reloaded.config.Targets) != 2 {
-		t.Fatal("migration not idempotent")
 	}
 }
 func TestTaskCannotOverrideTargetOrWriteTargetCredentials(t *testing.T) {

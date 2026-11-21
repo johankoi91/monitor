@@ -26,7 +26,7 @@ func TestRetiredStateOperationHistoryIsNotStoredOrExposed(t *testing.T) {
 	if h.state.Health[task.ID].State != "HEALTHY" {
 		t.Fatal("current health calculation regressed")
 	}
-	data, err := os.ReadFile(filepath.Join(h.dir, "state.json"))
+	data, err := os.ReadFile(filepath.Join(h.dir, "state-v2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,35 +65,16 @@ func TestRetiredStateOperationHistoryIsNotStoredOrExposed(t *testing.T) {
 		t.Fatal("retired directory created")
 	}
 }
-func TestUpgradePurgesRetiredQueuedStateAndFiles(t *testing.T) {
+func TestV2StateRejectsOldFieldsWithoutMigratingBindings(t *testing.T) {
 	h, _ := healthFixture(t)
 	data, _ := json.Marshal(h.state)
-	var legacy map[string]any
-	_ = json.Unmarshal(data, &legacy)
-	legacy["pending_audits"] = []any{map[string]any{"audit_id": "old-history", "action": "RTC_HEALTH_CHANGED"}}
-	legacy["settings"].(map[string]any)["audit_days"] = 30
-	if err := durable.Write(filepath.Join(h.dir, "state.json"), legacy); err != nil {
+	var value map[string]any
+	json.Unmarshal(data, &value)
+	value["pending_audits"] = []any{map[string]string{"audit_id": "old"}}
+	if err := durable.Write(filepath.Join(h.dir, "state-v2.json"), value); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(h.dir, "history", "audit")
-	if err := durable.Write(filepath.Join(dir, "old.json"), map[string]string{"audit_id": "old-history"}); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := New(h.dir, h.config, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(restored.config.Tasks) != 1 {
-		t.Fatal("upgrade lost task")
-	}
-	data, err = os.ReadFile(filepath.Join(h.dir, "state.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(data, []byte("pending_audits")) || bytes.Contains(data, []byte("audit_days")) || bytes.Contains(data, []byte("old-history")) {
-		t.Fatal("retired state survived upgrade")
-	}
-	if _, err = os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatal("retired files survived upgrade")
+	if _, err := New(h.dir, Config{}, nil); err == nil {
+		t.Fatal("old state fields accepted")
 	}
 }

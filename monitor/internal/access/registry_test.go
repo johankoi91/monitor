@@ -13,7 +13,7 @@ func TestDirectIssueAndRevocationRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued, err := r.Issue(IssueRequest{Name: "direct restart", Purpose: "RESTART", ApprovalReason: "isolated test approval"}, "bootstrap")
+	issued, err := r.Issue(IssueRequest{Name: "direct restart", Purpose: "RESTART"}, "bootstrap")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,10 +47,10 @@ func TestOnlyRestartKeysCanBeIssued(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	if _, err = r.Issue(IssueRequest{Name: "console", Purpose: "CONSOLE", ApprovalReason: "test"}, "bootstrap"); err == nil {
+	if _, err = r.Issue(IssueRequest{Name: "console", Purpose: "CONSOLE"}, "bootstrap"); err == nil {
 		t.Fatal("console key was still issued")
 	}
-	if _, err = r.Issue(IssueRequest{Name: "restart", Purpose: "RESTART", ApprovalReason: "test"}, "bootstrap"); err != nil {
+	if _, err = r.Issue(IssueRequest{Name: "restart", Purpose: "RESTART"}, "bootstrap"); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -186,7 +186,7 @@ func (d *DB) saveDocument(ctx context.Context, tx *sql.Tx, name string, data []b
 	}
 	var body any = string(data)
 	var encrypted any
-	if name == "notification_settings" || strings.HasPrefix(name, "startup/") || strings.HasPrefix(name, "rtc-probe/") {
+	if name == "notification_settings" || strings.HasPrefix(name, "startup/") || strings.HasPrefix(name, "probe-center/") {
 		b, err := d.seal(name, data)
 		if err != nil {
 			return err

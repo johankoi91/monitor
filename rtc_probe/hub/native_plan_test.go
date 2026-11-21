@@ -8,7 +8,7 @@ import (
 
 func nativeInventoryFixture() (protocol.NativeCoverageConfig, protocol.NativeInventory) {
 	cfg := protocol.NativeCoverageConfig{Groups: []protocol.APBinding{{Group: "172.16.80.25", EntryPoints: []string{"111.230.192.59"}}}, CrossEdge: true}
-	inv := protocol.NativeInventory{Groups: map[string][]protocol.NativeEdge{}}
+	inv := protocol.NativeInventory{AccessPoints: []protocol.DiscoveredAccessPoint{{AgentID: "agent", Address: "111.230.192.59", Groups: []string{"172.16.80.25"}}}, Groups: map[string][]protocol.NativeEdge{}}
 	for _, kind := range []string{"udp", "aut", "web"} {
 		for i := 1; i <= 3; i++ {
 			port := 4000 + i
@@ -45,7 +45,7 @@ func TestNativePlanCountsDirectionAndExcludesWeb(t *testing.T) {
 func TestNativePlanRetainsMissingAndVersionsReplacement(t *testing.T) {
 	cfg, inv := nativeInventoryFixture()
 	first := BuildNativePlan(cfg, inv, nil, "DIRECT", 0)
-	absent := protocol.NativeInventory{Groups: map[string][]protocol.NativeEdge{}}
+	absent := protocol.NativeInventory{AccessPoints: inv.AccessPoints, Groups: map[string][]protocol.NativeEdge{}}
 	missing := BuildNativePlan(cfg, absent, first.Members, "DIRECT", 0)
 	if len(missing.Members) != 6 || len(missing.Issues) == 0 {
 		t.Fatal("missing expected edges silently retired")

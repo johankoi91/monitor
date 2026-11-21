@@ -12,7 +12,7 @@ import (
 )
 
 func TestNativeLogsRemainSeparateBinaryFiles(t *testing.T) {
-	c := &Client{config: Config{DataDir: t.TempDir(), Secret: "probe-secret-not-in-log"}}
+	c := &Client{config: Config{DataDir: t.TempDir()}, identity: RuntimeIdentity{Secret: "probe-secret-not-in-log"}}
 	dir := filepath.Join(c.runDir("run"), "sdk")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestNativeLogsRemainSeparateBinaryFiles(t *testing.T) {
 }
 
 func TestCachedBundleRejectsLegacyZeroUIDWithoutAcceptingForeignIdentity(t *testing.T) {
-	job := protocol.Job{RunID: "run", Revision: "revision", Role: "receiver", ProbeID: "probe", Channel: "channel", UID: "10002", PublisherUID: "10001"}
+	job := protocol.Job{RunID: "run", Revision: "revision", Role: "receiver", RuntimeID: "probe", Channel: "channel", UID: "10002", PublisherUID: "10001"}
 	bundle := func(value protocol.Job) []byte {
 		var buffer bytes.Buffer
 		writer := zip.NewWriter(&buffer)

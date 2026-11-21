@@ -19,8 +19,8 @@ static long long trace_bytes = 0;
 static const char *allow_endpoints = NULL;
 static pthread_mutex_t trace_lock = PTHREAD_MUTEX_INITIALIZER;
 __attribute__((constructor)) static void init_trace(void) {
-  allow_endpoints = getenv("RTC_PROBE_ROUTE_ALLOW_ENDPOINTS");
-  const char *path = getenv("RTC_PROBE_ROUTE_LOG");
+  allow_endpoints = getenv("AVOPS_PROBE_ROUTE_ALLOW_ENDPOINTS");
+  const char *path = getenv("AVOPS_PROBE_ROUTE_LOG");
   if (path && path[0] == '/') trace_fd = open(path, O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC, 0600);
 }
 static void record_peer(int fd, const struct sockaddr *address, socklen_t length, ssize_t bytes, const char *direction) {

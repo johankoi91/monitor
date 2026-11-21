@@ -46,7 +46,7 @@ func TestWorkerBurstsPersistEveryEventAndPrioritizeControl(t *testing.T) {
 		t.Fatal(err)
 	}
 	var saved map[string]*record
-	raw, err := os.ReadFile(filepath.Join(c.config.DataDir, "outbox.json"))
+	raw, err := os.ReadFile(filepath.Join(c.config.DataDir, "outbox-v2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,5 +98,24 @@ func TestWorkerBurstsPersistEveryEventAndPrioritizeControl(t *testing.T) {
 	pending = c.pending()
 	if pending[0].Type != "run_ready" || pending[1].Type != "run_result" {
 		t.Fatal("telemetry delayed result")
+	}
+}
+
+func TestMissingWorkerTransportContextRebindsWithoutAcceptingForeignRun(t *testing.T) {
+	job := protocol.Job{RunID: "run", ParentRunID: "round", Role: "receiver", Revision: "rev", RuntimeID: "web", TaskID: "task", Target: protocol.Target{ID: "service"}}
+	old := protocol.Event{RunID: job.RunID, Role: job.Role, Revision: job.Revision, RuntimeID: job.RuntimeID}
+	repaired, err := bindWorkerEvent(job, old)
+	if err != nil || repaired.ParentRunID != "round" || repaired.TargetID != "service" {
+		t.Fatal(repaired, err)
+	}
+	foreign := old
+	foreign.ParentRunID = "another-round"
+	if _, err = bindWorkerEvent(job, foreign); err == nil {
+		t.Fatal("foreign parent accepted")
+	}
+	foreign = old
+	foreign.RunID = "another-run"
+	if _, err = bindWorkerEvent(job, foreign); err == nil {
+		t.Fatal("foreign run accepted")
 	}
 }

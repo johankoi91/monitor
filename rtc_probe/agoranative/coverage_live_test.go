@@ -18,6 +18,7 @@ import (
 	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/rtc-probe/probe"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
+	"github.com/johankoi91/monitor/rtc-probe/tests/testkit"
 )
 
 // Explicitly gated real SDK/WSS acceptance for the entire Native plan.
@@ -26,10 +27,10 @@ func TestNativeLiveFullCoverage(t *testing.T) {
 		t.Skip("explicit full Native acceptance required")
 	}
 	parameters := liveParameters(t)
-	parameters.NativeCoverage = &protocol.NativeCoverageConfig{Groups: []protocol.APBinding{{Group: "172.16.80.25", EntryPoints: []string{"111.230.192.59"}}}, CrossEdge: true}
+	parameters.NativeCoverage = &protocol.NativeCoverageConfig{Groups: []protocol.APBinding{{Group: "172.16.80.25", EntryPoints: []string{parameters.AccessIPs[0]}}}, CrossEdge: true}
 	root := t.TempDir()
-	cfg := hub.Config{MaxConcurrentRuns: 2, Probes: []hub.ProbeConfig{{ID: "qa-full", Secret: strings.Repeat("q", 32), Location: "isolated full Native acceptance"}}, Targets: []protocol.Target{{ID: "qa-native", Name: "isolated Native service", Driver: "agora", RTC: parameters}}, Tasks: []protocol.Task{{ID: "qa-full", TargetID: "qa-native", ProbeID: "qa-full", IntervalSeconds: 180, SweepIntervalSeconds: 900, CrossIntervalSeconds: 1800, TimeoutSeconds: 20}}}
-	center, err := hub.New(filepath.Join(root, "center"), cfg, nil)
+	cfg := hub.Config{MaxConcurrentRuns: 2, Targets: []protocol.Target{{ID: "qa-native", Name: "isolated Native service", Driver: "agora", RTC: parameters}}, Tasks: []protocol.Task{protocol.Task{ID: "qa-full", TargetID: "qa-native", HostID: "host-qa-full", IntervalSeconds: 180, SweepIntervalSeconds: 900, CrossIntervalSeconds: 1800, TimeoutSeconds: 20, ServiceType: "rtc", ClientType: "native"}}}
+	center, err := hub.New(filepath.Join(root, "center"), hub.Config{MaxConcurrentRuns: cfg.MaxConcurrentRuns}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,24 +44,37 @@ func TestNativeLiveFullCoverage(t *testing.T) {
 			inventory.Groups["172.16.80.25"] = append(inventory.Groups["172.16.80.25"], protocol.NativeEdge{Transport: kind, Endpoint: fmtEndpoint(port), AgentID: "qa-source", ContainerName: kind + string(rune('0'+i)), ContainerID: kind + string(rune('0'+i))})
 		}
 	}
+	inventory.AccessPoints = []protocol.DiscoveredAccessPoint{{AgentID: "qa-source", Address: parameters.AccessIPs[0], Groups: []string{"172.16.80.25"}}}
 	center.SetNativeInventoryProvider(func() (protocol.NativeInventory, error) { return inventory, nil })
+	clientConfig, err := testkit.ConfigureClient(center, root, cfg, "agora")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
 	go func() { defer close(done); center.Run(ctx) }()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/probe/") {
+		if testkit.ServeEnrollment(center, w, r) {
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/probes/") {
 			center.ServeProbe(w, r)
 		} else {
 			center.ServeAdmin(w, r)
 		}
 	}))
 	defer server.Close()
-	client, err := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probe/connect", ID: "qa-full", Secret: strings.Repeat("q", 32), DataDir: filepath.Join(root, "probe"), Driver: "agora", Capacity: 1, RouteCapturePath: os.Getenv("RTC_NATIVE_CAPTURE_LIBRARY"), AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
+	clientConfig.URL = "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probes/connect"
+	clientConfig.Capacity = 1
+	clientConfig.RouteCapturePath = os.Getenv("RTC_NATIVE_CAPTURE_LIBRARY")
+	clientConfig.WorkerCommand = func(ctx context.Context) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeAcceptanceWorker$")
 		cmd.Env = append(os.Environ(), "RTC_NATIVE_QA_WORKER=1")
 		return cmd
-	}})
+	}
+	client, err := probe.New(clientConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,4 +160,6 @@ func TestNativeLiveFullCoverage(t *testing.T) {
 	}
 	t.Fatal("full Native coverage did not establish verified health")
 }
-func fmtEndpoint(port int) string { return "111.230.192.59:" + strconv.Itoa(port) }
+func fmtEndpoint(port int) string {
+	return os.Getenv("RTC_NATIVE_QA_ACCESS_IP") + ":" + strconv.Itoa(port)
+}

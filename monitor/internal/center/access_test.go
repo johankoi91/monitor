@@ -18,8 +18,8 @@ func TestRegisteredRestartKeyWithoutNodeScope(t *testing.T) {
 	}
 	defer registry.Close()
 	handler := (&Server{Store: s, AdminID: "admin", AdminSecret: strings.Repeat("z", 32), Access: registry}).Handler()
-	other, _ := registry.Issue(access.IssueRequest{Name: "other", Purpose: "RESTART", ApprovalReason: "test"}, "admin")
-	restart, _ := registry.Issue(access.IssueRequest{Name: "restart", Purpose: "RESTART", ApprovalReason: "test"}, "admin")
+	other, _ := registry.Issue(access.IssueRequest{Name: "other", Purpose: "RESTART"}, "admin")
+	restart, _ := registry.Issue(access.IssueRequest{Name: "restart", Purpose: "RESTART"}, "admin")
 	post := func(id, secret string) *httptest.ResponseRecorder {
 		data, _ := json.Marshal(request())
 		r := httptest.NewRequest("POST", "http://center/api/v1/operations/restart", strings.NewReader(string(data)))
@@ -73,7 +73,7 @@ func TestDirectKeyIssuanceAndPurposeBoundaries(t *testing.T) {
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	input, _ := json.Marshal(access.IssueRequest{Name: "direct restart", Purpose: "RESTART", ApprovalReason: "test verified"})
+	input, _ := json.Marshal(access.IssueRequest{Name: "direct restart", Purpose: "RESTART"})
 	w := call("POST", "/api/v1/access-keys", string(input), "admin", strings.Repeat("z", 32))
 	var issued access.Issued
 	if w.Code != http.StatusCreated || json.Unmarshal(w.Body.Bytes(), &issued) != nil || issued.Token == "" {

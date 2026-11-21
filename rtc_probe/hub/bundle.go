@@ -82,11 +82,11 @@ func validateDiagnosticBundle(data []byte, request protocol.LogRequest, expected
 		return false, errors.New("manifest required")
 	}
 	job := manifest.Job
-	if manifest.RequestID != request.ID || job.RunID != request.RunID || job.ProbeID != request.ProbeID || job.Role != request.Role || job.Target.ID != expected.Target.ID || job.Revision != expected.Revision || job.Channel != expected.Channel || job.UID != expected.UID || job.PublisherUID != expected.PublisherUID || job.ParentRunID != expected.ParentRunID || job.EdgeEndpoint != expected.EdgeEndpoint {
+	if manifest.RequestID != request.ID || job.RunID != request.RunID || job.RuntimeID != request.RuntimeID || job.Role != request.Role || job.Target.ID != expected.Target.ID || job.Revision != expected.Revision || job.Channel != expected.Channel || job.UID != expected.UID || job.PublisherUID != expected.PublisherUID || job.ParentRunID != expected.ParentRunID || job.EdgeEndpoint != expected.EdgeEndpoint {
 		return false, errors.New("diagnostic attribution mismatch")
 	}
 	if request.Role == "pair" {
-		if request.Scope != protocol.ServiceLogScope || manifest.Scope != protocol.ServiceLogScope || job.LogScope != protocol.ServiceLogScope || expected.LogScope != protocol.ServiceLogScope || len(manifest.Endpoints) != 2 || !reflect.DeepEqual(job.NativeCase, expected.NativeCase) || !reflect.DeepEqual(job.RTC, expected.RTC) {
+		if request.Scope != protocol.ServiceLogScope || manifest.Scope != protocol.ServiceLogScope || job.LogScope != protocol.ServiceLogScope || expected.LogScope != protocol.ServiceLogScope || len(manifest.Endpoints) != 2 || !reflect.DeepEqual(job.NativeCase, expected.NativeCase) || !sameDiagnosticRTC(job.RTC, expected.RTC, expected.Target.Driver) {
 			return false, errors.New("invalid shared Service context")
 		}
 		for _, role := range []string{"sender", "receiver"} {
@@ -128,4 +128,18 @@ func validateDiagnosticBundle(data []byte, request protocol.LogRequest, expected
 		}
 	}
 	return manifest.Partial, nil
+}
+
+func sameDiagnosticRTC(a, b *protocol.RTCParameters, driver string) bool {
+	if driver == "agora" {
+		a = cloneRTC(a)
+		b = cloneRTC(b)
+		if a != nil {
+			a.WebAccess = nil
+		}
+		if b != nil {
+			b.WebAccess = nil
+		}
+	}
+	return reflect.DeepEqual(a, b)
 }

@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"net/http"
 	"strconv"
+	"strings"
 
-	"github.com/johankoi91/monitor/runtime/web"
+	"github.com/johankoi91/monitor/runtime/internal/webui"
 )
 
 // Ant Design inserts style elements at runtime. Authorize those elements with
 // a fresh nonce while retaining self-only scripts; never cache the HTML shell.
 func serveLoginShell(w http.ResponseWriter, r *http.Request) {
-	body, err := web.Files.ReadFile("static/index.html")
+	body, err := webui.Files.ReadFile("static/index.html")
 	if err != nil {
 		http.Error(w, "UI assets unavailable", http.StatusServiceUnavailable)
 		return
@@ -25,4 +26,14 @@ func serveLoginShell(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodHead {
 		w.Write(body)
 	}
+}
+
+// Known application routes serve only the login shell. API authorization is unchanged.
+func isWorkspacePath(path string) bool {
+	for _, root := range []string{"/overview", "/monitor", "/rtc", "/inventory", "/notifications", "/operations", "/capacity", "/access", "/accounts"} {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return true
+		}
+	}
+	return false
 }

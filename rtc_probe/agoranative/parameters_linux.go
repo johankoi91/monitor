@@ -27,7 +27,7 @@ func (r *recorder) arguments(role, name string) map[string]any {
 	case "RegisterAudioFrameObserver":
 		return map[string]any{"local_user_id": local, "callbacks": []string{"OnGetAudioFramePosition", "OnPlaybackAudioFrameBeforeMixing"}, "enable_vad": 0, "vad_config": nil, "native_return_exposed": false}
 	case "RegisterVideoFrameObserver":
-		return map[string]any{"local_user_id": local, "callbacks": []string{"OnRenderVideoFrame"}, "format_preference": "I420", "process_mode": "read_only"}
+		return map[string]any{"connection_id": connection, "callbacks": []string{"OnRenderVideoFrame", "GetVideoFormatPreference"}, "handler": "OnFrame", "evidence_source": "sdk_yuv_frame_callback", "format_preference": "I420", "process_mode": "read_only"}
 	case "SetPlaybackAudioFrameBeforeMixingParameters":
 		return map[string]any{"local_user_id": local, "channels": 1, "sample_rate": 16000}
 	case "SetVideoEncoderConfiguration":
@@ -86,7 +86,7 @@ func audioParameters(channel, uid string, f *rtc.AudioFrame, vad rtc.VadState, v
 	out["frame"] = map[string]any{"type": int(f.Type), "samples_per_channel": f.SamplesPerChannel, "samples_per_sec": f.SamplesPerSec, "bytes_per_sample": f.BytesPerSample, "channels": f.Channels, "buffer_bytes": len(f.Buffer), "render_time_ms": f.RenderTimeMs, "present_time_ms": f.PresentTimeMs, "avsync_type": f.AvsyncType, "rms": f.Rms, "voice_prob": f.VoiceProb, "music_prob": f.MusicProb, "pitch": f.Pitch, "payload_omitted": true}
 	return out
 }
-func videoParameters(channel string, uid uint32, f *rtc.VideoFrame) map[string]any {
+func videoParameters(channel, uid string, f *rtc.VideoFrame) map[string]any {
 	out := map[string]any{"channel_id": channel, "uid": uid, "return_value": true}
 	if f == nil {
 		out["frame"] = nil

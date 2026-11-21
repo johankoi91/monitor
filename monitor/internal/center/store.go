@@ -18,7 +18,6 @@ import (
 
 	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/runtime/internal/cadvisor"
-	"github.com/johankoi91/monitor/runtime/internal/credential"
 	"github.com/johankoi91/monitor/runtime/internal/history"
 	"github.com/johankoi91/monitor/runtime/internal/model"
 	"github.com/johankoi91/monitor/runtime/internal/notify"
@@ -28,16 +27,9 @@ import (
 
 var identifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$`)
 
-type AgentConfig struct {
-	ID          string `yaml:"id"`
-	Secret      string `yaml:"secret"`
-	HostName    string `yaml:"host_name"`
-	HostAddress string `yaml:"host_address"`
-}
 type Config struct {
 	RTCProbe      *hub.Config         `yaml:"rtc_probe"`
 	Site          model.Site          `yaml:"site"`
-	Agents        []AgentConfig       `yaml:"agents"`
 	RestartRules  []model.RestartRule `yaml:"restart_rules"`
 	Notifications notify.Config       `yaml:"notifications"`
 }
@@ -59,6 +51,7 @@ type Store struct {
 	resourceHistory history.Backend
 	mu              sync.RWMutex
 	config          Config
+	registry        map[string]AgentRegistration
 	agents          map[string]*agentState
 	record          diskRecord
 	dir             string
@@ -108,15 +101,8 @@ func ReadConfig(path string) (Config, error) {
 	return c, nil
 }
 func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, error) {
-	if !identifier.MatchString(config.Site.Code) || config.Site.Name == "" || len(config.Agents) == 0 {
-		return nil, errors.New("site and registered Agents are required")
-	}
-	seen := map[string]bool{}
-	for _, a := range config.Agents {
-		if !identifier.MatchString(a.ID) || seen[a.ID] || credential.ValidateBasic(credential.KindAgent, a.ID, a.Secret) != nil || len(a.Secret) < 24 || a.HostName == "" || a.HostAddress == "" {
-			return nil, errors.New("invalid registered Agent configuration")
-		}
-		seen[a.ID] = true
+	if !identifier.MatchString(config.Site.Code) || config.Site.Name == "" {
+		return nil, errors.New("site is required")
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -129,12 +115,16 @@ func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, e
 		lock.Close()
 		return nil, errors.New("another center is using the data directory")
 	}
-	s := &Store{lastStartups: map[string]map[string]StartupRecord{}, resourceHistory: history.NewMemory(), config: config, agents: map[string]*agentState{}, checks: map[string]*debounce{}, bursts: map[string]*restartBurst{}, dir: dir, lock: lock}
+	s := &Store{lastStartups: map[string]map[string]StartupRecord{}, resourceHistory: history.NewMemory(), config: config, registry: map[string]AgentRegistration{}, agents: map[string]*agentState{}, checks: map[string]*debounce{}, bursts: map[string]*restartBurst{}, dir: dir, lock: lock}
 	if len(backends) > 0 {
 		s.backend = backends[0]
 		if backend, ok := s.backend.(history.Backend); ok {
 			s.resourceHistory = backend
 		}
+	}
+	if err := s.openAgentRegistry(); err != nil {
+		s.Close()
+		return nil, err
 	}
 	s.write = s.atomicWrite
 	data, err := os.ReadFile(filepath.Join(dir, "current-baseline.json"))
@@ -178,7 +168,7 @@ func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, e
 			s.Close()
 			return nil, e
 		}
-		for _, cfg := range config.Agents {
+		for _, cfg := range s.registeredAgentsLocked() {
 			raw, found, e := s.backend.LoadDocument("startup/" + cfg.ID)
 			if e != nil {
 				s.Close()
@@ -198,7 +188,7 @@ func NewStore(dir string, config Config, backends ...storage.Backend) (*Store, e
 				continue
 			}
 			var r model.Report
-			if json.Unmarshal(raw, &r) != nil {
+			if json.Unmarshal(raw, &r) != nil || r.Host == nil || r.Host.Validate() != nil {
 				s.Close()
 				return nil, errors.New("corrupt stored snapshot")
 			}
@@ -317,19 +307,11 @@ func (s *Store) Ready() bool {
 	defer s.mu.RUnlock()
 	return !s.storageBad && (s.opJournal == nil || s.opJournal.Healthy())
 }
-func (s *Store) Agent(id string) (AgentConfig, bool) {
-	for _, a := range s.config.Agents {
-		if a.ID == id {
-			return a, true
-		}
-	}
-	return AgentConfig{}, false
-}
 func (s *Store) AgentSummaries() any {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := []map[string]any{}
-	for _, cfg := range s.config.Agents {
+	for _, cfg := range s.registeredAgentsLocked() {
 		a := s.agents[cfg.ID]
 		var received *time.Time
 		online := false
@@ -340,7 +322,7 @@ func (s *Store) AgentSummaries() any {
 				received = &at
 			}
 		}
-		result = append(result, map[string]any{"agent_id": cfg.ID, "host_name": cfg.HostName, "host_address": cfg.HostAddress, "agent_online": online, "stale": !fresh(a, time.Now()), "received_at": received})
+		result = append(result, map[string]any{"agent_id": cfg.ID, "host_name": cfg.Host.HostName, "host_address": cfg.Host.HostAddress, "ip_addresses": clone(cfg.Host.IPAddresses), "hostname_source": cfg.Host.HostnameSource, "address_source": cfg.Host.AddressSource, "agent_online": online, "stale": !fresh(a, time.Now()), "received_at": received})
 	}
 	return map[string]any{"agents": result}
 }
@@ -382,12 +364,15 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 	if a == nil || a.Session != session {
 		return errors.New("superseded Agent session")
 	}
+	if r.Host == nil || r.Host.Validate() != nil {
+		return errors.New("valid reported host_info required")
+	}
 	if r.Type != "snapshot" || r.Sequence <= a.Sequence {
 		return errors.New("invalid or reordered snapshot")
 	}
 	a.Sequence = r.Sequence
 	if !r.Complete {
-		return nil
+		return s.updateReportedHostLocked(id, *r.Host)
 	} // Errors/heartbeats never refresh container freshness.
 	now := time.Now().UTC()
 	wasFresh := fresh(a, now)
@@ -412,10 +397,9 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 		if c.CollectedAt.Before(r.CollectedAt) || c.CollectedAt.After(now.Add(5*time.Second)) {
 			return errors.New("invalid container collection time")
 		}
-		cfg, _ := s.Agent(id)
 		c.AgentID = id
-		c.HostName = cfg.HostName
-		c.HostAddress = cfg.HostAddress
+		c.HostName = r.Host.HostName
+		c.HostAddress = r.Host.HostAddress
 		c.ReceivedAt = now
 		c.Managed = false
 		c.NodeID = ""
@@ -425,6 +409,9 @@ func (s *Store) Receive(id, session string, r model.Report) error {
 		}
 		names[c.ContainerName] = true
 		ids[c.ContainerID] = true
+	}
+	if err := s.updateReportedHostLocked(id, *r.Host); err != nil {
+		return err
 	}
 	if len(pendingStartups) > 0 {
 		if s.lastStartups[id] == nil {
@@ -492,6 +479,10 @@ func (s *Store) Containers() []model.Container {
 	for id, a := range s.agents {
 		for _, o := range a.Report.Containers {
 			c := o.Container
+			if host, ok := s.agentLocked(id); ok {
+				c.HostName = host.Host.HostName
+				c.HostAddress = host.Host.HostAddress
+			}
 			c.AgentOnline = a.Connected
 			c.Stale = !fresh(a, now)
 			c.Resources = resourceView(c.Resources, a, now)
@@ -657,14 +648,14 @@ func (s *Store) Save(selection model.Selection, source string) (model.Baseline, 
 			return fail(400, "DUPLICATE_NODE", "同一容器不能重复纳管")
 		}
 		bindings[binding] = true
-		cfg, ok := s.Agent(add.AgentID)
+		cfg, ok := s.agentLocked(add.AgentID)
 		if !ok {
 			return fail(400, "UNKNOWN_AGENT", "未登记的 Agent")
 		}
-		if err := validateChecks(add.Checks, cfg.HostAddress); err != nil {
+		if err := validateChecks(add.Checks, cfg.Host.HostAddress); err != nil {
 			return model.Baseline{}, err
 		}
-		node := model.Node{ID: binding, AgentID: add.AgentID, HostName: cfg.HostName, HostAddress: cfg.HostAddress, ContainerName: container.ContainerName, Checks: add.Checks}
+		node := model.Node{ID: binding, AgentID: add.AgentID, HostName: cfg.Host.HostName, HostAddress: cfg.Host.HostAddress, ContainerName: container.ContainerName, Checks: add.Checks}
 		if node.Checks == nil {
 			node.Checks = []model.Check{}
 		}
@@ -715,6 +706,14 @@ func (s *Store) Save(selection model.Selection, source string) (model.Baseline, 
 			nodes := c.Services[si].Nodes
 			sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 		}
+	}
+	pruneEmptyGroups(&d)
+	return s.saveDefinitionLocked(d, source, selection)
+}
+
+func (s *Store) saveDefinitionLocked(d model.Definition, source string, selection model.Selection) (model.Baseline, error) {
+	fail := func(status int, code, message string) (model.Baseline, error) {
+		return model.Baseline{}, problem(status, code, message)
 	}
 	if err := validateDefinition(d); err != nil {
 		return fail(400, "INVALID_BASELINE", err.Error())

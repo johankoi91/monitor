@@ -11,7 +11,7 @@ import (
 
 // The resource ceiling is independent of the number of discovered Edges.
 // The center dispatches at most min(Edge count, this ceiling, global capacity).
-func workerCapacity(cpus int, quota, period, memory int64) int {
+func workerCapacity(cpus int, quota, period, memory int64, memoryPerWorker ...int64) int {
 	if cpus < 1 {
 		cpus = 1
 	}
@@ -22,7 +22,11 @@ func workerCapacity(cpus int, quota, period, memory int64) int {
 		}
 	}
 	if memory > 0 {
-		slots := int((memory - (256 << 20)) / (256 << 20))
+		per := int64(256 << 20)
+		if len(memoryPerWorker) > 0 && memoryPerWorker[0] > 0 {
+			per = memoryPerWorker[0]
+		}
+		slots := int((memory - (256 << 20)) / per)
 		if slots < 1 {
 			slots = 1
 		}
@@ -35,7 +39,7 @@ func workerCapacity(cpus int, quota, period, memory int64) int {
 	}
 	return cpus
 }
-func resourceWorkerCapacity() int {
+func resourceWorkerCapacity(memoryPerWorker ...int64) int {
 	read := func(paths ...string) int64 {
 		for _, path := range paths {
 			if data, err := os.ReadFile(path); err == nil {
@@ -58,5 +62,5 @@ func resourceWorkerCapacity() int {
 		period = read("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us")
 	}
 	memory := read("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes")
-	return workerCapacity(runtime.NumCPU(), quota, period, memory)
+	return workerCapacity(runtime.NumCPU(), quota, period, memory, memoryPerWorker...)
 }

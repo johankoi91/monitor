@@ -59,6 +59,7 @@ func TestMediaEdgeMapGroupsAllHostsAndReplacesReportsWithoutDuplicates(t *testin
 	if err := store.Receive("rtc-a", a, first); err != nil {
 		t.Fatal(err)
 	}
+	second.Host = fixtureHost("10.0.0.2", second.CollectedAt)
 	if err := store.Receive("rtc-b", b, second); err != nil {
 		t.Fatal(err)
 	}
@@ -174,5 +175,50 @@ func TestMediaEdgeMultipleAPGroups(t *testing.T) {
 		if _, _, _, err := mediaEdgeArguments(model.StartupConfig{Args: []string{"--ap", bad, "--ip-for-client", "183.131.59.146", "--user-port", "4001"}}); err == nil {
 			t.Fatal("accepted partial AP list", bad)
 		}
+	}
+}
+
+func TestAPDiscoveryUsesLocalAPNameAndReportedNodeAddress(t *testing.T) {
+	store := setup(t)
+	a, b := store.Connect("rtc-a"), store.Connect("rtc-b")
+	ap := report("agora_local_ap")
+	ap.Host = fixtureHost("111.230.192.59", ap.CollectedAt)
+	ap.Host.IPAddresses = []string{"111.230.192.59", "172.16.80.25"}
+	edge := edgeReport("agora_udp_media_edge_1", "172.16.80.25", "183.131.59.146", "4001")
+	edge.Host = fixtureHost("183.131.59.146", edge.CollectedAt)
+	helper := report("agora_local_ap_helper").Containers[0]
+	helper.Container.CollectedAt = edge.CollectedAt
+	helper.Startup.CollectedAt = edge.CollectedAt
+	edge.Containers = append(edge.Containers, helper)
+	if err := store.Receive("rtc-a", a, ap); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Receive("rtc-b", b, edge); err != nil {
+		t.Fatal(err)
+	}
+	inventory := store.MediaEdges()
+	if len(inventory.AccessPoints) != 1 {
+		t.Fatal("Edge-only/helper host classified as AP", inventory.AccessPoints)
+	}
+	point := inventory.AccessPoints[0]
+	if point.AgentID != "rtc-a" || point.Address != "111.230.192.59" || !reflect.DeepEqual(point.Groups, []string{"172.16.80.25"}) {
+		t.Fatal(point)
+	}
+	native, err := store.NativeInventory()
+	if err != nil || len(native.AccessPoints) != 1 || native.Groups["172.16.80.25"][0].Endpoint != "183.131.59.146:4001" {
+		t.Fatal(native, err)
+	}
+	ap.Sequence = 2
+	ap.Host = fixtureHost("111.230.192.60", ap.CollectedAt)
+	ap.Host.IPAddresses = []string{"111.230.192.60", "172.16.80.25"}
+	if err = store.Receive("rtc-a", a, ap); err != nil {
+		t.Fatal(err)
+	}
+	if store.MediaEdges().AccessPoints[0].Address != "111.230.192.60" {
+		t.Fatal("AP public address did not follow Agent report")
+	}
+	store.Disconnect("rtc-a", a)
+	if !store.MediaEdges().AccessPoints[0].Stale {
+		t.Fatal("offline AP presented as fresh")
 	}
 }

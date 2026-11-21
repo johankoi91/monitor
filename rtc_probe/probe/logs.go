@@ -20,7 +20,7 @@ import (
 )
 
 func (c *Client) collect(ctx context.Context, request protocol.LogRequest) {
-	if !protocol.ValidID(request.ID) || request.ProbeID != c.config.ID || time.Now().After(request.ExpiresAt) {
+	if !protocol.ValidID(request.ID) || request.RuntimeID != c.identity.ID || time.Now().After(request.ExpiresAt) {
 		return
 	}
 	c.mu.Lock()
@@ -260,7 +260,7 @@ func cachedBundleMatchesJob(data []byte, job protocol.Job) bool {
 				}
 			}
 		}
-		return stored.RunID == job.RunID && stored.Revision == job.Revision && stored.Role == job.Role && stored.ProbeID == job.ProbeID && stored.UID == job.UID && stored.PublisherUID == job.PublisherUID && stored.Channel == job.Channel
+		return stored.RunID == job.RunID && stored.Revision == job.Revision && stored.Role == job.Role && stored.RuntimeID == job.RuntimeID && stored.UID == job.UID && stored.PublisherUID == job.PublisherUID && stored.Channel == job.Channel
 	}
 	return false
 }

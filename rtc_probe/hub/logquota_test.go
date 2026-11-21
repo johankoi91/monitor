@@ -8,7 +8,7 @@ import (
 )
 
 func TestDiagnosticQuotaReclaimsOnlyRTCArchives(t *testing.T) {
-	h, err := New(t.TempDir(), testConfig(), nil)
+	h, err := newTestHub(t.TempDir(), testConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

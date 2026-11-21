@@ -13,15 +13,14 @@ func operational(t *testing.T) (*Store, string, model.Baseline) {
 	s := setup(t)
 	s.config.RestartRules = []model.RestartRule{{AgentID: "rtc-a", ContainerName: "ap", ServiceCode: "rtc-ap", Image: "rtc/ap:1", Approved: true, ApprovalRef: "isolated test"}}
 	session := connect(t, s, "rtc-a", "ap")
-	b, err := s.Save(selection("", "rtc-a"), "admin")
+	_, err := s.Save(selection("", "rtc-a"), "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err = s.ApplyRestartRules(); err != nil {
 		t.Fatal(err)
 	}
-	b = s.Baseline()
-	return s, session, b
+	return s, session, s.Baseline()
 }
 func request() model.RestartRequest {
 	return model.RestartRequest{NodeID: "rtc-a/ap", Operator: "test declaration", Reason: "isolated restart validation", RequestKey: "request-1"}
@@ -62,7 +61,7 @@ func TestRecoveryQueriesBeforeAnyExecute(t *testing.T) {
 	}
 	dir, cfg := s.dir, s.config
 	s.Close()
-	restored, err := NewStore(dir, cfg)
+	restored, err := newTestStore(dir, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

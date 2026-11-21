@@ -226,6 +226,7 @@ type Observation struct {
 	Checks       []CheckResult `json:"checks"`
 }
 type Report struct {
+	Host             *HostInfo     `json:"host_info"`
 	Type             string        `json:"type"`
 	Sequence         uint64        `json:"sequence"`
 	CollectedAt      time.Time     `json:"collected_at"`
@@ -239,7 +240,8 @@ type PlanNode struct {
 	Checks        []Check `json:"checks"`
 }
 type Plan struct {
-	Type     string     `json:"type"`
-	Revision string     `json:"revision"`
-	Nodes    []PlanNode `json:"nodes"`
+	ObservedAddress string     `json:"observed_address"`
+	Type            string     `json:"type"`
+	Revision        string     `json:"revision"`
+	Nodes           []PlanNode `json:"nodes"`
 }

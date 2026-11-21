@@ -19,6 +19,7 @@ import (
 	"github.com/johankoi91/monitor/rtc-probe/hub"
 	"github.com/johankoi91/monitor/rtc-probe/probe"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
+	"github.com/johankoi91/monitor/rtc-probe/tests/testkit"
 )
 
 // The real SDK remains inside the same isolated process boundary as production.
@@ -49,7 +50,12 @@ func liveParameters(t *testing.T) *protocol.RTCParameters {
 	if os.Getenv("RTC_NATIVE_LIVE_QA") != "1" {
 		t.Skip("explicit real RTC acceptance required")
 	}
-	p := &protocol.RTCParameters{AppID: os.Getenv("RTC_NATIVE_QA_APP_ID"), AuthMode: "none", Private: true, AccessIPs: []string{"111.230.192.59"}, AccessDomains: []string{"111.230.192.59"}, VerifyDomain: "ap.1145326.agora.local", ProxyMode: 0, DisableAut: true}
+	access := os.Getenv("RTC_NATIVE_QA_ACCESS_IP")
+	verify := os.Getenv("RTC_NATIVE_QA_VERIFY_DOMAIN")
+	if access == "" || verify == "" {
+		t.Skip("explicit QA access IP and verify domain required")
+	}
+	p := &protocol.RTCParameters{AppID: os.Getenv("RTC_NATIVE_QA_APP_ID"), AuthMode: "none", Private: true, AccessIPs: []string{access}, VerifyDomain: verify, ProxyMode: 0, DisableAut: true}
 	if err := p.Normalize(); err != nil {
 		t.Fatal(err)
 	}
@@ -66,12 +72,16 @@ func newNativeFixture(t *testing.T, tasks int, policy string) *nativeFixture {
 	t.Helper()
 	p := liveParameters(t)
 	root := t.TempDir()
-	cfg := hub.Config{MaxConcurrentRuns: 2, Probes: []hub.ProbeConfig{{ID: "qa-native", Secret: strings.Repeat("n", 32), Name: "isolated native acceptance", Location: "同机真实 SDK 验收"}}, Targets: []protocol.Target{{ID: "qa-overall-rtc", Name: "isolated RTC functional acceptance", Driver: "agora"}}}
+	cfg := hub.Config{MaxConcurrentRuns: 2, Targets: []protocol.Target{{ID: "qa-overall-rtc", Name: "isolated RTC functional acceptance", Driver: "agora", RTC: p}}}
 	for i := 0; i < tasks; i++ {
 		copy := *p
-		cfg.Tasks = append(cfg.Tasks, protocol.Task{ID: fmt.Sprintf("qa-av-%02d", i), TargetID: "qa-overall-rtc", ProbeID: "qa-native", Enabled: true, IntervalSeconds: 3600, TimeoutSeconds: 15, RTC: &copy})
+		cfg.Tasks = append(cfg.Tasks, protocol.Task{ID: fmt.Sprintf("qa-av-%02d", i), TargetID: "qa-overall-rtc", HostID: "host-qa-native", Enabled: true, IntervalSeconds: 3600, TimeoutSeconds: 15, RTC: &copy, ServiceType: "rtc", ClientType: "native"})
 	}
-	h, err := hub.New(filepath.Join(root, "center"), cfg, nil)
+	h, err := hub.New(filepath.Join(root, "center"), hub.Config{MaxConcurrentRuns: cfg.MaxConcurrentRuns}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientConfig, err := testkit.ConfigureClient(h, root, cfg, "agora")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,17 +89,23 @@ func newNativeFixture(t *testing.T, tasks int, policy string) *nativeFixture {
 	hubDone := make(chan struct{})
 	go func() { defer close(hubDone); h.Run(ctx) }()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/probe/") {
+		if testkit.ServeEnrollment(h, w, r) {
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/probes/") {
 			h.ServeProbe(w, r)
 		} else {
 			h.ServeAdmin(w, r)
 		}
 	}))
-	c, err := probe.New(probe.Config{URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probe/connect", ID: "qa-native", Secret: strings.Repeat("n", 32), DataDir: filepath.Join(root, "probe"), Driver: "agora", Capacity: 2, AllowPlaintextLoopback: true, WorkerCommand: func(ctx context.Context) *exec.Cmd {
+	clientConfig.URL = "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/probes/connect"
+	clientConfig.Capacity = 2
+	clientConfig.WorkerCommand = func(ctx context.Context) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeAcceptanceWorker$")
 		cmd.Env = append(os.Environ(), "RTC_NATIVE_QA_WORKER=1", "RTC_NATIVE_QA_POLICY="+policy)
 		return cmd
-	}})
+	}
+	c, err := probe.New(clientConfig)
 	if err != nil {
 		server.Close()
 		cancel()
@@ -288,7 +304,7 @@ func preserveNativeEvidence(t *testing.T, f *nativeFixture, name string, runs []
 }
 
 func TestNativeLiveMediaEdgeSweep(t *testing.T) {
-	liveParameters(t)
+	p := liveParameters(t)
 	rangeText := os.Getenv("RTC_NATIVE_QA_EDGE_RANGE")
 	if rangeText == "" {
 		t.Skip("explicit media edge range required")
@@ -317,7 +333,7 @@ func TestNativeLiveMediaEdgeSweep(t *testing.T) {
 	}
 	for i := range cfg.Targets {
 		if cfg.Targets[i].ID == cfg.Tasks[0].TargetID {
-			cfg.Targets[i].RTC.MediaEdges = &protocol.MediaEdgeRange{Host: "111.230.192.59", StartPort: start, EndPort: end}
+			cfg.Targets[i].RTC.MediaEdges = &protocol.MediaEdgeRange{Host: p.AccessIPs[0], StartPort: start, EndPort: end}
 		}
 	}
 	cfg.Tasks[0].IntervalSeconds = 600
@@ -358,7 +374,7 @@ func TestNativeLiveMediaEdgeSweep(t *testing.T) {
 	for _, item := range strings.Split(os.Getenv("RTC_NATIVE_QA_PORT_OUTCOMES"), ",") {
 		parts := strings.SplitN(item, "=", 2)
 		if len(parts) == 2 {
-			expectedPorts["111.230.192.59:"+parts[0]] = parts[1]
+			expectedPorts[os.Getenv("RTC_NATIVE_QA_ACCESS_IP")+":"+parts[0]] = parts[1]
 		}
 	}
 	for _, child := range children {

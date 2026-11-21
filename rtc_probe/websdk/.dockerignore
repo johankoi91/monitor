@@ -1,0 +1,17 @@
+*
+!Dockerfile
+!build/
+build/*
+!build/node-linux.tar.xz
+!build/chromium-headless-linux.zip
+!build/rtc-web-probe
+!custom-video/
+custom-video/*
+!custom-video/package.json
+!custom-video/package-lock.json
+!custom-video/server.mjs
+!custom-video/worker.mjs
+!custom-video/contract.mjs
+!custom-video/browser/
+!custom-video/sdk/
+!custom-video/fixtures/

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,8 @@ func TestRealWireProtocolRestartsOnceAndVerifies(t *testing.T) {
 			restarts++
 			started = time.Now().UTC().Format(time.RFC3339Nano)
 			w.WriteHeader(204)
+		case r.Method == "GET" && r.URL.Path == "/v1.39/info":
+			io.WriteString(w, `{"Name":"fixture"}`)
 		default:
 			t.Errorf("unexpected Docker mutation/path: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(400)
@@ -57,14 +60,20 @@ func TestRealWireProtocolRestartsOnceAndVerifies(t *testing.T) {
 	go dockerServer.Serve(listener)
 	defer dockerServer.Close()
 	rules := []model.RestartRule{{AgentID: "fixture", ContainerName: "canary", ServiceCode: "rtc-canary", Image: "rtc/canary:1", Approved: true, ApprovalRef: "isolated protocol test"}}
-	store, err := center.NewStore(filepath.Join(dir, "center"), center.Config{Site: model.Site{Code: "fixture", Name: "Fixture"}, Agents: []center.AgentConfig{{ID: "fixture", Secret: strings.Repeat("f", 32), HostName: "fixture", HostAddress: "127.0.0.1"}}, RestartRules: rules})
+	store, err := center.NewStore(filepath.Join(dir, "center"), center.Config{Site: model.Site{Code: "fixture", Name: "Fixture"}, RestartRules: rules})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	server := httptest.NewServer((&center.Server{Store: store, AdminID: "admin", AdminSecret: strings.Repeat("z", 32)}).Handler())
+	server := httptest.NewServer((&center.Server{AgentEnrollmentToken: strings.Repeat("e", 32), Store: store, AdminID: "admin", AdminSecret: strings.Repeat("z", 32)}).Handler())
 	defer server.Close()
 	collector := docker.New(socket, docker.Policy{})
+	enrollmentCtx, cancelEnrollment := context.WithTimeout(context.Background(), 3*time.Second)
+	_, err = agent.Enroll(enrollmentCtx, "ws"+strings.TrimPrefix(server.URL, "http")+"/api/v1/agent/connect", strings.Repeat("e", 32), agent.Identity{ID: "fixture", Secret: strings.Repeat("f", 32)}, model.HostInfo{HostName: "fixture", HostAddress: "127.0.0.1", IPAddresses: []string{"127.0.0.1"}, HostnameSource: "fixture", AddressSource: "fixture", CollectedAt: time.Now().UTC()}, nil)
+	cancelEnrollment()
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner, err := agent.New(filepath.Join(dir, "agent"), "fixture", rules, collector)
 	if err != nil {
 		t.Fatal(err)

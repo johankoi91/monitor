@@ -20,7 +20,15 @@ type MediaEdgeSkipped struct {
 	ContainerName string `json:"container_name"`
 	Reason        string `json:"reason"`
 }
+type DiscoveredAccessPoint struct {
+	AgentID       string   `json:"agent_id"`
+	Address       string   `json:"address"`
+	Groups        []string `json:"groups"`
+	ContainerName string   `json:"container_name"`
+	Stale         bool     `json:"stale"`
+}
 type MediaEdgeInventory struct {
+	AccessPoints      []DiscoveredAccessPoint        `json:"access_points"`
 	ByAP              map[string][]MediaEdgeEndpoint `json:"by_ap"`
 	Hosts             []string                       `json:"hosts"`
 	MatchedContainers int                            `json:"matched_containers"`

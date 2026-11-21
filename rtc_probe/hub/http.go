@@ -32,20 +32,16 @@ func (h *Hub) ServeProbe(w http.ResponseWriter, r *http.Request) {
 		reply(w, 403, map[string]string{"code": "ORIGIN_DENIED"})
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/v1/probe/uploads/") {
-		if strings.Contains(strings.TrimPrefix(r.URL.Path, "/api/v1/probe/uploads/"), "/") {
-			h.uploadParts(w, r, id)
-			return
-		}
-		h.upload(w, r, id)
+	if strings.HasPrefix(r.URL.Path, "/api/v1/probes/uploads/") {
+		h.uploadParts(w, r, id)
 		return
 	}
-	if r.URL.Path != "/api/v1/probe/connect" || r.Method != "GET" {
+	if r.URL.Path != "/api/v1/probes/connect" || r.Method != "GET" {
 		http.NotFound(w, r)
 		return
 	}
 	h.mu.Lock()
-	disabled := h.state.DisabledProbes[id]
+	disabled := h.runtimeDisabled(id)
 	h.mu.Unlock()
 	if disabled {
 		reply(w, 403, map[string]string{"code": "PROBE_DISABLED"})
@@ -130,27 +126,6 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, h.Summary())
 		return
 	}
-	if len(parts) == 1 && parts[0] == "probes" && r.Method == "POST" {
-		var v struct {
-			ID       string `json:"probe_id"`
-			Name     string `json:"name"`
-			Location string `json:"location"`
-			Host     string `json:"host_address"`
-		}
-		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
-		d.DisallowUnknownFields()
-		if d.Decode(&v) != nil || d.Decode(&struct{}{}) != io.EOF {
-			reply(w, 400, map[string]string{"message": "探针登记参数无效"})
-			return
-		}
-		secret, err := h.RegisterProbe(ProbeConfig{ID: v.ID, Name: v.Name, Location: v.Location, HostAddress: v.Host})
-		if err != nil {
-			reply(w, 409, map[string]string{"message": err.Error()})
-			return
-		}
-		reply(w, 201, map[string]any{"probe_id": v.ID, "secret": secret, "message": "机器凭证只在本次返回，请妥善保存"})
-		return
-	}
 	if len(parts) == 1 && parts[0] == "history" && r.Method == "GET" {
 		limit, offset := 20, 0
 		var err error
@@ -164,7 +139,12 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 			reply(w, 400, map[string]string{"message": "分页参数无效"})
 			return
 		}
-		v, e := h.History(r.URL.Query().Get("task_id"), limit, offset)
+		filter := HistoryFilter{TaskID: r.URL.Query().Get("task_id"), ClientType: r.URL.Query().Get("client_type"), Status: r.URL.Query().Get("status")}
+		if filter.ClientType != "" && filter.ClientType != "native" && filter.ClientType != "web" && !protocol.IsInteropClient(filter.ClientType) || filter.Status != "" && filter.Status != "SUCCESS" && filter.Status != "FAILED" && filter.Status != "ERROR" && filter.Status != "CANCELLED" && filter.Status != "PREPARING" && filter.Status != "RUNNING" {
+			reply(w, 400, map[string]string{"message": "历史筛选参数无效"})
+			return
+		}
+		v, e := h.FilteredHistory(filter, limit, offset)
 		if e != nil {
 			reply(w, 503, map[string]string{"message": e.Error()})
 			return
@@ -214,7 +194,7 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, h.Snapshot())
 		return
 	}
-	if len(parts) == 1 && r.Method == "GET" && (parts[0] == "status" || parts[0] == "probes" || parts[0] == "targets" || parts[0] == "tasks" || parts[0] == "runs") {
+	if len(parts) == 1 && r.Method == "GET" && (parts[0] == "status" || parts[0] == "targets" || parts[0] == "tasks" || parts[0] == "runs") {
 		reply(w, 200, h.Snapshot())
 		return
 	}
@@ -236,16 +216,7 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	if parts[0] == "probes" && parts[2] == "enabled" {
-		var v struct {
-			Enabled *bool `json:"enabled"`
-		}
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&v) != nil || v.Enabled == nil {
-			reply(w, 400, map[string]string{"message": "enabled 必填"})
-			return
-		}
-		err = h.EnableProbe(parts[1], *v.Enabled)
-	} else if parts[0] == "tasks" {
+	if parts[0] == "tasks" {
 		switch parts[2] {
 		case "run":
 			var run Run
@@ -292,17 +263,17 @@ func (h *Hub) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) logOwner(id, probe string) (protocol.LogRequest, bool) {
 	for _, run := range h.state.Runs {
 		v, ok := run.Logs[id]
-		if ok && (probe == "" || v.ProbeID == probe) {
+		if ok && (probe == "" || v.RuntimeID == probe) {
 			return v, true
 		}
 	}
-	if v, err := h.archive.RTCGetLog(id); err == nil && (probe == "" || v.ProbeID == probe) {
+	if v, err := h.archive.RTCGetLog(id); err == nil && (probe == "" || v.RuntimeID == probe) {
 		return v, true
 	}
 	return protocol.LogRequest{}, false
 }
 func (h *Hub) upload(w http.ResponseWriter, r *http.Request, probe string) {
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/probe/uploads/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/probes/uploads/")
 	if r.Method != "PUT" || !protocol.ValidID(id) {
 		http.NotFound(w, r)
 		return

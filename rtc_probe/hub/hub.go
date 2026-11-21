@@ -2,13 +2,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,15 +20,19 @@ import (
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
 )
 
-type ProbeConfig struct {
-	Name        string `yaml:"name"`
-	ID          string `yaml:"probe_id"`
-	Secret      string `yaml:"secret"`
-	Location    string `yaml:"location"`
-	HostAddress string `yaml:"host_address"`
+type RuntimeRegistration struct {
+	ID          string `json:"runtime_id"`
+	Name        string `json:"name"`
+	SecretHash  string `json:"secret_hash"`
+	HostID      string `json:"host_id"`
+	HostName    string `json:"host_name"`
+	HostAddress string `json:"host_address"`
+	Location    string `json:"location"`
+	ServiceType string `json:"service_type"`
+	ClientType  string `json:"client_type"`
+	Driver      string `json:"driver"`
 }
 type Config struct {
-	Probes            []ProbeConfig     `yaml:"probes"`
 	Targets           []protocol.Target `yaml:"targets"`
 	Tasks             []protocol.Task   `yaml:"tasks"`
 	MaxConcurrentRuns int               `yaml:"max_concurrent_runs"`
@@ -45,6 +50,7 @@ type Endpoint struct {
 	Result *protocol.Result `json:"result,omitempty"`
 }
 type Run struct {
+	ClientType   string                         `json:"client_type,omitempty"`
 	NativePlan   *protocol.NativePlan           `json:"native_plan,omitempty"`
 	NativeCase   *protocol.NativeCase           `json:"native_case,omitempty"`
 	Cases        []NativeCaseResult             `json:"cases,omitempty"`
@@ -66,29 +72,30 @@ type Run struct {
 	Logs         map[string]protocol.LogRequest `json:"logs"`
 }
 type state struct {
+	SchemaVersion     int                                `json:"schema_version"`
+	ProbeHosts        map[string]ProbeHostRegistration   `json:"probe_hosts"`
 	Native            map[string]*NativeState            `json:"native,omitempty"`
 	TargetCredentials map[string]protocol.AppCredentials `json:"target_credentials,omitempty"`
-	Registered        map[string]ProbeConfig             `json:"registered,omitempty"`
-	DisabledProbes    map[string]bool                    `json:"disabled_probes,omitempty"`
+	Runtimes          map[string]RuntimeRegistration     `json:"runtimes"`
+	DisabledClients   map[string]bool                    `json:"disabled_clients,omitempty"`
 	Settings          Settings                           `json:"settings"`
 	Health            map[string]TaskHealth              `json:"health,omitempty"`
-	Credentials       map[string]protocol.Credentials    `json:"credentials,omitempty"`
 	Plan              *Plan                              `json:"plan,omitempty"`
 	Runs              map[string]*Run                    `json:"runs"`
 	Enabled           map[string]bool                    `json:"enabled"`
 }
 type session struct {
-	StorageBytes                       int64
-	ResourceError                      string
-	Capabilities                       []string
-	RetentionSent                      string
-	ID                                 string
-	Seen                               time.Time
-	Capacity                           int
-	Driver                             string
-	ProbeVersion, SDKVersion, Platform string
-	Out                                chan protocol.Message
-	Stop                               chan struct{}
+	StorageBytes                         int64
+	ResourceError                        string
+	Capabilities                         []string
+	RetentionSent                        string
+	ID                                   string
+	Seen                                 time.Time
+	Capacity                             int
+	Driver                               string
+	RuntimeVersion, SDKVersion, Platform string
+	Out                                  chan protocol.Message
+	Stop                                 chan struct{}
 }
 type Hub struct {
 	nativeInventory    func() (protocol.NativeInventory, error)
@@ -121,15 +128,6 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 	if c.MaxConcurrentRuns < 1 || c.MaxConcurrentRuns > 32 {
 		return nil, errors.New("invalid RTC concurrency")
 	}
-	probes := map[string]bool{}
-	secrets := map[string]bool{}
-	for _, p := range c.Probes {
-		if !protocol.ValidID(p.ID) || len(p.Secret) < 24 || p.Location == "" || probes[p.ID] || secrets[p.Secret] {
-			return nil, errors.New("invalid or duplicated RTC probe identity")
-		}
-		probes[p.ID] = true
-		secrets[p.Secret] = true
-	}
 	targets := map[string]bool{}
 	for _, t := range c.Targets {
 		if !protocol.ValidID(t.ID) || t.Name == "" || (t.Driver != "mock" && t.Driver != "agora") || targets[t.ID] {
@@ -149,7 +147,7 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 		if t.TimeoutSeconds == 0 {
 			t.TimeoutSeconds = 30
 		}
-		if !protocol.ValidID(t.ID) || tasks[t.ID] || !targets[t.TargetID] || !probes[t.ProbeID] || t.IntervalSeconds < 5 || t.IntervalSeconds > 3600 || t.TimeoutSeconds < 3 || t.TimeoutSeconds >= t.IntervalSeconds {
+		if !protocol.ValidID(t.ID) || tasks[t.ID] || !targets[t.TargetID] || t.IntervalSeconds < 5 || t.IntervalSeconds > 3600 || t.TimeoutSeconds < 3 || t.TimeoutSeconds >= t.IntervalSeconds {
 			return nil, errors.New("invalid RTC task")
 		}
 		tasks[t.ID] = true
@@ -157,16 +155,11 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0700); err != nil {
 		return nil, err
 	}
-	validated, validationErr := normalizePlan(c.Probes, Plan{Targets: c.Targets, Tasks: c.Tasks})
-	if validationErr != nil {
-		return nil, validationErr
-	}
-	c.Targets, c.Tasks = validated.Targets, validated.Tasks
-	h := &Hub{config: c, state: state{Runs: map[string]*Run{}, Enabled: map[string]bool{}}, sessions: map[string]*session{}, next: map[string]time.Time{}, dir: dir, documents: docs, storageOK: true}
+	h := &Hub{config: c, state: state{SchemaVersion: 2, Runs: map[string]*Run{}, Enabled: map[string]bool{}, ProbeHosts: map[string]ProbeHostRegistration{}, Runtimes: map[string]RuntimeRegistration{}}, sessions: map[string]*session{}, next: map[string]time.Time{}, dir: dir, documents: docs, storageOK: true}
 	if archive, ok := docs.(Archive); ok {
 		h.archive = archive
 	} else {
-		h.archive = &fileArchive{dir: filepath.Join(dir, "history")}
+		h.archive = &fileArchive{dir: filepath.Join(dir, "history-v2")}
 	}
 	if err := h.archive.RTCInit(); err != nil {
 		return nil, err
@@ -175,12 +168,12 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 	var err error
 	if docs != nil {
 		var found bool
-		b, found, err = docs.LoadDocument("rtc-probe/state-v1")
+		b, found, err = docs.LoadDocument("probe-center/state-v2")
 		if !found && err == nil {
 			b = nil
 		}
 	} else {
-		b, err = os.ReadFile(filepath.Join(dir, "state.json"))
+		b, err = os.ReadFile(filepath.Join(dir, "state-v2.json"))
 		if os.IsNotExist(err) {
 			err = nil
 		}
@@ -188,24 +181,22 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 	if err != nil {
 		return nil, err
 	}
-	bindingsMigrated := false
 	if len(b) > 0 {
-		b, bindingsMigrated, err = migrateStoredState(b)
-		if err != nil {
-			return nil, err
+		if len(b) > 32<<20 || decodeStateV2(b, &h.state) != nil || h.state.SchemaVersion != 2 || h.state.Runs == nil || h.state.Enabled == nil || h.state.ProbeHosts == nil || h.state.Runtimes == nil {
+			return nil, errors.New("invalid v2 probe state; old identities and bindings are unsupported")
 		}
-		if len(b) > 32<<20 || json.Unmarshal(b, &h.state) != nil || h.state.Runs == nil || h.state.Enabled == nil {
-			return nil, errors.New("corrupt RTC state; preserve for repair")
-		}
+	}
+	if err := validateRegistry(h.state); err != nil {
+		return nil, err
 	}
 	for id, run := range h.state.Runs {
 		if run == nil || !protocol.ValidID(id) || run.ID != id || (!isSummary(run) && (run.Endpoints["sender"] == nil || run.Endpoints["receiver"] == nil)) || (run.Kind == edgeSweepKind && (len(run.Edges) == 0 || len(run.Edges) > protocol.MaxMediaEdges)) || (run.Kind == nativeCoverageKind && (run.NativePlan == nil || len(run.Cases) == 0)) || run.Logs == nil {
 			return nil, errors.New("corrupt RTC execution; preserve for repair")
 		}
 	}
-	migrated, migrationErr := h.loadTargetConfiguration()
-	if migrationErr != nil {
-		return nil, migrationErr
+	configurationDirty, configurationErr := h.loadTargetConfiguration()
+	if configurationErr != nil {
+		return nil, configurationErr
 	}
 
 	if h.state.Health == nil {
@@ -234,11 +225,11 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 		}
 	}
 	h.tokens = map[string]*protocol.Credentials{}
-	if h.state.Registered == nil {
-		h.state.Registered = map[string]ProbeConfig{}
+	if h.state.Runtimes == nil {
+		h.state.Runtimes = map[string]RuntimeRegistration{}
 	}
-	if h.state.DisabledProbes == nil {
-		h.state.DisabledProbes = map[string]bool{}
+	if h.state.DisabledClients == nil {
+		h.state.DisabledClients = map[string]bool{}
 	}
 	if h.state.Settings.HistoryDays == 0 {
 		h.state.Settings = defaultSettings()
@@ -256,7 +247,7 @@ func New(dir string, c Config, docs Documents) (*Hub, error) {
 		}
 	}
 	now := time.Now().UTC()
-	dirty := bindingsMigrated || migrated || len(h.state.Health) > 0
+	dirty := configurationDirty || len(h.state.Health) > 0
 	for _, r := range h.state.Runs {
 		if !terminal(r.Status) {
 			r.Status = "ERROR"
@@ -339,9 +330,9 @@ func (h *Hub) persist(s *state) error {
 		return errors.New("RTC state capacity reached")
 	}
 	if h.documents != nil {
-		e = h.documents.SaveDocument("rtc-probe/state-v1", b)
+		e = h.documents.SaveDocument("probe-center/state-v2", b)
 	} else {
-		e = durable.Bytes(filepath.Join(h.dir, "state.json"), b)
+		e = durable.Bytes(filepath.Join(h.dir, "state-v2.json"), b)
 	}
 	h.storageOK = e == nil
 	if e != nil {
@@ -363,11 +354,14 @@ func (h *Hub) change(fn func(*state) error) error {
 	if next.Health == nil {
 		next.Health = map[string]TaskHealth{}
 	}
-	if next.Registered == nil {
-		next.Registered = map[string]ProbeConfig{}
+	if next.ProbeHosts == nil {
+		next.ProbeHosts = map[string]ProbeHostRegistration{}
 	}
-	if next.DisabledProbes == nil {
-		next.DisabledProbes = map[string]bool{}
+	if next.Runtimes == nil {
+		next.Runtimes = map[string]RuntimeRegistration{}
+	}
+	if next.DisabledClients == nil {
+		next.DisabledClients = map[string]bool{}
 	}
 	if h.storageInterrupted {
 		now := time.Now().UTC()
@@ -379,9 +373,6 @@ func (h *Hub) change(fn func(*state) error) error {
 			v.UnknownSince = &now
 			next.Health[id] = v
 		}
-	}
-	if next.Credentials == nil {
-		next.Credentials = map[string]protocol.Credentials{}
 	}
 	if e = fn(&next); e != nil {
 		return e
@@ -423,11 +414,9 @@ func (h *Hub) enabled(t protocol.Task) bool {
 func (h *Hub) Authenticate(id, secret string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	actual := sha256.Sum256([]byte(secret))
 	valid := false
-	for _, p := range h.probesLocked() {
-		expected := sha256.Sum256([]byte(p.Secret))
-		if p.ID == id && subtle.ConstantTimeCompare(actual[:], expected[:]) == 1 {
+	for _, p := range h.runtimesLocked() {
+		if p.ID == id && probeSecretMatches(p, secret) {
 			valid = true
 		}
 	}
@@ -512,7 +501,7 @@ func (h *Hub) tick(now time.Time) {
 	scheduled := false
 	for i := 0; i < len(h.config.Tasks); i++ {
 		t := h.config.Tasks[(i+h.scheduleCursor)%len(h.config.Tasks)]
-		if nativeEnabled(t) {
+		if coverageEnabled(t) {
 			continue
 		}
 		if h.enabled(t) && !now.Before(h.next[t.ID]) {
@@ -542,7 +531,7 @@ func (h *Hub) Start(taskID string) (Run, error) {
 	return h.startLocked(taskID, time.Now().UTC())
 }
 func (h *Hub) startLocked(taskID string, now time.Time) (Run, error) {
-	if task, ok := h.task(taskID); ok && nativeEnabled(task) {
+	if task, ok := h.task(taskID); ok && coverageEnabled(task) {
 		return h.startNativeCoverage(task, now)
 	}
 	if task, ok := h.task(taskID); ok && task.RTC != nil && task.RTC.MediaEdges != nil {
@@ -566,24 +555,55 @@ func (h *Hub) startProbeSpec(taskID string, now time.Time, edgeEndpoint, parentI
 	if !h.enabled(t) {
 		return Run{}, errors.New("task disabled")
 	}
+	if protocol.IsInteropClient(t.ClientType) {
+		if err := h.admitInterop(t, now, parentID); err != nil {
+			return Run{}, err
+		}
+	}
 	if err := h.admitProbe(t, now, parentID); err != nil {
 		return Run{}, err
 	}
+	if nativeCase != nil {
+		supported := false
+		if session := h.sessions[h.runtimeForTask(t)]; session != nil {
+			for _, cap := range session.Capabilities {
+				if cap == protocol.ProbeEdgeAddressCapability {
+					supported = true
+				}
+			}
+		}
+		if !supported {
+			return Run{}, errors.New("PROBE_EDGE_FORMAT_UNAVAILABLE")
+		}
+	}
 	target := h.target(t.TargetID)
 	rev := revision(t, target)
+	target.Driver = protocol.TaskDriver(t, target)
 	id := protocol.ID()
-	r := Run{NativeCase: nativeCase, ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, ID: id, TaskID: t.ID, TargetID: t.TargetID, Revision: rev, Driver: target.Driver, Status: "PREPARING", Reason: "MOCK_EXECUTION", CreatedAt: now, Deadline: now.Add(time.Duration(t.TimeoutSeconds) * time.Second), Endpoints: map[string]*Endpoint{}, Logs: map[string]protocol.LogRequest{}}
-	if target.Driver == "agora" {
+	r := Run{ClientType: t.ClientType, NativeCase: nativeCase, ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, ID: id, TaskID: t.ID, TargetID: t.TargetID, Revision: rev, Driver: target.Driver, Status: "PREPARING", Reason: "MOCK_EXECUTION", CreatedAt: now, Deadline: now.Add(time.Duration(t.TimeoutSeconds) * time.Second), Endpoints: map[string]*Endpoint{}, Logs: map[string]protocol.LogRequest{}}
+	if protocol.RealDriver(target.Driver) {
 		r.Reason = "SDK_EXECUTION"
 	}
-	for role, probe := range map[string]string{"sender": t.ProbeID, "receiver": t.ProbeID} {
+	for _, role := range []string{"sender", "receiver"} {
+		endpointTask := t
+		endpointTask.ClientType = protocol.EndpointClient(t, nativeCase, role)
+		probe := h.runtimeForTask(endpointTask)
+		endpointTarget := target
+		endpointTarget.Driver = protocol.TaskDriver(endpointTask, h.target(t.TargetID))
+
 		uid := "10001"
 		if role == "receiver" {
 			uid = "10002"
 		}
-		job := protocol.Job{NativeCase: nativeCase, ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, RunID: id, TaskID: t.ID, Target: target, Revision: rev, ProbeID: probe, Role: role, Channel: "probe_" + id, UID: uid, PublisherUID: "10001", Scenario: t.Scenario, Deadline: r.Deadline, MediaDurationMS: 1200}
+		job := protocol.Job{HostID: t.HostID, ServiceType: t.ServiceType, ClientType: endpointTask.ClientType, NativeCase: nativeCase, ParentRunID: parentID, EdgeEndpoint: edgeEndpoint, RunID: id, TaskID: t.ID, Target: endpointTarget, Revision: rev, RuntimeID: probe, Role: role, Channel: "probe_" + id, UID: uid, PublisherUID: "10001", Scenario: t.Scenario, Deadline: r.Deadline, MediaDurationMS: 1200}
+		if nativeCase != nil && nativeCase.Duplex {
+			job.PublisherUID = "10001"
+			if role == "sender" {
+				job.PublisherUID = "10002"
+			}
+		}
 		if sess := h.sessions[probe]; sess != nil {
-			job.ProbeVersion = sess.ProbeVersion
+			job.RuntimeVersion = sess.RuntimeVersion
 			job.SDKVersion = sess.SDKVersion
 			job.Platform = sess.Platform
 			for _, capability := range sess.Capabilities {
@@ -592,15 +612,34 @@ func (h *Hub) startProbeSpec(taskID string, now time.Time, edgeEndpoint, parentI
 				}
 			}
 		}
-		for _, config := range h.probesLocked() {
+		for _, config := range h.runtimesLocked() {
 			if config.ID == probe {
-				job.ProbeLocation = config.Location
+				job.RuntimeLocation = config.Location
 				break
 			}
 		}
 		if t.RTC != nil {
-			job.RTC = t.RTC
-			job.MediaDurationMS = t.RTC.MediaDurationMS
+			job.RTC = taskRTC(endpointTask, h.target(t.TargetID).RTC)
+			if protocol.IsInteropClient(t.ClientType) {
+				job.RTC.Codec = 1
+			}
+			job.MediaDurationMS = job.RTC.MediaDurationMS
+		}
+		if protocol.IsInteropClient(t.ClientType) {
+			job.LogScope = ""
+		}
+
+		if nativeCase != nil {
+			job.NativeCase = nativeCase.ForProbe()
+			job.EdgeFormat = protocol.ProbeEdgeAddressFormat
+			job.RTC = cloneRTC(job.RTC)
+			if job.RTC != nil {
+				job.RTC.NativeCoverage = nil
+				if job.RTC.WebAccess != nil {
+					job.RTC.WebAccess.Coverage = nil
+				}
+			}
+			job.Target.RTC = cloneRTC(job.RTC)
 		}
 		r.Endpoints[role] = &Endpoint{Job: job, Events: []protocol.Event{}}
 	}
@@ -654,7 +693,7 @@ func (h *Hub) Enable(id string, enabled bool) error {
 	if !ok {
 		return errors.New("task not found")
 	}
-	if enabled && nativeEnabled(t) {
+	if enabled && coverageEnabled(t) {
 		tasks := append([]protocol.Task(nil), h.config.Tasks...)
 		for i := range tasks {
 			tasks[i].Enabled = h.enabled(tasks[i])
@@ -750,7 +789,7 @@ func logJob(r *Run, role string) (protocol.Job, bool) {
 	}
 	if role == "pair" {
 		a, b := r.Endpoints["sender"], r.Endpoints["receiver"]
-		if a == nil || b == nil || a.Job.ProbeID != b.Job.ProbeID || a.Job.LogScope != protocol.ServiceLogScope || b.Job.LogScope != protocol.ServiceLogScope {
+		if a == nil || b == nil || a.Job.RuntimeID != b.Job.RuntimeID || a.Job.LogScope != protocol.ServiceLogScope || b.Job.LogScope != protocol.ServiceLogScope {
 			return protocol.Job{}, false
 		}
 		job := a.Job
@@ -804,7 +843,7 @@ func (h *Hub) addLogs(r *Run, now time.Time) {
 			if role == "pair" {
 				scope = protocol.ServiceLogScope
 			}
-			r.Logs[id] = protocol.LogRequest{Scope: scope, ID: id, RunID: r.ID, ProbeID: job.ProbeID, Role: role, Status: "REQUESTED", ExpiresAt: now.Add(time.Hour)}
+			r.Logs[id] = protocol.LogRequest{Scope: scope, ID: id, RunID: r.ID, RuntimeID: job.RuntimeID, Role: role, Status: "REQUESTED", ExpiresAt: now.Add(time.Hour)}
 		}
 	}
 }
@@ -885,12 +924,12 @@ func (h *Hub) Commands(id string, s *session) []protocol.Message {
 		if isSummary(r) {
 			continue
 		}
-		if r.Endpoints["sender"].Job.ProbeID == id && r.Endpoints["receiver"].Job.ProbeID == id {
+		if r.Endpoints["sender"].Job.RuntimeID == id && r.Endpoints["receiver"].Job.RuntimeID == id {
 			if m, ok := h.pairCommand(r); ok {
 				out = append(out, m)
 			}
 			for _, request := range r.Logs {
-				if request.ProbeID == id && request.Status == "REQUESTED" && time.Now().Before(request.ExpiresAt) {
+				if request.RuntimeID == id && request.Status == "REQUESTED" && time.Now().Before(request.ExpiresAt) {
 					m := protocol.Msg("collect_logs")
 					copy := request
 					m.Logs = &copy
@@ -900,7 +939,7 @@ func (h *Hub) Commands(id string, s *session) []protocol.Message {
 			continue
 		}
 		for role, e := range r.Endpoints {
-			if e.Job.ProbeID != id {
+			if e.Job.RuntimeID != id {
 				continue
 			}
 			var kind string
@@ -920,13 +959,23 @@ func (h *Hub) Commands(id string, s *session) []protocol.Message {
 				m.Role = role
 				if kind == "prepare_run" {
 					job := e.Job
+					credentials, err := h.runCredentials(r)
+					if err != nil {
+						continue
+					}
+					job.Credentials = &protocol.Credentials{}
+					if role == "sender" {
+						job.Credentials.SenderToken = credentials.SenderToken
+					} else {
+						job.Credentials.ReceiverToken = credentials.ReceiverToken
+					}
 					m.Job = &job
 				}
 				out = append(out, m)
 			}
 		}
 		for _, request := range r.Logs {
-			if request.ProbeID == id && request.Status == "REQUESTED" && time.Now().Before(request.ExpiresAt) {
+			if request.RuntimeID == id && request.Status == "REQUESTED" && time.Now().Before(request.ExpiresAt) {
 				m := protocol.Msg("collect_logs")
 				copy := request
 				m.Logs = &copy
@@ -939,7 +988,7 @@ func (h *Hub) Commands(id string, s *session) []protocol.Message {
 func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Message, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.sessions[id] != sess || m.Version != protocol.Version {
+	if sess == nil || h.sessions[id] != sess || m.Version != protocol.Version {
 		return protocol.Message{}, errors.New("obsolete or invalid probe session")
 	}
 	sess.Seen = time.Now()
@@ -947,11 +996,15 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 		return h.receiveLogStatus(id, m)
 	}
 	if m.Type == "hello" || m.Type == "heartbeat" {
-		if (m.Driver != "mock" && m.Driver != "agora") || m.Capacity < 1 || m.Capacity > protocol.MaxWorkerCapacity {
+		if (m.Driver != "mock" && !protocol.RealDriver(m.Driver)) || m.Capacity < 1 || m.Capacity > protocol.MaxWorkerCapacity {
 			return protocol.Message{}, errors.New("unsupported capability")
 		}
+		registration, ok := h.state.Runtimes[id]
+		if !ok || m.HostID != registration.HostID || m.ServiceType != registration.ServiceType || m.ClientType != registration.ClientType || (registration.Driver != "" && m.Driver != registration.Driver) {
+			return protocol.Message{}, errors.New("runtime advertisement does not match its server registration")
+		}
 		sess.Driver = m.Driver
-		sess.ProbeVersion, sess.SDKVersion, sess.Platform = m.ProbeVersion, m.SDKVersion, m.Platform
+		sess.RuntimeVersion, sess.SDKVersion, sess.Platform = m.RuntimeVersion, m.SDKVersion, m.Platform
 		sess.Capacity = m.Capacity
 		sess.ResourceError = m.ResourceError
 		sess.StorageBytes = m.StorageBytes
@@ -968,7 +1021,7 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 		return protocol.Message{}, errors.New("unknown execution or config revision")
 	}
 	e := r.Endpoints[m.Role]
-	if e == nil || e.Job.ProbeID != id {
+	if e == nil || e.Job.RuntimeID != id {
 		return protocol.Message{}, errors.New("execution owner mismatch")
 	}
 	ack := protocol.Msg("")
@@ -1011,7 +1064,7 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 				seen[ev.ID] = ev
 			}
 			for _, ev := range m.Events {
-				if ev.RunID != "" && (ev.RunID != m.RunID || ev.Role != m.Role || ev.ProbeID != id || ev.Revision != m.Revision || ev.ParentRunID != run.ParentRunID || ev.EdgeEndpoint != run.EdgeEndpoint) {
+				if ev.RunID != "" && (ev.RunID != m.RunID || ev.Role != m.Role || ev.RuntimeID != id || ev.Revision != m.Revision || ev.ParentRunID != run.ParentRunID || ev.EdgeEndpoint != run.EdgeEndpoint) {
 					return errors.New("SDK event context mismatch")
 				}
 				if !protocol.ValidID(ev.ID) || !protocol.ValidID(ev.WorkerID) || ev.Seq == 0 || ev.At.IsZero() {
@@ -1035,7 +1088,7 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 			ack.Type = "telemetry_ack"
 		case "run_result":
 			v := m.Result
-			if v == nil || !protocol.ValidID(v.ID) || v.Driver != run.Driver || !protocol.ValidID(v.WorkerID) || v.FinishedAt.IsZero() || !(v.Outcome == "SUCCESS" || v.Outcome == "FAILED" || v.Outcome == "ERROR" || v.Outcome == "CANCELLED") {
+			if v == nil || !protocol.ValidID(v.ID) || v.Driver != ep.Job.Target.Driver || !protocol.ValidID(v.WorkerID) || v.FinishedAt.IsZero() || !(v.Outcome == "SUCCESS" || v.Outcome == "FAILED" || v.Outcome == "ERROR" || v.Outcome == "CANCELLED") {
 				return errors.New("invalid endpoint result")
 			}
 			if ep.Result != nil {
@@ -1056,7 +1109,7 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 					run.FinishedAt = &now
 					run.Status = "SUCCESS"
 					run.Reason = "SIMULATION_ONLY"
-					if run.Driver == "agora" {
+					if protocol.RealDriver(run.Driver) {
 						run.Reason = "MEDIA_VERIFIED"
 					}
 					for _, x := range []*protocol.Result{a, b} {
@@ -1084,7 +1137,7 @@ func (h *Hub) Receive(id string, sess *session, m protocol.Message) (protocol.Me
 						run.Reason = "MEDIA_EVIDENCE_MISSING"
 					}
 					h.applyHealth(s, run, now)
-					if run.Driver == "agora" || run.Status != "SUCCESS" || a.Cleanup != "SUCCESS" || b.Cleanup != "SUCCESS" {
+					if protocol.RealDriver(run.Driver) || run.Status != "SUCCESS" || a.Cleanup != "SUCCESS" || b.Cleanup != "SUCCESS" {
 						h.addLogs(run, now)
 					}
 				}
@@ -1104,14 +1157,14 @@ func (h *Hub) Snapshot() any {
 	defer h.mu.Unlock()
 	probes := []any{}
 	now := time.Now()
-	for _, p := range h.probesLocked() {
+	for _, p := range h.runtimesLocked() {
 		s := h.sessions[p.ID]
 		online := s != nil && s.Driver != "" && now.Sub(s.Seen) < 60*time.Second
-		view := map[string]any{"probe_id": p.ID, "name": p.Name, "enabled": !h.state.DisabledProbes[p.ID], "location": p.Location, "host_address": p.HostAddress, "online": online, "driver": "mock"}
+		view := map[string]any{"runtime_id": p.ID, "host_id": p.HostID, "host_name": p.HostName, "service_type": p.ServiceType, "client_type": p.ClientType, "name": p.Name, "enabled": !h.runtimeDisabled(p.ID), "location": p.Location, "host_address": p.HostAddress, "online": online, "driver": p.Driver}
 		if s != nil {
 			view["driver"] = s.Driver
 			view["last_heartbeat"] = s.Seen
-			view["probe_version"] = s.ProbeVersion
+			view["runtime_version"] = s.RuntimeVersion
 			view["sdk_version"] = s.SDKVersion
 			view["platform"] = s.Platform
 			view["capacity"] = s.Capacity
@@ -1142,7 +1195,7 @@ func (h *Hub) Snapshot() any {
 			healths[t.ID] = h.effectiveHealth(t, now)
 		}
 	}
-	v := map[string]any{"mode": mode, "config_revision": planRevision(h.planLocked()), "rtc_service_status": health, "reason": reason, "storage_available": h.storageOK, "probes": probes, "targets": h.planLocked().Targets, "tasks": tasks, "runs": runs, "task_health": healths, "settings": h.state.Settings, "native_coverage": h.state.Native}
+	v := map[string]any{"mode": mode, "config_revision": planRevision(h.planLocked()), "rtc_service_status": health, "reason": reason, "storage_available": h.storageOK, "runtimes": probes, "hosts": h.hostViewsLocked(probes), "targets": h.planLocked().Targets, "tasks": tasks, "runs": runs, "task_health": healths, "settings": h.state.Settings, "native_coverage": h.state.Native}
 	b, _ := json.Marshal(v)
 	return json.RawMessage(b)
 }
@@ -1162,4 +1215,17 @@ func (h *Hub) Detail(id string) (json.RawMessage, error) {
 	h.decorateRun(&copy)
 	b, e := json.Marshal(copy)
 	return b, e
+}
+
+func decodeStateV2(data []byte, s *state) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(s); err != nil {
+		return err
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
+		return errors.New("unexpected trailing probe state")
+	}
+	return nil
 }

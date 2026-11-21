@@ -20,6 +20,13 @@ func fingerprint(value any) string {
 // remain marked stale until a target configuration explicitly retires them.
 func BuildNativePlan(config protocol.NativeCoverageConfig, inventory protocol.NativeInventory, prior []protocol.NativeMember, phase string, rotation uint64) protocol.NativePlan {
 	plan := protocol.NativePlan{Topology: "ring", Phase: phase, Members: []protocol.NativeMember{}, Cases: []protocol.NativeCase{}, Issues: []string{}}
+	config, apIssues := protocol.ResolveDiscoveredAPs(config, inventory)
+	plan.Issues = append(plan.Issues, apIssues...)
+	if len(config.Groups) == 0 {
+		plan.Version = fingerprint(config)
+		plan.Cases = []protocol.NativeCase{{Key: "ap-unavailable", Kind: "AP_JOIN", Sender: protocol.NativeEdge{Transport: "udp"}, Receiver: protocol.NativeEdge{Transport: "udp"}, Unavailable: "AP_NOT_DISCOVERED"}}
+		return plan
+	}
 	groups := map[string]bool{}
 	excluded := map[string]bool{}
 	for _, binding := range config.Groups {
@@ -80,6 +87,9 @@ func BuildNativePlan(config protocol.NativeCoverageConfig, inventory protocol.Na
 		return plan
 	}
 	add := func(group, entry, kind string, sender, receiver protocol.NativeEdge, unavailable string) {
+		if unavailable == "" && len(apIssues) > 0 {
+			unavailable = apIssues[0]
+		}
 		c := protocol.NativeCase{Kind: kind, APGroup: group, APEntryPoint: entry, Sender: sender, Receiver: receiver, CoverageVersion: plan.Version, Unavailable: unavailable, ParameterScope: "connection", ExecutionModel: "shared"}
 
 		c.APClientIPs = []string{entry}

@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	rtc "github.com/AgoraIO-Extensions/Agora-Golang-Server-SDK/v2/go_sdk/rtc"
+	"github.com/johankoi91/monitor/rtc-probe/internal/routeproof"
 	"github.com/johankoi91/monitor/rtc-probe/protocol"
-	"github.com/johankoi91/monitor/rtc-probe/routeproof"
 )
 
 func (r *recorder) configureRoutes(connections map[string]*rtc.RtcConnection) error {
@@ -82,7 +82,7 @@ func nativeParameters(p *protocol.RTCParameters, c *protocol.NativeCase) {
 }
 
 func (r *recorder) routeEvidence(role string, start, end int64) *protocol.RouteEvidence {
-	file := os.Getenv("RTC_PROBE_ROUTE_LOG")
+	file := os.Getenv("AVOPS_PROBE_ROUTE_LOG")
 	if file == "" {
 		file = filepath.Join(r.job.WorkDir, "route-capture.jsonl")
 	}
@@ -91,7 +91,7 @@ func (r *recorder) routeEvidence(role string, start, end int64) *protocol.RouteE
 		return &protocol.RouteEvidence{Status: "UNVERIFIED", Reason: fmt.Sprintf("ROUTE_CAPTURE_UNAVAILABLE:%T", err), Scope: "process", Observed: []protocol.RoutePeer{}}
 	}
 	result := routeproof.Assess(r.job, role, events, start, end)
-	result.Guarded = captureStatus() == 0 && os.Getenv("RTC_PROBE_ROUTE_ALLOW_ENDPOINTS") == strings.Join(r.job.NativeCase.AllowedEndpoints(), ";")
+	result.Guarded = captureStatus() == 0 && os.Getenv("AVOPS_PROBE_ROUTE_ALLOW_ENDPOINTS") == strings.Join(r.job.NativeCase.AllowedEndpoints(), ";")
 	if !result.Guarded {
 		result.Status = "UNVERIFIED"
 		result.Reason = "ROUTE_GUARD_NOT_ACTIVE"

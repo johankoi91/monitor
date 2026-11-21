@@ -31,7 +31,6 @@ dist/
 build/
 /notification_receiver/notification-receiver
 /notification_receiver/avops_notification_receiver
-/v1_api_prototype/mockserver
 
 # Offline delivery archives and original recordings
 *.tar
@@ -42,3 +41,8 @@ build/
 *.mov
 *.m4a
 *.wav
+
+# Generated offline delivery trees and Python bytecode
+/releases/avops-monitor-*/
+/releases/avops-monitor-*.sha256
+__pycache__/

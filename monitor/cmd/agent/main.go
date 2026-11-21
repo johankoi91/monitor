@@ -33,7 +33,8 @@ func env(key, fallback string) string {
 }
 func main() {
 	endpoint := os.Getenv("AVOPS_CENTER_URL")
-	id, secret := os.Getenv("AVOPS_AGENT_ID"), os.Getenv("AVOPS_AGENT_SECRET")
+	enrollToken := os.Getenv("AVOPS_AGENT_ENROLL_TOKEN")
+	dataDir := env("AVOPS_AGENT_DATA_DIR", "data/agent")
 	u, err := url.Parse(endpoint)
 	if err != nil || u.User != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.Path != "/api/v1/agent/connect" {
 		log.Fatal("AVOPS_CENTER_URL must be a credential-free Agent websocket URL")
@@ -44,9 +45,17 @@ func main() {
 			log.Fatal("Agent requires WSS; dev WS is limited to loopback")
 		}
 	}
-	if id == "" || len(secret) < 24 {
-		log.Fatal("Agent ID and independent 24+ character secret required")
+	if len(enrollToken) < 24 {
+		log.Fatal("AVOPS_AGENT_ENROLL_TOKEN with at least 24 characters required")
 	}
+	if host := os.Getenv("AVOPS_HOST_ADDRESS"); host != "" && net.ParseIP(host) == nil {
+		log.Fatal("AVOPS_HOST_ADDRESS must be an IP")
+	}
+	identity, identityErr := agent.LoadIdentity(dataDir)
+	if identityErr != nil {
+		log.Fatal("cannot load persistent Agent identity")
+	}
+	id, secret := identity.ID, identity.Secret
 	seconds, err := strconv.Atoi(env("AVOPS_COLLECT_SECONDS", "15"))
 	if err != nil || seconds < 10 || seconds > 60 {
 		log.Fatal("collection period must be 10–60 seconds")
@@ -63,7 +72,7 @@ func main() {
 	if err != nil {
 		log.Fatal("cannot load Agent restart rules")
 	}
-	runner, err := agent.New(env("AVOPS_AGENT_DATA_DIR", "data/agent"), id, rules, collector)
+	runner, err := agent.New(dataDir, id, rules, collector)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -76,6 +85,19 @@ func main() {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		conn, resp, err := dialer.DialContext(ctx, endpoint, headers)
+		if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+			resp = nil
+			enrollCtx, cancelEnroll := context.WithTimeout(ctx, 15*time.Second)
+			host := agent.HostInfo(collector.HostName(enrollCtx), os.Getenv("AVOPS_HOST_ADDRESS"), "")
+			_, enrollErr := agent.Enroll(enrollCtx, endpoint, enrollToken, identity, host, dialer.TLSClientConfig)
+			cancelEnroll()
+			if enrollErr == nil {
+				conn, resp, err = dialer.DialContext(ctx, endpoint, headers)
+			}
+		}
 		if err != nil {
 			if resp != nil && resp.Body != nil {
 				resp.Body.Close()
@@ -110,6 +132,8 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 	defer stopCollection()
 	var mu sync.RWMutex
 	plan := model.Plan{Nodes: []model.PlanNode{}}
+	planReady := make(chan struct{})
+	var planOnce sync.Once
 	done := make(chan struct{})
 	var once sync.Once
 	finish := func() { once.Do(func() { close(done); stopCollection(); conn.Close() }) }
@@ -145,6 +169,7 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 				mu.Lock()
 				plan = next
 				mu.Unlock()
+				planOnce.Do(func() { close(planReady) })
 			case "task":
 				var task model.Task
 				if dec.Decode(&task) != nil || dec.Decode(&struct{}{}) != io.EOF {
@@ -191,11 +216,19 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 		var sequence uint64
 		startupReports := startupReporter{}
 		for {
+			select {
+			case <-planReady:
+			case <-collectionCtx.Done():
+				return
+			}
 			mu.RLock()
 			current := plan
 			mu.RUnlock()
 			passCtx, cancel := context.WithTimeout(collectionCtx, 25*time.Second)
 			report := collector.Collect(passCtx, current)
+			host := agent.HostInfo(collector.HostName(passCtx), os.Getenv("AVOPS_HOST_ADDRESS"), current.ObservedAddress)
+			host.CollectedAt = report.CollectedAt
+			report.Host = &host
 			startupReports.filter(&report, time.Now().UTC())
 			cancel()
 			if len(resourceClients) > 0 && resourceClients[0] != nil {
@@ -205,7 +238,8 @@ func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector,
 			report.Sequence = sequence
 			data, err := json.Marshal(report)
 			if err != nil || len(data) > 16<<20 {
-				report = model.Report{Type: "snapshot", Sequence: sequence, CollectedAt: time.Now().UTC(), Complete: false, Error: "snapshot exceeds message budget", Containers: []model.Observation{}}
+				host.CollectedAt = time.Now().UTC()
+				report = model.Report{Host: &host, Type: "snapshot", Sequence: sequence, CollectedAt: time.Now().UTC(), Complete: false, Error: "snapshot exceeds message budget", Containers: []model.Observation{}}
 				data, _ = json.Marshal(report)
 			}
 			if !report.Complete {

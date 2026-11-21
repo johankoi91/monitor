@@ -7,11 +7,15 @@ import (
 	"testing"
 
 	"github.com/johankoi91/monitor/rtc-probe/hub"
+	"github.com/johankoi91/monitor/rtc-probe/protocol"
 )
 
 func TestRTCProbeMachineAndManagementCredentialsStaySeparate(t *testing.T) {
-	h, err := hub.New(t.TempDir(), hub.Config{Probes: []hub.ProbeConfig{{ID: "probe-a", Secret: strings.Repeat("p", 32), Location: "A"}}}, nil)
+	h, err := hub.New(t.TempDir(), hub.Config{}, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.EnrollProbe(protocol.ProbeEnrollment{Host: protocol.ProbeHostInfo{ID: "server-machine", Name: "Machine", Address: "127.0.0.1"}, HostSecret: strings.Repeat("h", 64), RuntimeID: "probe-a", RuntimeSecret: strings.Repeat("p", 32), ServiceType: "rtc", ClientType: "native", Driver: "agora"}, "127.0.0.1"); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{Store: setup(t), Probes: h, AdminID: "admin", AdminSecret: strings.Repeat("x", 32)}
@@ -21,8 +25,9 @@ func TestRTCProbeMachineAndManagementCredentialsStaySeparate(t *testing.T) {
 	}{
 		{"/api/v1/rtc/status", "admin", strings.Repeat("x", 32), 200},
 		{"/api/v1/rtc/status", "probe-a", strings.Repeat("p", 32), 401},
-		{"/api/v1/probe/connect", "admin", strings.Repeat("x", 32), 401},
-		{"/api/v1/probe/connect", "rtc-a", strings.Repeat("a", 32), 401},
+		{"/api/v1/probes/connect", "probe-a", strings.Repeat("p", 32), 400},
+		{"/api/v1/probes/connect", "admin", strings.Repeat("x", 32), 401},
+		{"/api/v1/probes/connect", "rtc-a", strings.Repeat("a", 32), 401},
 	} {
 		r := httptest.NewRequest(http.MethodGet, tc.path, nil)
 		r.SetBasicAuth(tc.id, tc.secret)
