@@ -1,0 +1,379 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/johankoi91/monitor/runtime/agent/internal/agent"
+	"github.com/johankoi91/monitor/runtime/agent/internal/docker"
+	"github.com/johankoi91/monitor/runtime/shared/cadvisor"
+	"github.com/johankoi91/monitor/runtime/shared/model"
+)
+
+func env(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+func main() {
+	endpoint := os.Getenv("AVOPS_CENTER_URL")
+	enrollToken := os.Getenv("AVOPS_AGENT_ENROLL_TOKEN")
+	dataDir := env("AVOPS_AGENT_DATA_DIR", "data/agent")
+	u, err := url.Parse(endpoint)
+	if err != nil || u.User != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.Path != "/api/v1/agent/connect" {
+		log.Fatal("AVOPS_CENTER_URL must be a credential-free Agent websocket URL")
+	}
+	if u.Scheme != "wss" {
+		ip := net.ParseIP(u.Hostname())
+		if u.Scheme != "ws" || os.Getenv("AVOPS_DEV_HTTP") != "1" || (u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback())) {
+			log.Fatal("Agent requires WSS; dev WS is limited to loopback")
+		}
+	}
+	if len(enrollToken) < 24 {
+		log.Fatal("AVOPS_AGENT_ENROLL_TOKEN with at least 24 characters required")
+	}
+	if host := os.Getenv("AVOPS_HOST_ADDRESS"); host != "" && net.ParseIP(host) == nil {
+		log.Fatal("AVOPS_HOST_ADDRESS must be an IP")
+	}
+	identity, identityErr := agent.LoadIdentity(dataDir)
+	if identityErr != nil {
+		log.Fatal("cannot load persistent Agent identity")
+	}
+	id, secret := identity.ID, identity.Secret
+	seconds, err := strconv.Atoi(env("AVOPS_COLLECT_SECONDS", "15"))
+	if err != nil || seconds < 10 || seconds > 60 {
+		log.Fatal("collection period must be 10–60 seconds")
+	}
+	collector := docker.New(env("AVOPS_DOCKER_SOCKET", "/var/run/docker.sock"), docker.Policy{RawStartup: true})
+	resources, err := cadvisor.New(os.Getenv("AVOPS_CADVISOR_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if resources != nil {
+		resources.FilesystemRoot = env("AVOPS_DOCKER_DATA_ROOT", "/var/lib/docker")
+	}
+	rules, err := agent.ReadRules(os.Getenv("AVOPS_RESTART_RULES_FILE"))
+	if err != nil {
+		log.Fatal("cannot load Agent restart rules")
+	}
+	runner, err := agent.New(dataDir, id, rules, collector)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer runner.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second, Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: os.Getenv("AVOPS_TLS_SERVER_NAME")}}
+	headers := http.Header{}
+	headers.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(id+":"+secret)))
+	backoff := time.Second
+	for ctx.Err() == nil {
+		conn, resp, err := dialer.DialContext(ctx, endpoint, headers)
+		if err != nil && resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			if resp.Body != nil {
+				resp.Body.Close()
+			}
+			resp = nil
+			enrollCtx, cancelEnroll := context.WithTimeout(ctx, 15*time.Second)
+			host := agent.HostInfo(collector.HostName(enrollCtx), os.Getenv("AVOPS_HOST_ADDRESS"), "")
+			_, enrollErr := agent.Enroll(enrollCtx, endpoint, enrollToken, identity, host, dialer.TLSClientConfig)
+			cancelEnroll()
+			if enrollErr == nil {
+				conn, resp, err = dialer.DialContext(ctx, endpoint, headers)
+			}
+		}
+		if err != nil {
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			log.Print("center connection unavailable; retrying")
+		} else {
+			log.Print("Agent connected; Docker collection active")
+			started := time.Now()
+			run(ctx, conn, collector, runner, time.Duration(seconds)*time.Second, resources)
+			conn.Close()
+			if time.Since(started) > time.Minute {
+				backoff = time.Second
+			}
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+			if backoff > 30*time.Second {
+				backoff = 30 * time.Second
+			}
+		}
+	}
+}
+
+func run(ctx context.Context, conn *websocket.Conn, collector *docker.Collector, runner *agent.Runner, period time.Duration, resourceClients ...*cadvisor.Client) {
+	collectionCtx, stopCollection := context.WithCancel(ctx)
+	defer stopCollection()
+	var mu sync.RWMutex
+	plan := model.Plan{Nodes: []model.PlanNode{}}
+	planReady := make(chan struct{})
+	var planOnce sync.Once
+	done := make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(done); stopCollection(); conn.Close() }) }
+	defer finish()
+	outbound := make(chan any, 64)
+	logDownloads := runner.NewLogDownloads()
+	defer logDownloads.Close()
+	logWorker := make(chan struct{}, 1)
+	downloadWorker := make(chan struct{}, 1)
+	var downloadMu sync.Mutex
+	downloadCancels := map[string]context.CancelFunc{}
+	var logWorkers sync.WaitGroup
+	readerDone := make(chan struct{})
+	conn.SetReadLimit(1 << 20)
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPingHandler(func(data string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return conn.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
+	})
+	go func() {
+		defer close(readerDone)
+		defer finish()
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var header struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(data, &header) != nil {
+				return
+			}
+			dec := json.NewDecoder(bytes.NewReader(data))
+			dec.DisallowUnknownFields()
+			switch header.Type {
+			case "cancel_log_download":
+				var task model.LogDownloadTask
+				if dec.Decode(&task) != nil || dec.Decode(&struct{}{}) != io.EOF {
+					return
+				}
+				downloadMu.Lock()
+				if cancel := downloadCancels[task.TransferID]; cancel != nil {
+					cancel()
+				}
+				downloadMu.Unlock()
+			case "download_logs":
+				var task model.LogDownloadTask
+				if dec.Decode(&task) != nil || dec.Decode(&struct{}{}) != io.EOF {
+					return
+				}
+				select {
+				case downloadWorker <- struct{}{}:
+					deadline := task.Deadline
+					if max := time.Now().Add(5 * time.Minute); deadline.After(max) {
+						deadline = max
+					}
+					downloadCtx, cancel := context.WithDeadline(collectionCtx, deadline)
+					downloadMu.Lock()
+					downloadCancels[task.TransferID] = cancel
+					downloadMu.Unlock()
+					logWorkers.Add(1)
+					go func() {
+						defer logWorkers.Done()
+						defer func() { <-downloadWorker }()
+						defer cancel()
+						defer func() { downloadMu.Lock(); delete(downloadCancels, task.TransferID); downloadMu.Unlock() }()
+						logDownloads.Download(downloadCtx, task, func(chunk model.LogChunk) error {
+							select {
+							case outbound <- chunk:
+								return nil
+							case <-downloadCtx.Done():
+								return downloadCtx.Err()
+							}
+						})
+					}()
+				default:
+					select {
+					case outbound <- model.LogChunk{Type: "log_chunk", ID: task.ID, TransferID: task.TransferID, Done: true, Error: "Agent 正在处理另一份日志下载，请稍后重试"}:
+					case <-collectionCtx.Done():
+						return
+					}
+				}
+			case "collect_logs":
+				var task model.LogTask
+				if dec.Decode(&task) != nil || dec.Decode(&struct{}{}) != io.EOF {
+					return
+				}
+				select {
+				case logWorker <- struct{}{}:
+					logWorkers.Add(1)
+					go func() {
+						defer logWorkers.Done()
+						defer func() { <-logWorker }()
+						deadline := task.Deadline
+						if max := time.Now().Add(5 * time.Minute); deadline.After(max) {
+							deadline = max
+						}
+						logCtx, cancel := context.WithDeadline(collectionCtx, deadline)
+						defer cancel()
+						result := logDownloads.Collect(logCtx, collector, os.Getenv("AVOPS_HOST_ROOT"), task)
+						select {
+						case outbound <- result:
+						case <-collectionCtx.Done():
+						}
+					}()
+				default:
+					select {
+					case outbound <- model.LogResult{Type: "log_result", ID: task.ID, Error: "Agent 正在收集另一份日志，请稍后重试"}:
+					case <-collectionCtx.Done():
+						return
+					}
+				}
+			case "checks":
+				var next model.Plan
+				if dec.Decode(&next) != nil || dec.Decode(&struct{}{}) != io.EOF || len(next.Nodes) > 2048 {
+					return
+				}
+				mu.Lock()
+				plan = next
+				mu.Unlock()
+				planOnce.Do(func() { close(planReady) })
+			case "task":
+				var task model.Task
+				if dec.Decode(&task) != nil || dec.Decode(&struct{}{}) != io.EOF {
+					return
+				}
+				if task.Action == "QUERY" {
+					result := runner.Query(task)
+					select {
+					case outbound <- result:
+					default:
+					}
+				} else {
+					runner.Handle(ctx, task)
+				}
+			case "result_ack":
+				var ack model.ResultAck
+				if dec.Decode(&ack) != nil || dec.Decode(&struct{}{}) != io.EOF {
+					return
+				}
+				runner.Ack(ack.OperationID)
+			default:
+				return
+			}
+			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		}
+	}()
+	defer func() { stopCollection(); conn.Close(); <-readerDone; logWorkers.Wait() }()
+	// Give the center's initial probe plan a chance to arrive without delaying shutdown.
+	initial := time.NewTimer(time.Second)
+	select {
+	case <-done:
+		initial.Stop()
+		return
+	case <-ctx.Done():
+		initial.Stop()
+		return
+	case <-initial.C:
+	}
+	var collectors sync.WaitGroup
+	collectors.Add(1)
+	go func() {
+		defer collectors.Done()
+		ticker := time.NewTicker(period)
+		defer ticker.Stop()
+		var sequence uint64
+		startupReports := startupReporter{}
+		for {
+			select {
+			case <-planReady:
+			case <-collectionCtx.Done():
+				return
+			}
+			mu.RLock()
+			current := plan
+			mu.RUnlock()
+			passCtx, cancel := context.WithTimeout(collectionCtx, 25*time.Second)
+			report := collector.Collect(passCtx, current)
+			host := agent.HostInfo(collector.HostName(passCtx), os.Getenv("AVOPS_HOST_ADDRESS"), current.ObservedAddress)
+			host.CollectedAt = report.CollectedAt
+			report.Host = &host
+			startupReports.filter(&report, time.Now().UTC())
+			cancel()
+			if len(resourceClients) > 0 && resourceClients[0] != nil {
+				resourceClients[0].Enrich(collectionCtx, &report)
+			}
+			sequence++
+			report.Sequence = sequence
+			data, err := json.Marshal(report)
+			if err != nil || len(data) > 16<<20 {
+				host.CollectedAt = time.Now().UTC()
+				report = model.Report{Host: &host, Type: "snapshot", Sequence: sequence, CollectedAt: time.Now().UTC(), Complete: false, Error: "snapshot exceeds message budget", Containers: []model.Observation{}}
+				data, _ = json.Marshal(report)
+			}
+			if !report.Complete {
+				log.Printf("collection incomplete: %s; last snapshot will age instead of reporting missing containers", report.Error)
+			}
+			select {
+			case outbound <- json.RawMessage(data):
+				startupReports.sent(report, time.Now().UTC())
+			case <-collectionCtx.Done():
+				return
+			}
+			select {
+			case <-collectionCtx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	defer func() { stopCollection(); collectors.Wait() }()
+	results := time.NewTicker(time.Second)
+	defer results.Stop()
+	write := func(value any) bool {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		return conn.WriteJSON(value) == nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case message := <-outbound:
+			if !write(message) {
+				return
+			}
+		case <-results.C:
+			items := runner.Results()
+			if len(items) > 64 {
+				items = items[:64]
+			}
+			for _, result := range items {
+				if !write(result) {
+					return
+				}
+			}
+		}
+	}
+}

@@ -1,7 +1,0 @@
-FROM scratch
-LABEL avops.probe.schema="2"
-COPY ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
-COPY center /center
-USER 65532:65532
-EXPOSE 19443
-ENTRYPOINT ["/center"]

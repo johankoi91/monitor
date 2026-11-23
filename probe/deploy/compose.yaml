@@ -1,0 +1,55 @@
+name: avops-probe
+services:
+  probe:
+    image: avops-probe:V1.0
+    pull_policy: never
+    container_name: ${CONTAINER_NAME:-avops-probe}
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 35s
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
+    cpus: ${CPUS:-2}
+    mem_limit: ${MEMORY:-2048m}
+    pids_limit: 2048
+    shm_size: 512m
+    environment:
+      AVOPS_PROBE_CONFIG: /config/probe-client.env
+      AVOPS_PROBE_HOST_DIR: /host
+      AVOPS_PROBE_DATA_DIR: /data
+      AVOPS_PROBE_HOST_ADDRESS: ${HOST_ADDRESS:-}
+      AVOPS_PROBE_HOST_NAME: ${HOST_NAME:-}
+      AVOPS_PROBE_LOCATION: ${LOCATION:-}
+      AVOPS_PROBE_NATIVE_CAPACITY: ${NATIVE_CAPACITY:-1}
+      AVOPS_PROBE_WEB_CAPACITY: ${WEB_CAPACITY:-1}
+      AVOPS_PROBE_CPU_BUDGET: ${CPUS:-2}
+      AVOPS_PROBE_MEMORY_BUDGET: ${MEMORY:-2048m}
+    extra_hosts:
+      - "${CENTER_HOST:-localhost}:${CENTER_IP:-127.0.0.1}"
+    tmpfs: ["/tmp:size=512m,mode=1777"]
+    volumes:
+      - type: bind
+        source: ${CONFIG_DIR:-./config}
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOST_DIR:-./data/host}
+        target: /host
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${CLIENTS_DIR:-./data/clients}
+        target: /data
+        bind: {create_host_path: true}
+    healthcheck:
+      test: [CMD, /probe-server, health]
+      interval: 15s
+      timeout: 3s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

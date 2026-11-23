@@ -1,0 +1,45 @@
+name: avops-agent
+services:
+  agent:
+    image: avops-agent:V1.0
+    pull_policy: never
+    container_name: ${CONTAINER_NAME:-avops-agent}
+    hostname: ${HOST_NAME:-avops-agent}
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 45s
+    read_only: true
+    privileged: true
+    security_opt: [no-new-privileges:true]
+    cpus: ${CPUS:-1}
+    mem_limit: ${MEMORY:-512m}
+    pids_limit: 1024
+    environment:
+      AVOPS_AGENT_CONFIG: /config/agent.env
+      AVOPS_AGENT_DATA_DIR: /state
+      AVOPS_HOST_ADDRESS: ${HOST_ADDRESS:-}
+      AVOPS_COLLECT_SECONDS: ${COLLECT_SECONDS:-15}
+      AVOPS_DOCKER_DATA_ROOT: ${DOCKER_ROOT:-/var/lib/docker}
+      AVOPS_TLS_SERVER_NAME: ${TLS_SERVER_NAME:-}
+    extra_hosts:
+      - "${CENTER_HOST:-localhost}:${CENTER_IP:-127.0.0.1}"
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    volumes:
+      - type: bind
+        source: ${CONFIG_DIR:-./config}
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${DATA_DIR:-./data}
+        target: /state
+        bind: {create_host_path: true}
+      - /var/run:/var/run:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /sys:/sys:ro
+      - /:/host:ro,rslave
+      - /:/rootfs:ro,rslave
+      - ${DOCKER_ROOT:-/var/lib/docker}:${DOCKER_ROOT:-/var/lib/docker}:ro,rslave
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

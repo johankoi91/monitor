@@ -1,0 +1,72 @@
+name: avops-center
+services:
+  center:
+    image: avops-center:V1.0
+    pull_policy: never
+    container_name: ${CONTAINER_NAME:-avops-center}
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 45s
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID, KILL]
+    cpus: ${CPUS:-4}
+    mem_limit: ${MEMORY:-3072m}
+    pids_limit: 1024
+    environment:
+      AVOPS_PUBLIC_URL: ${CENTER_URL:?Set CENTER_URL in .env}
+      AVOPS_SITE_CODE: ${SITE_CODE:-customer}
+      AVOPS_SITE_NAME: ${SITE_NAME:-客户监控}
+      AVOPS_PRIVATE_DIR: /private
+      AVOPS_RUNTIME_CONFIG_DIR: /config
+      AVOPS_PG_INIT_DIR: /docker-entrypoint-initdb.d
+      AVOPS_DATA_DIR: /state
+      AVOPS_RECEIVER_DATA_DIR: /receiver
+      AVOPS_TLS_SOURCE_CERT: /input/server.pem
+      AVOPS_TLS_SOURCE_KEY: /input/server-key.pem
+      AVOPS_CENTER_LOCAL_ADDR: ${CENTER_LOCAL_ADDR:-127.0.0.1:18084}
+      AVOPS_RECEIVER_ADDR: ${RECEIVER_ADDR:-0.0.0.0:18443}
+      AVOPS_ALLOWED_IPS: ${ALLOWED_IPS:-}
+      PGDATA: /postgres
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+      - /var/run/postgresql:uid=999,gid=999,mode=0755
+    volumes:
+      - type: bind
+        source: ${CONFIG_DIR:-./config}
+        target: /private
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${RUNTIME_DIR:-./data/runtime-config}
+        target: /config
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${PG_INIT_DIR:-./data/pg-init}
+        target: /docker-entrypoint-initdb.d
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${STATE_DIR:-./data/center}
+        target: /state
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${POSTGRES_DIR:-./data/postgres}
+        target: /postgres
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${RECEIVER_DIR:-./data/receiver}
+        target: /receiver
+        bind: {create_host_path: true}
+      - type: bind
+        source: ${TLS_CERT_FILE:-./tls/server.pem}
+        target: /input/server.pem
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${TLS_KEY_FILE:-./tls/server-key.pem}
+        target: /input/server-key.pem
+        read_only: true
+        bind: {create_host_path: false}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}

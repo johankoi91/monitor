@@ -29,8 +29,8 @@ receiver-curl.conf
 node_modules/
 dist/
 build/
-/notification_receiver/notification-receiver
-/notification_receiver/avops_notification_receiver
+/center/cmd/notification-receiver/notification-receiver
+/center/cmd/notification-receiver/avops_notification_receiver
 
 # Offline delivery archives and original recordings
 *.tar
@@ -43,6 +43,5 @@ build/
 *.wav
 
 # Generated offline delivery trees and Python bytecode
-/releases/avops-monitor-*/
-/releases/avops-monitor-*.sha256
+/releases/
 __pycache__/
